@@ -26,6 +26,10 @@
     --warn: #8a5a00;
     --warn-soft: #fbf1dc;
     --mark: #ffe58a;
+    --opus: #2457c5;
+    --sonnet: #7445b8;
+    --haiku: #1d7a4a;
+    --code: #6f6f68;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
@@ -48,6 +52,10 @@
       --warn: #f0c56b;
       --warn-soft: #3a2f17;
       --mark: #6b5a17;
+      --opus: #84a9f5;
+      --sonnet: #c4a4f6;
+      --haiku: #8fd3a6;
+      --code: #9d9c94;
       color-scheme: dark;
     }
   }
@@ -70,6 +78,10 @@
     --warn: #f0c56b;
     --warn-soft: #3a2f17;
     --mark: #6b5a17;
+      --opus: #84a9f5;
+      --sonnet: #c4a4f6;
+      --haiku: #8fd3a6;
+      --code: #9d9c94;
     color-scheme: dark;
   }
 
@@ -228,7 +240,7 @@
   th { color: var(--ink-2); font-weight: 600; white-space: nowrap; }
   tbody tr:last-child td { border-bottom: 0; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  td.quote { min-width: 260px; color: var(--ink-2); }
+  td.quote { min-width: 200px; color: var(--ink-2); }
   td.quote q { quotes: '“' '”'; }
   td.quote span { display: block; color: var(--muted); font-size: 12px; }
 
@@ -243,11 +255,88 @@
   footer p { margin: 0 0 4px; max-width: 90ch; }
   footer a { color: inherit; }
 
+
+  .top-right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+  #activity-toggle { display: inline-flex; align-items: center; gap: 6px; }
+  #activity-toggle[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent); }
+  .pulse, .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--haiku); display: inline-block; animation: pulse 1.2s ease-in-out infinite; }
+  .live-dot { margin-left: 6px; }
+  @keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .pulse, .live-dot { animation: none; } }
+
+  .steps { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .steps [role="tab"] {
+    display: inline-flex; align-items: center; gap: 8px; flex: 1 1 0; min-width: max-content; justify-content: center; white-space: nowrap;
+    font: inherit; font-weight: 600; font-size: 14.5px; padding: 8px 14px; border: 0; border-radius: 8px;
+    background: transparent; color: var(--ink-2); cursor: pointer;
+  }
+  .steps [role="tab"]:hover { background: var(--surface-2); }
+  .steps [role="tab"][aria-selected="true"] { background: var(--accent); color: var(--accent-ink); }
+  .steps [role="tab"][aria-disabled="true"] { color: var(--muted); opacity: .55; cursor: default; background: transparent; }
+  .steps .num { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid currentColor; font-size: 12px; }
+  .steps .count:not(:empty) { font-size: 12px; font-weight: 600; padding: 0 7px; border-radius: 999px; background: var(--surface-2); color: var(--ink); }
+  .steps [aria-selected="true"] .count:not(:empty) { background: var(--accent-ink); color: var(--accent); }
+  .steps [aria-selected="true"] .live-dot { background: var(--accent-ink); }
+
+  .source-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 12px; }
+  .source-counts div { padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14px; color: var(--ink-2); }
+  .source-counts strong { display: block; color: var(--ink); font-size: 14.5px; margin-bottom: 2px; }
+  .segmented { display: inline-flex; flex-wrap: wrap; gap: 0; margin: 14px 0 0; border: 1px solid var(--field-line); border-radius: 10px; overflow: hidden; }
+  .segmented button { font: inherit; font-weight: 600; font-size: 14px; padding: 7px 16px; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; }
+  .segmented button + button { border-left: 1px solid var(--field-line); }
+  .segmented button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); }
+
+  .layout.with-activity { grid-template-columns: 200px minmax(0, 1fr) 340px; max-width: 1680px; gap: 20px; }
+  @media (min-width: 1500px) { .layout.with-activity { grid-template-columns: 240px minmax(0, 1fr) 400px; } }
+  .activity {
+    align-self: start; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+  }
+  .activity-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .activity-head h2 { font-size: 16px; }
+  .agents { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .agent { border: 1px solid var(--line); border-left: 4px solid var(--agent); border-radius: 10px; padding: 8px 10px; min-width: 0; }
+  .agent h3 { font-size: 13.5px; display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; white-space: nowrap; }
+  .agent p { margin: 2px 0 0; }
+  .agent .role { flex-basis: 100%; color: var(--muted); font-size: 12px; font-weight: 400; }
+  .agent .now { margin: 4px 0 0; font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; min-height: 2.6em;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+  .agent .stats { margin: 4px 0 0; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .agent[data-busy="true"] { background: color-mix(in srgb, var(--agent) 8%, transparent); }
+  .agent[data-busy="true"] .pulse { background: var(--agent); }
+  [data-agent="opus"] { --agent: var(--opus); }
+  [data-agent="sonnet"] { --agent: var(--sonnet); }
+  [data-agent="haiku"] { --agent: var(--haiku); }
+  [data-agent="code"] { --agent: var(--code); }
+  .filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; }
+  .filter button { font: inherit; font-size: 12.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--field-line); background: transparent; color: var(--ink-2); cursor: pointer; }
+  .filter button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .timeline { list-style: none; margin: 0; padding: 0; }
+  .timeline li { position: relative; padding: 7px 0 7px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .timeline li::before { content: ''; position: absolute; left: 2px; top: 13px; width: 7px; height: 7px; border-radius: 50%; background: var(--agent); }
+  .timeline .when { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .timeline .who { font-weight: 600; color: var(--agent); font-size: 11.5px; margin-left: 6px; }
+  .timeline .what { display: block; color: var(--ink); overflow-wrap: anywhere; }
+  .timeline .detail { display: block; color: var(--ink-2); overflow-wrap: anywhere; }
+  .timeline li[data-phase="error"] .detail { color: var(--error); }
+  .timeline li[data-phase="flag"] .detail { color: var(--warn); }
+
+  @media (max-width: 1279px) {
+    .layout.with-activity { grid-template-columns: 260px minmax(0, 1fr); max-width: 1240px; }
+    .activity {
+      position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 100vw); max-height: none; z-index: 30;
+      border-radius: 0; border-width: 0 0 0 1px; box-shadow: -8px 0 24px rgb(0 0 0 / .18);
+    }
+  }
+
   @media (max-width: 800px) {
     .top { padding: 12px 16px; }
     .intro { padding: 20px 16px 0; }
     .intro h2 { font-size: 20px; }
     .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 16px; }
+    .layout.with-activity { grid-template-columns: minmax(0, 1fr); }
+    .agents { grid-template-columns: 1fr; }
+    .steps [role="tab"] { padding: 7px 10px; font-size: 13.5px; }
     .projects { position: static; }
     .projects ul { max-height: 30vh; }
     .card { padding: 16px; }
@@ -258,13 +347,18 @@
 <body>
 <header class="top">
   <div class="brand"><h1>Effect Size Finder</h1></div>
-  <p id="models" class="status" aria-live="polite"></p>
+  <div class="top-right">
+    <p id="models" class="status"></p>
+    <button id="activity-toggle" type="button" class="secondary small" aria-expanded="false" aria-controls="activity">
+      <span class="pulse" aria-hidden="true" hidden></span>Agent activity
+    </button>
+  </div>
 </header>
 
 <section class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published numbers a study plan needs</h2>
   <p class="lede">Describe the study you are planning. Claude searches PubMed and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include. Everything runs in this page, with your own Anthropic API key.</p>
-  <ul class="points">
+  <ul id="points" class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
       <p>PubMed, results posted on ClinicalTrials.gov, and open-access full text from PubMed Central and Unpaywall. PDFs the browser can't download, Claude fetches.</p>
@@ -306,8 +400,14 @@
   </aside>
 
   <main>
-    <section id="problem" class="card" aria-labelledby="problem-title">
-      <p class="eyebrow">Step 1</p>
+    <nav class="steps" role="tablist" aria-label="Steps">
+      <button id="tab-problem" role="tab" type="button" aria-controls="problem" data-step="problem"><span class="num">1</span>Describe</button>
+      <button id="tab-spec" role="tab" type="button" aria-controls="spec" data-step="spec"><span class="num">2</span>What to look for</button>
+      <button id="tab-progress" role="tab" type="button" aria-controls="progress-card" data-step="progress"><span class="num">3</span>Search<span class="live-dot" aria-hidden="true" hidden></span></button>
+      <button id="tab-review" role="tab" type="button" aria-controls="review" data-step="review"><span class="num">4</span>Review<span id="review-count" class="count"></span></button>
+    </nav>
+
+    <section id="problem" class="card" role="tabpanel" aria-labelledby="tab-problem">
       <h2 id="problem-title">Describe the study</h2>
       <p class="summary">A short paragraph is enough: who is studied, what is compared, the outcome, and when it is measured.</p>
       <label for="paragraph" class="sr-only">Study description</label>
@@ -320,8 +420,7 @@
       <div id="problem-error" class="error" role="alert" hidden></div>
     </section>
 
-    <section id="spec" class="card" aria-labelledby="spec-title" hidden>
-      <p class="eyebrow">Step 2</p>
+    <section id="spec" class="card" role="tabpanel" aria-labelledby="tab-spec" hidden>
       <h2 id="spec-title">Check what to look for</h2>
       <p id="spec-question" class="summary"></p>
       <form id="spec-form" novalidate>
@@ -355,12 +454,12 @@
       </form>
     </section>
 
-    <section id="progress-card" class="card" aria-labelledby="progress-title" hidden>
-      <p class="eyebrow">Step 3</p>
+    <section id="progress-card" class="card" role="tabpanel" aria-labelledby="tab-progress" hidden>
       <h2 id="progress-title">Search and extraction</h2>
       <ol id="stages" class="stages"></ol>
       <progress id="progress" max="1" value="0"></progress>
       <p id="progress-text" aria-live="polite"></p>
+      <div id="source-counts" class="source-counts"></div>
       <p id="keep-open" class="notice" hidden>Keep this tab open until the search finishes. If it closes, open the search again and choose Continue.</p>
       <div id="run-error" class="error" role="alert" hidden></div>
       <div class="actions"><button id="continue" type="button" class="primary" hidden>Continue</button></div>
@@ -375,11 +474,11 @@
       </details>
     </section>
 
-    <section id="review" class="card" aria-labelledby="review-title" hidden>
-      <p class="eyebrow">Step 4</p>
+    <section id="review" class="card" role="tabpanel" aria-labelledby="tab-review" hidden>
       <h2 id="review-title">Review what was found</h2>
       <p class="summary">Include or exclude each result. A result's decision overrides one made for its whole paper.</p>
-      <div id="tabs" class="tabs" role="group" aria-label="Show papers"></div>
+      <div id="source-switch" class="segmented" role="group" aria-label="Source"></div>
+      <div id="tabs" class="tabs" role="group" aria-label="Show"></div>
       <div class="exports">
         <button id="export-included" type="button" class="secondary small">CSV: included results</button>
         <button id="export-all" type="button" class="secondary small">CSV: everything extracted</button>
@@ -389,6 +488,17 @@
       <input id="upload" class="file-input" type="file" accept="application/pdf" tabindex="-1" aria-hidden="true">
     </section>
   </main>
+
+  <aside id="activity" class="activity" aria-labelledby="activity-title" hidden>
+    <div class="activity-head">
+      <h2 id="activity-title">Agent activity</h2>
+      <button id="activity-close" type="button" class="secondary small">Close</button>
+    </div>
+    <p class="muted small" id="activity-empty">Open a search to see what the agents are doing.</p>
+    <div id="agents" class="agents"></div>
+    <div id="activity-filter" class="filter" role="group" aria-label="Show steps by"></div>
+    <ol id="timeline" class="timeline" aria-live="off"></ol>
+  </aside>
 </div>
 
 <dialog id="source-dialog" aria-labelledby="source-title">

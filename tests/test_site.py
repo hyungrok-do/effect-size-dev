@@ -251,10 +251,41 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.wait_for_selector("#spec:not([hidden])")
     assert page.input_value("#f-population") == "University students"
     page.click("#run")
-    page.wait_for_selector("#stages li[data-state='done']:has-text('Ready for review')", timeout=30000)
+    # The page shows the search while it runs and moves on to the review when it finishes (it only
+    # does that when the search tab is the one open, so this also shows the search tab was followed).
+    page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
     page.wait_for_selector("#review:not([hidden]) .paper")
+    assert page.is_hidden("#progress-card") and page.is_hidden("#spec") and page.is_hidden("#problem")
+
+    # Papers and registry records are reviewed separately.
+    sources = page.locator("#source-switch button").all_inner_texts()
+    assert sources == ["Papers (PubMed) · 3 extracted of 4", "ClinicalTrials.gov · 1 extracted of 1"], sources
     tabs = page.locator("#tabs button").all_inner_texts()
-    assert tabs[0] == "Extracted (4)" and tabs[3] == "Screened out (1)", tabs
+    assert tabs[0] == "Extracted (3)" and tabs[3] == "Screened out (1)", tabs
+    page.click("#source-switch button:has-text('ClinicalTrials.gov')")
+    assert page.locator("#papers .paper").all_inner_texts()[0].startswith("A Randomized Trial of a Mindfulness App")
+    page.click("#source-switch button:has-text('Papers')")
+    page.click("#tab-progress")
+    counts = page.locator("#source-counts div").all_inner_texts()
+    assert counts == ["Papers (PubMed)\n4 found · 3 kept after screening · 3 extracted",
+                      "ClinicalTrials.gov\n1 found · 1 kept after screening · 1 extracted"], counts
+    page.click("#tab-review")
+
+    # The activity panel: what each agent did, newest first.
+    assert page.is_visible("#activity")
+    agents = page.locator("#agents .agent").all_inner_texts()
+    names = [" ".join(x.split()) for x in page.locator("#agents .agent h3").all_inner_texts()]
+    assert names == ["Opus 5.5 manager", "Sonnet 5.5 fetcher", "Haiku 5.5 workers", "Code search and checks"], names
+    assert "calls" in agents[0] and "Idle" in agents[0]
+    timeline = "\n".join(page.locator("#timeline li").all_inner_texts())
+    for expected in ("Reading the problem", "Tries PubMed: mindfulness", "Planning the search", "Collected 5 records to screen",
+                     "Screening “Stress responses in a mouse model", "exclude: Animal study.",
+                     "Fetching example.org, which the browser may not read", "PDF, 1 KB",
+                     "Extracting “Brief mindfulness training", "Reviewing “Mindfulness groups", "Search finished"):
+        assert expected in timeline, expected
+    page.click("#activity-filter button:has-text('Sonnet')")
+    assert page.locator("#timeline li .who").all_inner_texts() == ["Sonnet 5.5"]
+    page.click("#activity-filter button:has-text('All')")
 
     assert network.refused == [PDF_URL]  # tried once directly, then fetched through Claude
     pdf_paper = page.locator(".paper", has_text="Brief mindfulness training")
@@ -316,17 +347,26 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.wait_for_selector("#continue:not([hidden])")
     assert "before it finished" in page.inner_text("#project-list")
     page.click("#continue")
-    page.wait_for_selector("#stages li[data-state='done']:has-text('Ready for review')", timeout=30000)
-    page.wait_for_function("document.querySelector('#tabs button').textContent === 'Extracted (4)'")
+    page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
+    page.wait_for_function("document.querySelector('#tabs button').textContent === 'Extracted (3)'")
+    assert "Continuing the search" in page.inner_text("#timeline")
 
     phone = context.new_page()
     phone.set_viewport_size({"width": 390, "height": 844})
     phone.goto(page.url)
     phone.wait_for_selector("#review:not([hidden]) .paper")
     assert phone.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") == 0
+    # On a narrow screen the activity panel covers the page, so it waits to be asked for.
+    assert not phone.is_visible("#activity")
     if os.environ.get("ESF_SCREENSHOTS"):
         page.screenshot(path=os.path.join(os.environ["ESF_SCREENSHOTS"], "site-review.png"), full_page=True)
         phone.screenshot(path=os.path.join(os.environ["ESF_SCREENSHOTS"], "site-phone.png"), full_page=True)
+    phone.click("#activity-toggle")
+    assert phone.is_visible("#activity")
+    if os.environ.get("ESF_SCREENSHOTS"):
+        phone.screenshot(path=os.path.join(os.environ["ESF_SCREENSHOTS"], "site-phone-activity.png"))
+    phone.keyboard.press("Escape")
+    assert not phone.is_visible("#activity")
     context.close()
     assert errors == []
 

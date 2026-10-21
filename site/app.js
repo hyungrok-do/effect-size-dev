@@ -1,6 +1,7 @@
 // Effect Size Finder, browser edition: the whole app runs in this page. Searches are kept in
 // IndexedDB; Claude is called with the user's own key; nothing goes to a server of ours.
 
+import { Activity, liveTasks, short } from './lib/activity.js';
 import { Claude, looksLikeAnthropicKey, MODELS } from './lib/claude.js';
 import { download, exportRows, PAPER, toCsv } from './lib/export.js';
 import { Pipeline } from './lib/pipeline.js';
@@ -52,6 +53,18 @@ const TABS = [
   ['pending', 'In progress'],
   ['excluded', 'Screened out'],
 ];
+const STEPS = ['problem', 'spec', 'progress', 'review'];
+const PANELS = { problem: '#problem', spec: '#spec', progress: '#progress-card', review: '#review' };
+const SOURCES = [['pubmed', 'Papers (PubMed)'], ['clinicaltrials', 'ClinicalTrials.gov']];
+const version = (model) => model.replace(/^claude-[a-z]+-/, '').replace('-', '.');
+const AGENTS = [
+  ['opus', `Opus ${version(MODELS.manager)}`, 'manager', 'Reads the problem, plans the search, reviews flagged extractions'],
+  ['sonnet', `Sonnet ${version(MODELS.fetcher)}`, 'fetcher', 'Downloads what the browser may not read'],
+  ['haiku', `Haiku ${version(MODELS.worker)}`, 'workers', 'Screen every record and extract every paper'],
+  ['code', 'Code', 'search and checks', 'Runs the searches, gets the text, checks every quote'],
+];
+const AGENT_NAMES = Object.fromEntries(AGENTS.map(([key, name]) => [key, name]));
+const ACTIVITY_OPEN = 'esf-activity-open';
 const KEY = 'esf-anthropic-api-key';
 const EMAIL = 'esf-contact-email';
 const NCBI_KEY = 'esf-ncbi-api-key';
@@ -59,7 +72,11 @@ const NCBI_KEY = 'esf-ncbi-api-key';
 const $ = (selector) => document.querySelector(selector);
 const store = new Store();
 const jobs = new Set(); // projects and papers with work running in this tab
-const state = { id: null, project: null, papers: [], decisions: {}, usage: [], tab: 'extracted', specKey: '', papersKey: '', uploadFor: null };
+const state = {
+  id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
+  uploadFor: null, step: 'problem', stepChosen: false, source: 'pubmed', filter: 'all',
+  available: { problem: true, spec: false, progress: false, review: false },
+};
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -190,31 +207,45 @@ function haveKey() {
 // A pipeline wired to the settings as they are when a job starts.
 function pipeline(projectId) {
   const claude = new Claude({ apiKey: apiKey() });
+  const activity = new Activity(store, projectId);
   const sources = new Sources({
     email: $('#contact-email').value.trim(),
     ncbiApiKey: $('#ncbi-key').value.trim(),
-    proxy: (url) => claude.fetchUrl(url, { sink: (step, model, usage) => store.addUsage(projectId, step, model, usage) }),
+    proxy: (url) => activity.track(
+      { agent: 'sonnet', step: 'fetch', text: `Fetching ${new URL(url).host}, which the browser may not read` },
+      () => claude.fetchUrl(url, { sink: (step, model, usage) => store.addUsage(projectId, step, model, usage) }),
+      (doc) => (doc.kind === 'pdf' ? `PDF, ${Math.round((doc.base64.length * 3) / 4 / 1024)} KB` : `text, ${Math.round(doc.text.length / 1024)} KB`),
+    ),
   });
-  return new Pipeline({ store, claude, sources });
+  return new Pipeline({ store, claude, sources, activity });
 }
 
-async function startJob(key, work) {
+// `then(projectId)` runs after the job, once the page shows its results: that is where the page
+// moves on to the next step (the redraws are throttled, so watching statuses could miss a quick job).
+async function startJob(key, work, then = null) {
   if (jobs.has(key)) return;
   jobs.add(key);
   try {
     await work();
   } finally {
     jobs.delete(key);
-    refresh();
+    await refreshNow();
+    then?.();
     loadProjects();
   }
 }
+
+// After a job: go to `step` if the page is still on the search and on `from`.
+const moveOn = (projectId, from, step) => () => {
+  if (state.id === projectId && state.step === from) selectStep(step);
+};
 
 // -- projects list ---------------------------------------------------------------
 
 async function loadProjects() {
   const list = $('#project-list');
   const projects = await store.projects();
+  $('#points').hidden = projects.length > 0;
   if (!projects.length) {
     list.replaceChildren(h('li', { class: 'muted small' }, 'None yet.'));
     return;
@@ -229,7 +260,11 @@ async function loadProjects() {
 }
 
 function newSearch() {
-  Object.assign(state, { id: null, project: null, papers: [], decisions: {}, usage: [], specKey: '', papersKey: '' });
+  Object.assign(state, {
+    id: null, project: null, papers: [], decisions: {}, usage: [], events: [], specKey: '', papersKey: '',
+    step: 'problem', stepChosen: false,
+    available: { problem: true, spec: false, progress: false, review: false },
+  });
   history.replaceState(null, '', location.pathname);
   const paragraph = $('#paragraph');
   paragraph.value = '';
@@ -239,13 +274,17 @@ function newSearch() {
   $('#delete-project').hidden = true;
   $('#read-status').textContent = '';
   showError($('#problem-error'), '');
-  for (const id of ['#spec', '#progress-card', '#review']) $(id).hidden = true;
+  renderTabs();
+  renderActivity();
   loadProjects();
   paragraph.focus();
 }
 
 async function openProject(id) {
-  Object.assign(state, { id, project: null, papers: [], decisions: {}, usage: [], specKey: '', papersKey: '' });
+  Object.assign(state, {
+    id, project: null, papers: [], decisions: {}, usage: [], events: [], specKey: '', papersKey: '',
+    stepChosen: false,
+  });
   history.replaceState(null, '', `#${id}`);
   await refresh();
   if (!state.project) {
@@ -265,45 +304,199 @@ async function deleteProject() {
 let refreshing = null;
 let again = false;
 
-// Re-read the open search from storage and redraw. Calls during a redraw are folded into one more.
+// Re-read the open search from storage and redraw. Calls during a redraw are folded into one more,
+// which runs once this one has finished.
 async function refresh() {
   if (refreshing) {
     again = true;
     return refreshing;
   }
   refreshing = (async () => {
-    do {
+    {
       again = false;
-      if (!state.id) break;
+      if (!state.id) return;
       const id = state.id;
       const project = await store.project(id);
-      if (id !== state.id) continue;
+      if (id !== state.id) {
+        again = true;
+        return;
+      }
       state.project = project;
-      if (!project) break;
+      if (!project) return;
       project.counts = await store.statusCounts(id);
       state.papers = await store.papers(id);
       state.decisions = await store.decisions(id);
       state.usage = await store.usage(id);
+      state.events = await store.events(id);
       renderProblem(project);
       renderSpec(project);
       renderProgress(project);
-      if (state.papers.length) renderReview();
-      else $('#review').hidden = true;
-    } while (again);
+      state.available.review = state.papers.length > 0;
+      if (state.available.review) renderReview();
+      followTheWork(project);
+      renderTabs();
+      renderActivity();
+    }
   })();
   try {
     await refreshing;
   } finally {
     refreshing = null;
+    if (again) scheduleRefresh();
   }
 }
 
+// A redraw that starts after everything written so far: wait out one in progress, which may have
+// read storage before the latest change.
+async function refreshNow() {
+  while (refreshing) await refreshing;
+  await refresh();
+}
+
+// While a search runs, storage changes many times a second. Redraw at most every 0.4 s, so the page
+// stays responsive and the pipeline isn't slowed by reading its own results back.
 let pending = null;
+let lastRefresh = 0;
+function scheduleRefresh() {
+  if (pending) return;
+  pending = setTimeout(async () => {
+    pending = null;
+    lastRefresh = performance.now();
+    await refresh();
+  }, Math.max(0, 400 - (performance.now() - lastRefresh)));
+}
 store.addEventListener('change', (event) => {
-  if (event.detail.projectId !== state.id) return;
-  clearTimeout(pending);
-  pending = setTimeout(refresh, 150);
+  if (event.detail.projectId === state.id) scheduleRefresh();
 });
+store.addEventListener('live', (event) => {
+  if (event.detail.projectId !== state.id) return;
+  renderAgents();
+  $('#tab-progress .live-dot').hidden = !jobs.has(state.id);
+});
+
+// -- steps as tabs -------------------------------------------------------------------
+
+function defaultStep(project) {
+  const searching = RUNNING.has(project.status) && project.status !== 'reading';
+  if (searching || (['interrupted', 'error'].includes(project.status) && state.available.progress)) return 'progress';
+  if (state.available.review) return 'review';
+  if (state.available.spec) return 'spec';
+  return 'problem';
+}
+
+// When a search is opened, show the step it has reached. After that the page only moves on when one
+// of its own jobs finishes (see moveOn), so a step you picked yourself is left alone.
+function followTheWork(project) {
+  if (state.stepChosen) return;
+  state.stepChosen = true;
+  state.step = defaultStep(project);
+}
+
+function renderTabs() {
+  if (!state.available[state.step]) {
+    state.step = STEPS.slice(0, STEPS.indexOf(state.step) + 1).reverse().find((step) => state.available[step]) || 'problem';
+  }
+  for (const step of STEPS) {
+    const tab = $(`#tab-${step}`);
+    const selected = step === state.step;
+    tab.setAttribute('aria-selected', String(selected));
+    tab.setAttribute('aria-disabled', String(!state.available[step]));
+    tab.tabIndex = selected ? 0 : -1;
+    $(PANELS[step]).hidden = !selected;
+  }
+  $('#tab-progress .live-dot').hidden = !jobs.has(state.id);
+}
+
+function selectStep(step, focus = false) {
+  if (!state.available[step]) return;
+  state.step = step;
+  renderTabs();
+  if (focus) $(`#tab-${step}`).focus();
+}
+
+function tabKeys(event) {
+  const open = STEPS.filter((step) => state.available[step]);
+  const at = open.indexOf(state.step);
+  const to = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: open.length - 1 }[event.key];
+  if (to === undefined) return;
+  event.preventDefault();
+  selectStep(open[(to + open.length) % open.length], true);
+}
+
+// -- agent activity --------------------------------------------------------------------
+
+const STEP_AGENT = { spec: 'opus', search: 'opus', adjudicate: 'opus', fetch: 'sonnet', screen: 'haiku', extract: 'haiku' };
+const seconds = (since) => `${Math.max(0, Math.round((Date.now() - since) / 1000))} s`;
+const duration = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
+const tokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+let ticking = null;
+
+// `remember` is false for the page's own default, so only a person's choice is kept.
+function setActivityOpen(open, remember = true) {
+  $('#activity').hidden = !open;
+  $('.layout').classList.toggle('with-activity', open);
+  $('#activity-toggle').setAttribute('aria-expanded', String(open));
+  if (remember) writeSetting(ACTIVITY_OPEN, open ? 'open' : 'closed');
+  renderActivity();
+}
+
+function renderAgents() {
+  const busy = state.id ? liveTasks(state.id) : [];
+  $('#activity-toggle .pulse').hidden = busy.length === 0;
+  if ($('#activity').hidden) return busy;
+  const totals = {};
+  for (const u of state.usage) {
+    const agent = STEP_AGENT[u.step];
+    if (!agent) continue;
+    const t = (totals[agent] ||= { calls: 0, input: 0, output: 0 });
+    t.calls += u.calls;
+    t.input += u.input_tokens + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    t.output += u.output_tokens;
+  }
+  const codeSteps = state.events.filter((e) => e.agent === 'code').length;
+  $('#agents').replaceChildren(...(state.id ? AGENTS : []).map(([key, name, role, does]) => {
+    const mine = busy.filter((task) => task.agent === key);
+    const latest = mine[mine.length - 1];
+    let now = 'Idle';
+    if (mine.length === 1) now = `${latest.text} · ${seconds(latest.started)}`;
+    if (mine.length > 1) now = `${mine.length} at work · latest: ${short(latest.text, 60)}`;
+    const t = totals[key];
+    const stats = key === 'code' ? `${codeSteps} steps logged`
+      : t ? `${t.calls} calls · ${tokens(t.input)} tokens in · ${tokens(t.output)} out` : 'No calls yet';
+    return h('section', { class: 'agent', 'data-agent': key, 'data-busy': String(mine.length > 0), title: does },
+      h('h3', {}, h('span', { class: 'pulse', 'aria-hidden': 'true', hidden: !mine.length || null }), name, ' ',
+        h('span', { class: 'role' }, role)),
+      h('p', { class: 'now', title: mine.length ? now : null }, now),
+      h('p', { class: 'stats' }, stats));
+  }));
+  return busy;
+}
+
+function renderActivity() {
+  const busy = renderAgents();
+  if (busy.length && !ticking) ticking = setInterval(renderAgents, 1000);
+  if (!busy.length && ticking) {
+    clearInterval(ticking);
+    ticking = null;
+  }
+  if ($('#activity').hidden) return;
+  $('#activity-empty').hidden = Boolean(state.id);
+  const counts = { all: state.events.length };
+  for (const e of state.events) counts[e.agent] = (counts[e.agent] || 0) + 1;
+  $('#activity-filter').replaceChildren(...(state.id ? [['all', 'All'], ...AGENTS.map(([key, name]) => [key, name])] : [])
+    .map(([key, label]) => h('button', {
+      type: 'button', 'aria-pressed': String(state.filter === key), 'data-agent': key === 'all' ? null : key,
+      onclick: () => { state.filter = key; renderActivity(); },
+    }, `${label} ${counts[key] || 0}`)));
+  const shown = state.events.filter((e) => state.filter === 'all' || e.agent === state.filter).slice(0, 250);
+  $('#timeline').replaceChildren(...(shown.length ? shown.map((e) => h('li', { 'data-agent': e.agent, 'data-phase': e.phase },
+    h('span', { class: 'when' }, new Date(e.at).toLocaleTimeString()),
+    h('span', { class: 'who' }, AGENT_NAMES[e.agent] || e.agent),
+    e.ms != null && h('span', { class: 'when' }, ` · ${duration(e.ms)}`),
+    h('span', { class: 'what' }, e.text),
+    e.detail && h('span', { class: 'detail' }, e.phase === 'error' ? `Failed: ${e.detail}` : e.detail),
+  )) : state.id ? [h('li', { class: 'muted' }, 'Nothing has happened yet.')] : []));
+}
 
 // -- step 1 ----------------------------------------------------------------------
 
@@ -327,7 +520,7 @@ async function readProblem() {
     // Retrying a search whose reading failed or was cut short.
     if (!haveKey()) return;
     const id = state.project.id;
-    startJob(id, () => pipeline(id).readSpec(id));
+    startJob(id, () => pipeline(id).readSpec(id), moveOn(id, 'problem', 'spec'));
     return;
   }
   if (text.length < 20) {
@@ -337,7 +530,7 @@ async function readProblem() {
   if (!haveKey()) return;
   const id = await store.createProject(text);
   await store.updateProject(id, { status: 'reading' });
-  startJob(id, () => pipeline(id).readSpec(id));
+  startJob(id, () => pipeline(id).readSpec(id), moveOn(id, 'problem', 'spec'));
   await openProject(id);
 }
 
@@ -349,12 +542,8 @@ function fillSelect(select, options) {
 }
 
 function renderSpec(project) {
-  const card = $('#spec');
-  if (!project.spec) {
-    card.hidden = true;
-    return;
-  }
-  card.hidden = false;
+  state.available.spec = Boolean(project.spec);
+  if (!project.spec) return;
   const spec = project.spec;
   const key = JSON.stringify(spec);
   if (key !== state.specKey) {
@@ -394,27 +583,28 @@ async function runSearch(event) {
   if (state.papers.length && !confirm('Search again? This replaces the papers and your decisions for this search.')) return;
   await store.updateProject(id, { spec: collectSpec(), status: 'searching' });
   state.papersKey = '';
-  startJob(id, () => pipeline(id).run(id));
+  startJob(id, () => pipeline(id).run(id), moveOn(id, 'progress', 'review'));
+  state.available.progress = true;
+  selectStep('progress');
   await refresh();
-  $('#progress-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function continueSearch() {
   if (!haveKey() || jobs.has(state.id)) return;
   const id = state.id;
-  startJob(id, () => pipeline(id).run(id, { resume: true }));
+  startJob(id, () => pipeline(id).run(id, { resume: true }), moveOn(id, 'progress', 'review'));
+  selectStep('progress');
   refresh();
 }
 
 // -- step 3 ----------------------------------------------------------------------
 
 function renderProgress(project) {
-  const card = $('#progress-card');
   const counts = project.counts || {};
   const running = jobs.has(project.id);
   const started = RUNNING.has(project.status) && project.status !== 'reading';
-  card.hidden = !(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
-  if (card.hidden) return;
+  state.available.progress = Boolean(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
+  if (!state.available.progress) return;
 
   const order = STAGES.map(([s]) => s);
   const current = project.status === 'done' ? 3 : order.indexOf(project.status);
@@ -434,6 +624,13 @@ function renderProgress(project) {
   if (running && progress.stage) parts.push(progress.total ? `${progress.stage}: ${progress.done} of ${progress.total}` : `${progress.stage}…`);
   if (total) parts.push(`${total} records found`, `${kept} kept after screening`, `${counts.extracted || 0} extracted`);
   $('#progress-text').textContent = parts.join(' · ');
+  $('#source-counts').replaceChildren(...(total ? SOURCES.map(([source, label]) => {
+    const mine = state.papers.filter((p) => p.source === source);
+    const n = (statuses) => mine.filter((p) => statuses.includes(p.status)).length;
+    const screenedIn = mine.length - n(['screened_out', 'candidate']);
+    return h('div', {}, h('strong', {}, label),
+      `${mine.length} found · ${screenedIn} kept after screening · ${n(['extracted'])} extracted`);
+  }) : []));
   $('#keep-open').hidden = !running;
   const stopped = !running && (project.status === 'interrupted' || (RUNNING.has(project.status) && project.status !== 'reading'));
   $('#continue').hidden = !(stopped || (project.status === 'error' && project.spec));
@@ -469,13 +666,22 @@ function groupOf(paper) {
 }
 
 function renderReview() {
-  const key = JSON.stringify([state.papers.map((p) => [p.id, p.status, p.extracted_by, p.error]), state.decisions, state.tab, jobs.has(state.id)]);
+  const key = JSON.stringify([state.papers.map((p) => [p.id, p.status, p.extracted_by, p.error]), state.decisions, state.tab, state.source, jobs.has(state.id)]);
   if (key === state.papersKey) return;
   state.papersKey = key;
-  $('#review').hidden = false;
+
+  // Papers and registry records are reviewed separately.
+  const bySource = Object.fromEntries(SOURCES.map(([source]) => [source, state.papers.filter((p) => p.source === source)]));
+  if (!bySource[state.source].length) state.source = SOURCES.map(([source]) => source).find((source) => bySource[source].length) || 'pubmed';
+  const extractedCount = (list) => list.filter((p) => p.status === 'extracted').length;
+  $('#source-switch').replaceChildren(...SOURCES.map(([source, label]) => h('button', {
+    type: 'button', 'aria-pressed': String(state.source === source),
+    onclick: () => { state.source = source; state.papersKey = ''; renderReview(); },
+  }, `${label} · ${extractedCount(bySource[source])} extracted of ${bySource[source].length}`)));
+  $('#review-count').textContent = String(extractedCount(state.papers) || '');
 
   const groups = Object.fromEntries(TABS.map(([k]) => [k, []]));
-  for (const paper of state.papers) groups[groupOf(paper)].push(paper);
+  for (const paper of bySource[state.source]) groups[groupOf(paper)].push(paper);
   $('#tabs').replaceChildren(...TABS.map(([k, label]) => h('button', {
     type: 'button', class: 'secondary small', 'aria-pressed': String(state.tab === k),
     onclick: () => { state.tab = k; state.papersKey = ''; renderReview(); },
@@ -627,6 +833,7 @@ function resultBlock(paper, result, index, decisions) {
 
 async function decide(paper, resultIndex, decision, reason) {
   await store.setDecision(state.id, paper.id, resultIndex, decision, reason);
+  await refreshNow(); // show the choice at once rather than with the next scheduled redraw
 }
 
 function extractPaper(paper, upload = null, uploadName = '') {
@@ -736,6 +943,19 @@ async function start() {
   $('#export-included').addEventListener('click', () => exportCsv(true));
   $('#export-all').addEventListener('click', () => exportCsv(false));
   $('#export-json').addEventListener('click', exportJson);
+  for (const step of STEPS) {
+    $(`#tab-${step}`).addEventListener('click', () => selectStep(step));
+    $(`#tab-${step}`).addEventListener('keydown', tabKeys);
+  }
+  $('#activity-toggle').addEventListener('click', () => setActivityOpen($('#activity').hidden));
+  $('#activity-close').addEventListener('click', () => setActivityOpen(false));
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('#activity').hidden && window.innerWidth < 1280) setActivityOpen(false);
+  });
+  const remembered = readSetting(ACTIVITY_OPEN);
+  // Below 1280px the panel covers the page, so there it opens only when asked.
+  setActivityOpen(window.innerWidth >= 1280 && remembered !== 'closed', false);
+  renderTabs();
   window.addEventListener('beforeunload', (event) => {
     if (jobs.size) event.preventDefault();
   });

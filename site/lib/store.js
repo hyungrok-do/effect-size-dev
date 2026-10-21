@@ -2,7 +2,7 @@
 // IndexedDB. Nothing is stored anywhere else. Mirrors python/esf/store.py.
 
 const DB_NAME = 'effect-size-finder';
-const VERSION = 1;
+const VERSION = 2; // 2 added the agent activity log
 export const RUNNING = new Set(['reading', 'searching', 'screening', 'extracting']);
 
 const now = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
@@ -16,16 +16,21 @@ export class Store extends EventTarget {
     super();
     this.ready = new Promise((resolve, reject) => {
       const open = indexedDB.open(name, VERSION);
-      open.onupgradeneeded = () => {
+      open.onupgradeneeded = (event) => {
         const db = open.result;
-        db.createObjectStore('projects', { keyPath: 'id' });
-        const papers = db.createObjectStore('papers', { keyPath: 'id', autoIncrement: true });
-        papers.createIndex('project', 'project_id');
-        papers.createIndex('key', ['project_id', 'source', 'ext_id'], { unique: true });
-        const decisions = db.createObjectStore('decisions', { keyPath: ['paper_id', 'result_index'] });
-        decisions.createIndex('project', 'project_id');
-        db.createObjectStore('usage', { autoIncrement: true }).createIndex('project', 'project_id');
-        db.createObjectStore('documents', { keyPath: 'paper_id' }).createIndex('project', 'project_id');
+        if (event.oldVersion < 1) {
+          db.createObjectStore('projects', { keyPath: 'id' });
+          const papers = db.createObjectStore('papers', { keyPath: 'id', autoIncrement: true });
+          papers.createIndex('project', 'project_id');
+          papers.createIndex('key', ['project_id', 'source', 'ext_id'], { unique: true });
+          const decisions = db.createObjectStore('decisions', { keyPath: ['paper_id', 'result_index'] });
+          decisions.createIndex('project', 'project_id');
+          db.createObjectStore('usage', { autoIncrement: true }).createIndex('project', 'project_id');
+          db.createObjectStore('documents', { keyPath: 'paper_id' }).createIndex('project', 'project_id');
+        }
+        if (event.oldVersion < 2) {
+          db.createObjectStore('events', { keyPath: 'id', autoIncrement: true }).createIndex('project', 'project_id');
+        }
       };
       open.onsuccess = () => resolve(open.result);
       open.onerror = () => reject(open.error);
@@ -107,9 +112,10 @@ export class Store extends EventTarget {
 
   async deleteProject(id) {
     await this.clearPapers(id);
-    await this.tx(['projects', 'usage'], 'readwrite', async ({ projects, usage }) => {
+    await this.tx(['projects', 'usage', 'events'], 'readwrite', async ({ projects, usage, events }) => {
       await request(projects.delete(id));
       for (const key of await request(usage.index('project').getAllKeys(id))) await request(usage.delete(key));
+      for (const key of await request(events.index('project').getAllKeys(id))) await request(events.delete(key));
     });
     this.changed(id);
   }
@@ -214,6 +220,31 @@ export class Store extends EventTarget {
       groups.set(key, g);
     }
     return [...groups.values()];
+  }
+
+  // -- agent activity ---------------------------------------------------------------
+
+  // event: {agent, step, phase: 'done' | 'error' | 'note', text, detail, ms, paper_id}
+  async addEvent(projectId, event) {
+    await this.tx('events', 'readwrite', ({ events }) => request(events.add({
+      project_id: projectId, at: new Date().toISOString(), ...event,
+    })));
+    this.changed(projectId);
+  }
+
+  // The latest events of a search, newest first.
+  async events(projectId, limit = 400) {
+    return this.tx('events', 'readonly', ({ events }) => new Promise((resolve, reject) => {
+      const out = [];
+      const cursor = events.index('project').openCursor(IDBKeyRange.only(projectId), 'prev');
+      cursor.onsuccess = () => {
+        const c = cursor.result;
+        if (!c || out.length >= limit) return resolve(out);
+        out.push(c.value);
+        c.continue();
+      };
+      cursor.onerror = () => reject(cursor.error);
+    }));
   }
 
   // -- documents ------------------------------------------------------------------

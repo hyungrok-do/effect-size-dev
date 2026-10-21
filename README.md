@@ -153,6 +153,18 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 | `ESF_WORKER_CONCURRENCY` | `8` | Parallel model calls. |
 | `ESF_DATA_DIR` | `./data` | Where searches are stored. |
 
+## The browser edition's page
+
+Each step has its own tab: **Describe**, **What to look for**, **Search** and **Review**. The page
+moves to the next tab when a step finishes, unless you have switched tabs in the meantime. Papers
+from PubMed and ClinicalTrials.gov records are counted and reviewed separately.
+
+The **Agent activity** panel shows what each agent is doing right now (Opus 5.5 managing, Sonnet
+5.5 fetching, Haiku 5.5 screening and reading, and the page's own code searching and checking),
+with its calls and tokens, and a timeline of every step it took, which you can filter by agent.
+The timeline is saved with the search. On wide screens the panel sits beside the steps; on
+narrower ones it opens over the page from **Agent activity** at the top.
+
 ## Reviewing
 
 Each paper shows where its text came from (registry results, PMC full text, open-access PDF, or
