@@ -67,16 +67,21 @@ cd effect-size-dev
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-export ANTHROPIC_API_KEY=sk-ant-...
 export ESF_CONTACT_EMAIL=you@university.edu   # NCBI asks for it; Unpaywall requires it for PDFs
 esf serve                                      # then open http://127.0.0.1:8000
 ```
+
+Paste your Anthropic API key into the **Anthropic API key** box at the top of the page. The page
+sends it only with the requests that run Claude (reading the problem, searching, extracting); the
+server uses it for that job in memory and never writes it to disk. In the browser it is kept for
+the tab, or on the browser if you tick **Remember on this browser**; **Forget** clears it.
+Alternatively, set `ANTHROPIC_API_KEY` on the server, and the box becomes optional.
 
 Searches are stored in `data/esf.sqlite3`, and the text read from each paper in `data/projects/`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | | Your Anthropic API key (or sign in with `ant auth login`). |
+| `ANTHROPIC_API_KEY` | | Optional server-side key, used when the page sends none. |
 | `ESF_CONTACT_EMAIL` | | Sent to NCBI and Unpaywall. Without it, open-access PDFs are not fetched. |
 | `NCBI_API_KEY` | | Optional; raises the PubMed rate limit from 3 to 10 requests a second. |
 | `ESF_MANAGER_MODEL` | `claude-opus-5-5` | The manager model. |
@@ -105,6 +110,10 @@ flags, and your decision.
 Your paragraph and the text of the papers are sent to Anthropic's API. Literature requests go to
 NCBI, ClinicalTrials.gov, Europe PMC, and Unpaywall. Everything else stays on the machine running
 the server.
+
+The API key travels from the page to the server in a request header. On your own computer that
+stays local; if you host the server for others, serve it over HTTPS so keys are not sent in the
+clear.
 
 ## Not yet
 

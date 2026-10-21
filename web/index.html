@@ -133,7 +133,16 @@
   .card h2 { font-size: 21px; }
   .summary { color: var(--ink-2); margin: 8px 0 0; max-width: 75ch; }
 
-  textarea, input[type="text"], select {
+  .keybox { margin: 12px 0 0; padding: 12px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .keybox > label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+  .key-row input[type="password"] { flex: 1 1 280px; width: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .check { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--ink-2); cursor: pointer; }
+  .keybox .hint { margin: 6px 0 0; }
+  .keybox[data-missing="true"] { border-color: var(--error); }
+  .keybox[data-missing="true"] .hint { color: var(--error); }
+
+  textarea, input[type="text"], input[type="password"], select {
     width: 100%; padding: 8px 10px; border: 1px solid var(--field-line); border-radius: 8px;
     background: var(--bg); color: var(--ink); font: inherit; font-size: 16px;
   }
@@ -266,6 +275,15 @@
     </li>
   </ul>
   <p class="notice">Your paragraph and the text of the papers are sent to Anthropic's API to be read. Don't paste anything you can't share with it.</p>
+  <div class="keybox">
+    <label for="api-key">Anthropic API key</label>
+    <div class="key-row">
+      <input id="api-key" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true">
+      <label class="check"><input id="remember-key" type="checkbox"> Remember on this browser</label>
+      <button id="forget-key" type="button" class="secondary small">Forget</button>
+    </div>
+    <p id="key-status" class="hint" aria-live="polite"></p>
+  </div>
 </section>
 
 <div class="layout">

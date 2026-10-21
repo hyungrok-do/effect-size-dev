@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Literal
 
-from fastapi import FastAPI, HTTPException
+import anthropic
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -21,6 +23,12 @@ from .sources import Sources
 from .store import RUNNING, Store
 
 PAPER = -1  # result_index of a decision about the whole paper
+
+
+def key_header() -> object:
+    """The page sends the user's Anthropic API key in this header with each request that starts
+    Claude work. The key is used for that job only, held in memory, and never written to disk."""
+    return Header(default=None, alias="X-Anthropic-Api-Key", max_length=512)
 
 
 class NewProject(BaseModel):
@@ -113,11 +121,18 @@ def create_app(
     llm: ClaudeLLM | None = None,
     sources: Sources | None = None,
     store: Store | None = None,
+    llm_for_key: Callable[[str], ClaudeLLM] | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     store = store or Store(settings.data_dir / "esf.sqlite3")
     store.interrupt_running()
     pipeline = Pipeline(store, llm or ClaudeLLM(settings), sources or Sources(settings), settings)
+    llm_for_key = llm_for_key or (lambda key: ClaudeLLM(settings, anthropic.Anthropic(api_key=key)))
+
+    def pipeline_for(api_key: str | None) -> Pipeline:
+        """With a key from the page, a pipeline that uses it; without one, the server's own credentials."""
+        api_key = (api_key or "").strip()
+        return pipeline.using(llm_for_key(api_key)) if api_key else pipeline
     jobs = ThreadPoolExecutor(max_workers=4, thread_name_prefix="esf-job")
     busy: set[str] = set()
     busy_lock = threading.Lock()
@@ -159,6 +174,7 @@ def create_app(
             "manager_model": settings.manager_model,
             "worker_model": settings.worker_model,
             "contact_email_set": bool(settings.contact_email),
+            "server_has_key": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
             "max_candidates": settings.max_candidates,
             "max_extractions": settings.max_extractions,
         }
@@ -168,10 +184,11 @@ def create_app(
         return store.projects()
 
     @app.post("/api/projects", status_code=201)
-    def create_project(body: NewProject) -> dict:
+    def create_project(body: NewProject, x_anthropic_api_key: str | None = key_header()) -> dict:
+        job = pipeline_for(x_anthropic_api_key)
         project_id = store.create_project(body.paragraph.strip())
         store.update_project(project_id, status="reading")
-        submit(project_id, lambda: pipeline.read_spec(project_id))
+        submit(project_id, lambda: job.read_spec(project_id))
         return {"id": project_id}
 
     @app.get("/api/projects/{project_id}")
@@ -190,14 +207,15 @@ def create_app(
         return {"ok": True}
 
     @app.post("/api/projects/{project_id}/run", status_code=202)
-    def run(project_id: str) -> dict:
+    def run(project_id: str, x_anthropic_api_key: str | None = key_header()) -> dict:
         project = get_project(project_id)
         if not project["spec"]:
             raise HTTPException(400, "Read the problem first.")
         if project["status"] in RUNNING:
             raise HTTPException(409, "This project is already running.")
+        job = pipeline_for(x_anthropic_api_key)
         store.update_project(project_id, status="searching")
-        submit(project_id, lambda: pipeline.run(project_id))
+        submit(project_id, lambda: job.run(project_id))
         return {"ok": True}
 
     @app.get("/api/projects/{project_id}/papers")
@@ -212,15 +230,16 @@ def create_app(
         return out
 
     @app.post("/api/projects/{project_id}/papers/{paper_id}/extract", status_code=202)
-    def extract(project_id: str, paper_id: int) -> dict:
+    def extract(project_id: str, paper_id: int, x_anthropic_api_key: str | None = key_header()) -> dict:
         project = get_project(project_id)
         get_paper(project_id, paper_id)
         if project["status"] in RUNNING:
             raise HTTPException(409, "Wait until the current run finishes.")
         spec = SearchSpec.model_validate(project["spec"])
+        job = pipeline_for(x_anthropic_api_key)
         store.clear_decisions(paper_id)
         store.update_paper(paper_id, status="fetching", error=None)
-        submit(f"paper-{paper_id}", lambda: pipeline.extract_paper(project_id, spec, paper_id))
+        submit(f"paper-{paper_id}", lambda: job.extract_paper(project_id, spec, paper_id))
         return {"ok": True}
 
     @app.put("/api/projects/{project_id}/papers/{paper_id}/decisions")

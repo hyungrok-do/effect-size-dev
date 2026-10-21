@@ -11,13 +11,14 @@ from esf.store import Store
 from fixtures import SPEC, FakeLLM, LiteratureAPIs, mock_client
 
 
-def make_client(tmp_path):
+def make_client(tmp_path, llm=None, llm_for_key=None):
     settings = Settings(data_dir=tmp_path, web_dir=REPO_ROOT / "web", contact_email="test@example.com", audit_fraction=0.0)
     app = create_app(
         settings,
-        llm=FakeLLM(),
+        llm=llm or FakeLLM(),
         sources=Sources(settings, client=mock_client(LiteratureAPIs())),
         store=Store(tmp_path / "test.sqlite3"),
+        llm_for_key=llm_for_key,
     )
     return TestClient(app)
 
@@ -77,6 +78,49 @@ def test_full_flow_over_http(tmp_path):
             break
         time.sleep(0.05)
     assert status == "extracted"
+
+
+def test_a_key_from_the_page_is_used_for_that_job(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    default, keyed, keys = FakeLLM(), FakeLLM(), []
+
+    def llm_for_key(key):
+        keys.append(key)
+        return keyed
+
+    client = make_client(tmp_path, llm=default, llm_for_key=llm_for_key)
+    assert client.get("/api/config").json()["server_has_key"] is False
+
+    headers = {"X-Anthropic-Api-Key": "  sk-ant-test-123  "}
+    project_id = client.post("/api/projects", json={"paragraph": "A randomized trial of a mindfulness app for PHQ-9."}, headers=headers).json()["id"]
+    wait_for(client, project_id, {"spec_ready"})
+    assert keys == ["sk-ant-test-123"] and keyed.calls == ["spec"] and default.calls == []
+
+    client.post(f"/api/projects/{project_id}/run", headers=headers)
+    wait_for(client, project_id, {"done"})
+    assert "search" in keyed.calls and default.calls == []
+
+    # Without a key the server falls back to its own credentials.
+    other = client.post("/api/projects", json={"paragraph": "Another randomized trial description here."}).json()["id"]
+    wait_for(client, other, {"spec_ready"})
+    assert default.calls == ["spec"]
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-server")
+    assert client.get("/api/config").json()["server_has_key"] is True
+
+
+def test_a_missing_key_gives_an_actionable_error(tmp_path):
+    llm = FakeLLM()
+
+    def no_credentials(paragraph, sink=None):
+        raise TypeError("Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set.")
+
+    llm.read_spec = no_credentials
+    client = make_client(tmp_path, llm=llm)
+    project_id = client.post("/api/projects", json={"paragraph": "A randomized trial of a mindfulness app for PHQ-9."}).json()["id"]
+    project = wait_for(client, project_id, {"error"})
+    assert "Enter a valid key in the API key box" in project["error"]
 
 
 def test_unknown_ids(tmp_path):

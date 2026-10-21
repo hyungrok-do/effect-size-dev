@@ -225,6 +225,19 @@ class ClaudeLLM:
         )
 
 
+def describe_error(exc: BaseException) -> str:
+    """A message a person can act on."""
+    if isinstance(exc, anthropic.AuthenticationError) or (
+        isinstance(exc, TypeError) and "authentication method" in str(exc)
+    ):
+        return "The Anthropic API key is missing or was not accepted. Enter a valid key in the API key box and try again."
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        return "This Anthropic API key may not use the model. Check the key's workspace and model access."
+    if isinstance(exc, anthropic.RateLimitError):
+        return "The Anthropic API rate limit was reached. Wait a minute and try again."
+    return str(exc)
+
+
 def usage_dict(usage: Any) -> dict[str, int]:
     return {
         "input_tokens": getattr(usage, "input_tokens", 0) or 0,

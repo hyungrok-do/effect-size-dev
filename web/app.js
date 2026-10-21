@@ -48,7 +48,10 @@ const TABS = [
 ];
 
 const $ = (selector) => document.querySelector(selector);
-const state = { id: null, project: null, papers: [], tab: 'extracted', timer: null, specKey: '', papersKey: '' };
+const state = {
+  id: null, project: null, papers: [], tab: 'extracted', timer: null, specKey: '', papersKey: '', config: {},
+};
+const KEY_STORAGE = 'esf-anthropic-api-key';
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -65,8 +68,72 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+// -- API key ---------------------------------------------------------------------
+// Kept in this tab (sessionStorage) or, if asked, on this browser (localStorage). It is sent only
+// with the requests that start Claude work.
+
+function storage(kind) {
+  try {
+    return kind === 'local' ? window.localStorage : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function loadKey() {
+  const remembered = storage('local')?.getItem(KEY_STORAGE);
+  $('#api-key').value = remembered || storage('session')?.getItem(KEY_STORAGE) || '';
+  $('#remember-key').checked = Boolean(remembered);
+}
+
+function saveKey() {
+  const key = apiKey();
+  const remember = $('#remember-key').checked;
+  try {
+    storage('local')?.removeItem(KEY_STORAGE);
+    storage('session')?.removeItem(KEY_STORAGE);
+    if (key) storage(remember ? 'local' : 'session')?.setItem(KEY_STORAGE, key);
+  } catch { /* storage unavailable: the key lives only in the field */ }
+  showKeyStatus();
+}
+
+function forgetKey() {
+  $('#api-key').value = '';
+  $('#remember-key').checked = false;
+  saveKey();
+  $('#api-key').focus();
+}
+
+const apiKey = () => $('#api-key').value.trim();
+
+function showKeyStatus() {
+  const box = $('.keybox');
+  const status = $('#key-status');
+  box.dataset.missing = 'false';
+  if (apiKey()) {
+    status.textContent = $('#remember-key').checked
+      ? 'Remembered on this browser. Sent only with requests that run Claude; the server does not store it.'
+      : 'Kept for this tab only. Sent only with requests that run Claude; the server does not store it.';
+  } else if (state.config.server_has_key) {
+    status.textContent = 'Optional: the server has its own key.';
+  } else {
+    status.replaceChildren('Needed to read the problem, search, and extract. Create one in the ',
+      h('a', { href: 'https://console.anthropic.com/settings/keys', target: '_blank', rel: 'noopener' }, 'Anthropic Console'), '.');
+  }
+}
+
+function haveKey() {
+  if (apiKey() || state.config.server_has_key) return true;
+  $('.keybox').dataset.missing = 'true';
+  $('#key-status').textContent = 'Enter your Anthropic API key first.';
+  $('#api-key').focus();
+  return false;
+}
+
 async function api(path, options = {}) {
-  const init = { ...options, headers: { 'Content-Type': 'application/json' } };
+  const { withKey, ...rest } = options;
+  const init = { ...rest, headers: { 'Content-Type': 'application/json' } };
+  if (withKey && apiKey()) init.headers['X-Anthropic-Api-Key'] = apiKey();
   if (init.body !== undefined && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
   const response = await fetch(path, init);
   if (!response.ok) {
@@ -185,9 +252,10 @@ async function readProblem() {
     showError($('#problem-error'), 'Describe the study in a sentence or two first.');
     return;
   }
+  if (!haveKey()) return;
   $('#read').disabled = true;
   try {
-    const { id } = await api('/api/projects', { method: 'POST', body: { paragraph: text } });
+    const { id } = await api('/api/projects', { method: 'POST', body: { paragraph: text }, withKey: true });
     await openProject(id);
   } catch (error) {
     showError($('#problem-error'), error.message);
@@ -245,11 +313,12 @@ function collectSpec() {
 async function runSearch(event) {
   event.preventDefault();
   const hasPapers = Object.keys(state.project.counts || {}).length > 0;
+  if (!haveKey()) return;
   if (hasPapers && !confirm('Search again? This replaces the papers and your decisions for this search.')) return;
   $('#run').disabled = true;
   try {
     await api(`/api/projects/${state.id}/spec`, { method: 'PUT', body: collectSpec() });
-    await api(`/api/projects/${state.id}/run`, { method: 'POST' });
+    await api(`/api/projects/${state.id}/run`, { method: 'POST', withKey: true });
     state.papersKey = '';
     await refresh();
     $('#progress-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -491,8 +560,9 @@ async function decide(paper, resultIndex, decision, reason) {
 }
 
 async function extractAnyway(paper) {
+  if (!haveKey()) return;
   try {
-    await api(`/api/projects/${state.id}/papers/${paper.id}/extract`, { method: 'POST' });
+    await api(`/api/projects/${state.id}/papers/${paper.id}/extract`, { method: 'POST', withKey: true });
     state.tab = 'pending';
     state.papersKey = '';
     await refresh();
@@ -556,13 +626,19 @@ async function start() {
   $('#spec-form').addEventListener('submit', runSearch);
   $('#new-project').addEventListener('click', newSearch);
   $('#source-close').addEventListener('click', () => $('#source-dialog').close());
+  $('#api-key').addEventListener('input', saveKey);
+  $('#remember-key').addEventListener('change', saveKey);
+  $('#forget-key').addEventListener('click', forgetKey);
+  loadKey();
   try {
     const config = await api('/api/config');
+    state.config = config;
     $('#models').textContent = `Manager ${config.manager_model} · workers ${config.worker_model}`
       + (config.contact_email_set ? '' : ' · set ESF_CONTACT_EMAIL to fetch open-access PDFs');
   } catch {
     $('#models').textContent = 'The server is not responding.';
   }
+  showKeyStatus();
   await loadProjects();
   const id = location.hash.slice(1);
   if (id) await openProject(id);

@@ -8,7 +8,7 @@ import httpx2
 import pytest
 
 from esf.config import Settings
-from esf.llm import ClaudeLLM, ModelDeclined, ModelTruncated
+from esf.llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error
 from fixtures import SPEC, sse
 
 DOC = {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "PHQ-9 8.1 (4.2)"}}
@@ -50,6 +50,8 @@ class FakeAPI:
         kind, payload = self.responses.pop(0)
         if kind == "sse":
             return httpx2.Response(200, content=payload, headers={"content-type": "text/event-stream"})
+        if kind == "401":
+            return httpx2.Response(401, json=payload)
         return httpx2.Response(200, json=payload)
 
 
@@ -108,6 +110,15 @@ def test_refusal_and_truncation_are_errors():
         llm.screen(SPEC, "x")
     with pytest.raises(ModelTruncated):
         llm.screen(SPEC, "x")
+
+
+def test_a_rejected_key_is_explained():
+    llm, api = make_llm([("401", {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})])
+    with pytest.raises(anthropic.AuthenticationError) as caught:
+        llm.screen(SPEC, "x")
+    assert "API key box" in describe_error(caught.value)
+    headers = api.requests[0][0].headers
+    assert "test-key" in headers.get("x-api-key", "") + headers.get("authorization", "")
 
 
 def _message(content, stop_reason):

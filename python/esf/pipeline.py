@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -15,7 +16,7 @@ from typing import Any
 
 from .config import Settings
 from .fulltext import FullText, get_fulltext
-from .llm import ClaudeLLM, ModelDeclined, ModelTruncated, usage_dict
+from .llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
 from .schemas import PaperExtraction, SearchPlan, SearchSpec
 from .sources import Record, SourceError, Sources, trial_record
 from .store import Store
@@ -68,6 +69,12 @@ class Pipeline:
         self.sources = sources
         self.settings = settings
 
+    def using(self, llm: ClaudeLLM) -> "Pipeline":
+        """The same pipeline calling Claude through another client, e.g. one holding a user's API key."""
+        clone = copy.copy(self)
+        clone.llm = llm
+        return clone
+
     def _sink(self, project_id: str):
         def sink(step: str, model: str, usage: Any) -> None:
             self.store.add_usage(project_id, step, model, usage_dict(usage))
@@ -94,7 +101,7 @@ class Pipeline:
             spec = self.llm.read_spec(project["paragraph"], self._sink(project_id))
         except Exception as exc:  # surfaced in the UI
             log.exception("reading the problem failed")
-            self.store.update_project(project_id, status="error", error=f"Reading the problem failed: {exc}")
+            self.store.update_project(project_id, status="error", error=f"Reading the problem failed. {describe_error(exc)}")
             return
         self.store.update_project(project_id, status="spec_ready", spec=spec.model_dump())
 
@@ -120,7 +127,7 @@ class Pipeline:
             self._extract_all(project_id, spec)
         except Exception as exc:
             log.exception("pipeline failed")
-            self.store.update_project(project_id, status="error", error=str(exc))
+            self.store.update_project(project_id, status="error", error=describe_error(exc))
             return
         self.store.update_project(project_id, status="done")
         self._progress(project_id, "done")
@@ -213,7 +220,7 @@ class Pipeline:
                 self.store.update_paper(
                     paper["id"],
                     status="unsure",
-                    screen={"decision": "unsure", "reason": f"Screening failed ({exc}); review by hand."},
+                    screen={"decision": "unsure", "reason": f"Screening failed ({describe_error(exc)}); review by hand."},
                 )
 
         with ThreadPoolExecutor(self.settings.worker_concurrency) as pool:
@@ -241,7 +248,7 @@ class Pipeline:
             self._extract_paper(project_id, spec, paper_id)
         except Exception as exc:
             log.exception("extracting paper %s failed", paper_id)
-            self.store.update_paper(paper_id, status="error", error=f"Extraction failed: {exc}")
+            self.store.update_paper(paper_id, status="error", error=f"Extraction failed. {describe_error(exc)}")
 
     def _extract_paper(self, project_id: str, spec: SearchSpec, paper_id: int) -> None:
         paper = self.store.paper(paper_id)
@@ -283,10 +290,10 @@ class Pipeline:
                         paper_id,
                         status="needs_manual",
                         escalation={"reasons": reasons, "audit": audited},
-                        error=f"Neither model completed the extraction ({exc}).",
+                        error=f"Neither model completed the extraction. {describe_error(exc)}",
                     )
                     return
-                reasons.append(f"manager review failed: {exc}")
+                reasons.append(f"manager review failed: {describe_error(exc)}")
 
         assert final is not None and final_report is not None
         self.store.update_paper(
@@ -308,5 +315,5 @@ class Pipeline:
         except ModelTruncated:
             return None, None, "the worker's extraction was cut off at max_tokens"
         except Exception as exc:
-            return None, None, f"the worker failed: {exc}"
+            return None, None, f"the worker failed: {describe_error(exc)}"
         return worker, verify(worker, fulltext.text, quotes_reliable), None
