@@ -364,10 +364,25 @@ function renderProgress(project) {
   const plan = project.search_plan;
   $('#plan-details').hidden = !plan;
   if (plan) {
+    // The search runs from the top down; each line says what its query found (from the search log).
+    const names = project.level_names || {};
+    const order = Object.keys(names); // the levels from the top down
+    const log = project.search_log || [];
+    const count = (n, one, many = `${one}s`) => `${Number(n).toLocaleString()} ${n === 1 ? one : many}`;
+    const found = (level, query) => {
+      const e = log.find((x) => x.level === level && x.query === query);
+      if (!e) return '';
+      return e.error ? ` (failed: ${e.error})` : ` (${count(e.hits, 'hit')}; ${count(e.added, 'new record')} screened)`;
+    };
+    const levels = [...(plan.levels || (plan.pubmed_queries || []).map((query) => ({ level: 'primary', query, why: '' })))]
+      .sort((a, b) => order.indexOf(a.level) - order.indexOf(b.level));
+    const cited = log.find((e) => e.level === 'cited');
     $('#plan-summary').textContent = plan.summary;
     $('#plan-queries').replaceChildren(
-      ...plan.pubmed_queries.map((q) => h('li', {}, 'PubMed: ', h('code', {}, q))),
-      ...plan.clinicaltrials_queries.map((q) => h('li', {}, 'ClinicalTrials.gov: ', h('code', {}, q))),
+      ...levels.map((l) => h('li', {}, `${names[l.level] || l.level}: `, h('code', {}, l.query), found(l.level, l.query))),
+      ...(cited ? [h('li', {}, `${names.cited || 'Cited by the included reviews'}: ${count(cited.reviews, 'review')} followed, `
+        + `${count(cited.cited, 'record')} cited in PubMed, ${count(cited.added, 'new record')} screened`)] : []),
+      ...plan.clinicaltrials_queries.map((q) => h('li', {}, 'ClinicalTrials.gov: ', h('code', {}, q), found('registry', q))),
       ...(plan.extra_ids.length ? [h('li', {}, `Named records: ${plan.extra_ids.join(', ')}`)] : []),
       ...(plan.failed_queries || []).map((q) => h('li', {}, badge('Failed', 'err'), ' ', q)),
     );

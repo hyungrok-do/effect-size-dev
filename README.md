@@ -31,9 +31,10 @@ paragraph
   ▼
 OPUS    Read the problem → search specification (PICO, design, outcome type, statistics needed)
 YOU     Check and edit the specification
-OPUS    Plan the search: explores PubMed and ClinicalTrials.gov with tools, then submits final queries
-CODE    Run the queries, de-duplicate, fetch PubMed records
+OPUS    Plan the search from the top down: concept blocks, hit counts, then one query per level
+CODE    Run the levels in order (reviews → target population → wider), then ClinicalTrials.gov
 HAIKU   Screen every title and abstract: include / exclude / unsure
+CODE    Add the studies cited by the reviews that passed screening; Haiku screens those too
 CODE    Get text: posted registry results → PMC full text (Europe PMC) → open-access PDF (Unpaywall) → abstract
 SONNET  (browser edition) Download what the browser may not: PDFs, and any site that refuses web pages
 HAIKU   Extract every reported number with its verbatim quote and location
@@ -44,6 +45,34 @@ YOU     Include or exclude each result; export CSV or JSON
 
 Claude reads and quotes; it never computes or converts a number. Every value is checked by code
 against the text it was read from.
+
+### The search, from the top down
+
+A search that ANDs every detail of the plan together finds almost nothing: abstracts often leave
+out the instrument (PHQ-9) or the comparator. For a mindfulness app versus waitlist for PHQ-9 in
+university students, PubMed returned 1 record for all of it together (October 2026), but 29 reviews
+of mindfulness apps for depression, 32 trials of them in students and 216 in any population. So Opus builds the
+search the way a librarian would:
+
+1. **Concept blocks.** One block each for the intervention, the condition and the population, each
+   a MeSH heading ORed with free-text synonyms. Opus checks each block's hit count (the
+   `count_pubmed` tool) before combining them, and never makes a block from the comparator or an
+   instrument name.
+2. **Levels**, run in this order:
+   - **Reviews and meta-analyses** of the intervention and condition, in any population. They give
+     pooled effects and list the trials they include.
+   - **Studies in the target population**: population, intervention and condition, with a filter
+     for the planned design (trials, or cohort and case-control studies).
+   - **Studies in related populations**, the same with the narrowest concept relaxed, when the
+     target population has few.
+   - **Outcome data in the target population** (optional), for a control-group SD or event rate.
+3. **Cited by the included reviews.** After screening, the reference lists of the reviews that
+   passed (from Europe PMC, or PubMed Central when Europe PMC has none) are added, without the
+   reviews, guidelines and letters they also cite, and screened. A trial that no query matched
+   still comes in this way.
+
+The **Search** tab shows each level's hits and how many of its records were found, kept after
+screening and extracted.
 
 | Step | Model | Effort |
 |---|---|---|
@@ -147,17 +176,21 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 | `ESF_MANAGER_MODEL` | `claude-opus-5-5` | The manager model. |
 | `ESF_WORKER_MODEL` | `claude-haiku-5-5` | The worker model. |
 | `ESF_AUDIT_FRACTION` | `0.1` | Share of clean extractions that Opus re-checks anyway. |
-| `ESF_PER_QUERY_LIMIT` | `100` | Records taken from each final query. |
-| `ESF_MAX_CANDIDATES` | `300` | Records screened per search. |
+| `ESF_PER_QUERY_LIMIT` | `100` | Records taken from each level's query, by relevance. |
+| `ESF_MAX_CANDIDATES` | `300` | Records screened from the levels and registry queries. |
+| `ESF_MAX_REVIEWS_FOLLOWED` | `10` | Included reviews whose references are added. |
+| `ESF_MAX_CITED` | `150` | New records added from those references. |
 | `ESF_MAX_EXTRACTIONS` | `60` | Papers extracted per search; the rest can be extracted one by one. |
 | `ESF_WORKER_CONCURRENCY` | `8` | Parallel model calls. |
 | `ESF_DATA_DIR` | `./data` | Where searches are stored. |
 
 ## The browser edition's page
 
-Each step has its own tab: **Describe**, **What to look for**, **Search** and **Review**. The page
-moves to the next tab when a step finishes, unless you have switched tabs in the meantime. Papers
-from PubMed and ClinicalTrials.gov records are counted and reviewed separately.
+Each step has its own tab: **Setup** (your Anthropic API key, a contact email and an optional NCBI
+key), **Describe**, **What to look for**, **Search** and **Review**. The page opens at Setup until
+it has a key. It moves to the next tab when a step finishes, unless you have switched tabs in the
+meantime. Papers from PubMed and ClinicalTrials.gov records are counted and reviewed separately,
+and each paper says how it was found (as a review, in the target population, cited by a review…).
 
 The **Agent activity** panel shows what each agent is doing right now (Opus 5.5 managing, Sonnet
 5.5 fetching, Haiku 5.5 screening and reading, and the page's own code searching and checking),

@@ -51,8 +51,34 @@ class SearchSpec(BaseModel):
     open_questions: list[str] = Field(description="Ambiguities the investigator should resolve.")
 
 
+# The PubMed search runs from the top down: reviews first, then primary studies in the target
+# population, then wider ones. Trials cited by the included reviews are added after screening.
+Level = Literal["reviews", "primary", "wider", "outcome_data"]
+LEVELS: tuple[str, ...] = ("reviews", "primary", "wider", "outcome_data")
+# How each way of finding a record is named on the page; "cited", "registry" and "named" are added by code.
+LEVEL_NAMES = {
+    "reviews": "Reviews and meta-analyses",
+    "primary": "Studies in the target population",
+    "wider": "Studies in related populations",
+    "outcome_data": "Outcome data in the target population",
+    "cited": "Cited by the included reviews",
+    "registry": "ClinicalTrials.gov",
+    "named": "Named by the search agent",
+}
+
+
+class SearchLevel(BaseModel):
+    level: Level = Field(
+        description="reviews: systematic reviews and meta-analyses; primary: studies of the planned design in the "
+        "target population; wider: the same with the narrowest concept relaxed; outcome_data: studies reporting the "
+        "outcome in the target population, any design."
+    )
+    query: str = Field(description="The PubMed query for this level.")
+    why: str = Field(description="One sentence on what this level adds.")
+
+
 class SearchPlan(BaseModel):
-    pubmed_queries: list[str]
+    levels: list[SearchLevel]
     clinicaltrials_queries: list[str]
     extra_ids: list[str]
     summary: str

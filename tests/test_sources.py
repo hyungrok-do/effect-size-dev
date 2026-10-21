@@ -2,7 +2,7 @@ from esf.config import Settings
 from esf.fulltext import get_fulltext
 from esf.jats import jats_to_text
 from esf.sources import Sources, parse_pubmed_xml, trial_record, trial_results_text
-from fixtures import JATS, PDF_LINE, PUBMED_XML, TRIAL, LiteratureAPIs, mock_client
+from fixtures import CITED_TRIAL, JATS, NOT_A_STUDY, PDF_LINE, PUBMED_XML, REVIEW, TRIAL, LiteratureAPIs, mock_client
 
 
 def sources(email="test@example.com"):
@@ -80,3 +80,21 @@ def test_unpaywall_needs_an_email():
     src, handler = sources(email=None)
     assert src.unpaywall.pdf_url("10.1000/rct2") is None
     assert not handler.requests
+
+
+def test_references_come_from_europe_pmc_then_pubmed_central():
+    src, handler = sources()
+    # Europe PMC's list, PubMed records only, in the order cited.
+    assert src.references(REVIEW) == [CITED_TRIAL, "11111111", NOT_A_STUDY]
+    assert not any(r.url.path.endswith("elink.fcgi") for r in handler.requests)
+    # Europe PMC has no list for this one (404), so PubMed Central's is used.
+    assert src.references("88888888") == [CITED_TRIAL]
+    elink = handler.requests[-1]
+    assert elink.url.path.endswith("elink.fcgi") and b"linkname=pubmed_pubmed_refs" in elink.content
+    assert src.references("99999999") == []
+
+
+def test_counting_asks_pubmed_for_no_records():
+    src, handler = sources()
+    assert src.pubmed.search("mindfulness AND (systematic review[pt])", 0) == (1, [])
+    assert b"retmax=0" in handler.requests[-1].content

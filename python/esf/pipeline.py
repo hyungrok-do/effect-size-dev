@@ -1,6 +1,7 @@
 """The search-and-extract pipeline.
 
-    spec (Opus) -> search plan (Opus + tools) -> run queries (code) -> screen (Haiku)
+    spec (Opus) -> search plan (Opus + tools) -> run the levels from the top down (code) -> screen (Haiku)
+    -> add what the included reviews cite (code) -> screen those (Haiku)
     -> full text (code) -> extract (Haiku) -> verify (code) -> adjudicate escalations (Opus) -> review (human)
 """
 
@@ -17,7 +18,7 @@ from typing import Any
 from .config import Settings
 from .fulltext import FullText, get_fulltext
 from .llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
-from .schemas import PaperExtraction, SearchPlan, SearchSpec
+from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec
 from .sources import Record, SourceError, Sources, trial_record
 from .store import Store
 from .verify import Verification, escalation_reasons, in_audit_sample, verify
@@ -25,6 +26,11 @@ from .verify import Verification, escalation_reasons, in_audit_sample, verify
 log = logging.getLogger(__name__)
 
 NCT = re.compile(r"^NCT\d{8}$", re.IGNORECASE)
+# Publication types that are not studies; a review's reference list is full of them.
+NOT_STUDIES = {
+    "Review", "Systematic Review", "Meta-Analysis", "Editorial", "Comment", "Letter", "News",
+    "Guideline", "Practice Guideline", "Published Erratum", "Retraction of Publication",
+}
 
 
 class Toolbox:
@@ -32,6 +38,16 @@ class Toolbox:
 
     def __init__(self, sources: Sources):
         self.sources = sources
+
+    def count_pubmed(self, queries: list[str]) -> str:
+        lines = []
+        for number, query in enumerate(queries, start=1):
+            try:
+                hits = f"{self.sources.pubmed.search(query, 0)[0]:,}"
+            except SourceError as exc:
+                hits = f"error: {exc}"
+            lines.append(f"#{number} {hits} | {query}")
+        return "\n".join(lines)
 
     def preview_pubmed(self, query: str, max_results: int) -> str:
         count, ids = self.sources.pubmed.search(query, max_results)
@@ -112,7 +128,7 @@ class Pipeline:
         assert project is not None and project["spec"]
         spec = SearchSpec.model_validate(project["spec"])
         self.store.clear_papers(project_id)
-        self.store.update_project(project_id, error=None, search_plan=None)
+        self.store.update_project(project_id, error=None, search_plan=None, search_log=None)
         try:
             self.store.update_project(project_id, status="searching")
             self._progress(project_id, "planning the search")
@@ -121,6 +137,8 @@ class Pipeline:
             self._collect(project_id, plan)
 
             self.store.update_project(project_id, status="screening")
+            self._screen_all(project_id, spec)
+            self._follow_reviews(project_id)
             self._screen_all(project_id, spec)
 
             self.store.update_project(project_id, status="extracting")
@@ -133,57 +151,133 @@ class Pipeline:
         self._progress(project_id, "done")
 
     def _collect(self, project_id: str, plan: SearchPlan) -> None:
-        """Run the planned queries, de-duplicate, and store the candidates in query order."""
+        """Run the levels from the top down, then the registry queries, and store the candidates in that
+        order. Each search's hits and how many records it added go to the project's search log."""
         limit = self.settings.per_query_limit
-        pmids: dict[str, list[str]] = {}
-        trials: dict[str, tuple[dict, list[str]]] = {}
-        queries = [("pubmed", q) for q in plan.pubmed_queries] + [("clinicaltrials", q) for q in plan.clinicaltrials_queries]
+        levels = sorted((lv for lv in plan.levels if lv.query.strip()), key=lambda lv: LEVELS.index(lv.level))
+        queries = [("pubmed", lv.level, lv.query) for lv in levels]
+        queries += [("clinicaltrials", "registry", q) for q in plan.clinicaltrials_queries]
+        # id -> where it was found, in the order first found; `first` is the index of the search that found it first.
+        pmids: dict[str, dict] = {}
+        trials: dict[str, dict] = {}
+        entries: list[dict] = []
         failed: list[str] = []
-        for number, (source, query) in enumerate(queries, start=1):
-            self._progress(project_id, "running the search", number - 1, len(queries))
-            label = f"{source}: {query}"
+
+        def found(table: dict, key: str, level: str, label: str, index: int, study: dict | None = None) -> None:
+            item = table.setdefault(key, {"found_by": [], "found_in": [], "first": index, "study": study})
+            item["found_by"].append(label)
+            if level not in item["found_in"]:
+                item["found_in"].append(level)
+
+        for index, (source, level, query) in enumerate(queries):
+            self._progress(project_id, "running the search", index, len(queries))
+            label = f"{LEVEL_NAMES[level]}: {query}"
+            entry: dict[str, Any] = {"level": level, "source": source, "query": query}
             try:
                 if source == "pubmed":
-                    _, ids = self.sources.pubmed.search(query, limit)
+                    hits, ids = self.sources.pubmed.search(query, limit)
                     for pmid in ids:
-                        pmids.setdefault(pmid, []).append(label)
+                        found(pmids, pmid, level, label, index)
+                    entry.update(hits=hits, taken=len(ids))
                 else:
-                    _, studies = self.sources.trials.search(query, limit, with_results=True)
+                    hits, studies = self.sources.trials.search(query, limit, with_results=True)
                     for study in studies:
-                        nct = trial_record(study).ext_id
-                        trials.setdefault(nct, (study, []))[1].append(label)
+                        found(trials, trial_record(study).ext_id, level, label, index, study)
+                    entry.update(hits=hits, taken=len(studies))
             except SourceError as exc:
                 failed.append(f"{label} ({exc})")
+                entry["error"] = str(exc)
+            entries.append(entry)
         if failed:
             if len(failed) == len(queries):
                 raise SourceError("Every search query failed: " + "; ".join(failed))
             self.store.update_project(project_id, search_plan={**plan.model_dump(), "failed_queries": failed})
 
+        named = LEVEL_NAMES["named"]
         for extra in plan.extra_ids:
             extra = extra.strip()
             if NCT.match(extra):
                 study = self.sources.trials.study(extra.upper())
                 if study:
-                    trials.setdefault(extra.upper(), (study, []))[1].append("named by the search agent")
+                    found(trials, extra.upper(), "named", named, len(entries), study)
             elif extra.isdigit():
-                pmids.setdefault(extra, []).append("named by the search agent")
+                found(pmids, extra, "named", named, len(entries))
+        if any(item["first"] == len(entries) for item in [*pmids.values(), *trials.values()]):
+            entries.append({"level": "named", "source": "pubmed", "query": ", ".join(plan.extra_ids), "hits": None, "taken": None})
 
         pmid_list = list(pmids)[: self.settings.max_candidates]
         records: list[Record] = self.sources.pubmed.fetch(pmid_list) if pmid_list else []
         by_pmid = {r.pmid: r for r in records}
         articles = [(by_pmid[p], pmids[p]) for p in pmid_list if p in by_pmid]
-        registry = [(trial_record(study), found_by) for study, found_by in trials.values()]
+        registry = [(trial_record(item["study"]), item) for item in trials.values()]
         # Interleave the two sources so the cap on candidates keeps the top of each.
         merged = [item for pair in zip_longest(articles, registry) for item in pair if item is not None]
         added = 0
-        for record, found_by in merged:
+        for record, item in merged:
             if added >= self.settings.max_candidates:
                 break
-            if self._add(project_id, record, found_by):
+            if self._add(project_id, record, item["found_by"], item["found_in"]):
                 added += 1
+                entry = entries[item["first"]]
+                entry["added"] = entry.get("added", 0) + 1
+        for entry in entries:
+            if "error" not in entry:
+                entry.setdefault("added", 0)
+        self.store.update_project(project_id, search_log=entries)
         self._progress(project_id, "running the search", len(queries), len(queries))
 
-    def _add(self, project_id: str, record: Record, found_by: list[str]) -> bool:
+    def _follow_reviews(self, project_id: str) -> None:
+        """The step down from the reviews: add the studies cited by the reviews that passed screening."""
+        papers = self.store.papers(project_id)
+        reviews = [
+            p
+            for p in papers
+            if p["source"] == "pubmed"
+            and p["status"] == "screened_in"
+            and (p.get("screen") or {}).get("study_type") == "systematic_review_or_meta_analysis"
+        ][: self.settings.max_reviews_followed]
+        entry: dict[str, Any] = {"level": "cited", "source": "pubmed", "reviews": len(reviews), "cited": 0, "already": 0}
+        known = {p["pmid"] for p in papers if p.get("pmid")}
+        cited: dict[str, list[str]] = {}
+        failed: list[str] = []
+        for number, review in enumerate(reviews, start=1):
+            self._progress(project_id, "reading the reviews' references", number - 1, len(reviews))
+            try:
+                refs = self.sources.references(review["pmid"])
+            except Exception as exc:  # one unreadable reference list never stops the search
+                failed.append(f"PMID {review['pmid']} ({describe_error(exc)})")
+                continue
+            entry["cited"] += len(refs)
+            label = f"{LEVEL_NAMES['cited']}: {review['title']} (PMID {review['pmid']})"
+            for pmid in refs:
+                if pmid in known:
+                    entry["already"] += 1
+                else:
+                    cited.setdefault(pmid, []).append(label)
+        # Fetch more than the cap: reference lists are full of reviews, guidelines and methods papers.
+        ids = list(cited)[: self.settings.max_cited * 3]
+        try:
+            fetched = self.sources.pubmed.fetch(ids) if ids else []
+        except Exception as exc:
+            fetched = []
+            failed.append(f"fetching the {len(ids)} cited records ({describe_error(exc)})")
+        records = [r for r in fetched if not NOT_STUDIES & set(r.pubtypes)]
+        added = 0
+        for record in records:
+            if added >= self.settings.max_cited:
+                break
+            if self._add(project_id, record, cited[record.pmid], ["cited"]):
+                added += 1
+        entry.update(added=added, not_studies=len(fetched) - len(records))
+        if failed:
+            entry["failed"] = failed
+        project = self.store.project(project_id)
+        assert project is not None
+        log_entries = [e for e in project.get("search_log") or [] if e["level"] != "cited"]
+        self.store.update_project(project_id, search_log=[*log_entries, entry])
+        self._progress(project_id, "reading the reviews' references", len(reviews), len(reviews))
+
+    def _add(self, project_id: str, record: Record, found_by: list[str], found_in: list[str]) -> bool:
         return (
             self.store.add_paper(
                 project_id,
@@ -199,6 +293,7 @@ class Pipeline:
                 pubtypes=record.pubtypes,
                 abstract=record.abstract,
                 found_by=found_by,
+                found_in=found_in,
                 status="candidate",
             )
             is not None

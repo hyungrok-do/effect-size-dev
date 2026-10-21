@@ -142,6 +142,18 @@ class PubMed:
             records.extend(parse_pubmed_xml(response.content))
         return records
 
+    def references(self, pmid: str) -> list[str]:
+        """PMIDs an article cites, from its reference list in PubMed Central (none when PMC has no list)."""
+        payload = self._call(
+            "elink.fcgi",
+            {"dbfrom": "pubmed", "db": "pubmed", "id": pmid, "linkname": "pubmed_pubmed_refs", "retmode": "json"},
+        ).json()
+        for linkset in payload.get("linksets", []):
+            for links in linkset.get("linksetdbs", []):
+                if links.get("linkname") == "pubmed_pubmed_refs":
+                    return [str(x) for x in links.get("links", [])]
+        return []
+
 
 def _text(el: Any) -> str:
     return " ".join("".join(el.itertext()).split()) if el is not None else ""
@@ -353,6 +365,16 @@ class EuropePMC:
             return response.text
         return None
 
+    def references(self, pmid: str) -> list[str]:
+        """PMIDs an article cites, as far as Europe PMC matched its reference list to PubMed."""
+        response = self.http.request(
+            "GET", f"{self.BASE}MED/{pmid}/references", params={"page": 1, "pageSize": 1000, "format": "json"}
+        )
+        if response.status_code != 200:
+            return []
+        found = (response.json().get("referenceList") or {}).get("reference") or []
+        return [str(r["id"]) for r in found if r.get("source") == "MED" and r.get("id")]
+
 
 class Unpaywall:
     BASE = "https://api.unpaywall.org/v2/"
@@ -398,3 +420,11 @@ class Sources:
         self.trials = ClinicalTrials(self.http)
         self.europepmc = EuropePMC(self.http)
         self.unpaywall = Unpaywall(self.http, settings.contact_email)
+
+    def references(self, pmid: str) -> list[str]:
+        """PMIDs cited by an article: Europe PMC's reference list, else PubMed Central's."""
+        try:
+            found = self.europepmc.references(pmid)
+        except (SourceError, ValueError):
+            found = []
+        return found or self.pubmed.references(pmid)

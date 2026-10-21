@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from .config import Settings
 from .llm import ClaudeLLM
 from .pipeline import Pipeline
-from .schemas import SearchSpec
+from .schemas import LEVEL_NAMES, SearchSpec
 from .sources import Sources
 from .store import RUNNING, Store
 
@@ -196,6 +196,7 @@ def create_app(
         project = get_project(project_id)
         project["counts"] = store.status_counts(project_id)
         project["usage"] = store.usage(project_id)
+        project["level_names"] = LEVEL_NAMES
         return project
 
     @app.put("/api/projects/{project_id}/spec")
@@ -277,7 +278,7 @@ def create_app(
     def export_json(project_id: str) -> JSONResponse:
         project = get_project(project_id)
         body = {
-            "project": {k: project[k] for k in ("id", "created_at", "paragraph", "spec", "search_plan")},
+            "project": {k: project[k] for k in ("id", "created_at", "paragraph", "spec", "search_plan", "search_log")},
             "papers": papers(project_id),
             "usage": store.usage(project_id),
         }

@@ -4,6 +4,7 @@
 import { Activity, liveTasks, short } from './lib/activity.js';
 import { Claude, looksLikeAnthropicKey, MODELS } from './lib/claude.js';
 import { download, exportRows, PAPER, toCsv } from './lib/export.js';
+import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
 import { Sources } from './lib/sources.js';
 import { RUNNING, Store } from './lib/store.js';
@@ -53,9 +54,14 @@ const TABS = [
   ['pending', 'In progress'],
   ['excluded', 'Screened out'],
 ];
-const STEPS = ['problem', 'spec', 'progress', 'review'];
-const PANELS = { problem: '#problem', spec: '#spec', progress: '#progress-card', review: '#review' };
+const STEPS = ['setup', 'problem', 'spec', 'progress', 'review'];
+const PANELS = { setup: '#setup', problem: '#problem', spec: '#spec', progress: '#progress-card', review: '#review' };
 const SOURCES = [['pubmed', 'Papers (PubMed)'], ['clinicaltrials', 'ClinicalTrials.gov']];
+// Which search found a paper, on its card; the search log names each level in full (LEVEL_NAMES).
+const LEVEL_SHORT = {
+  reviews: 'Reviews search', primary: 'Target-population search', wider: 'Related-populations search',
+  outcome_data: 'Outcome-data search', cited: 'Cited by a review', named: 'Named by Opus',
+};
 const version = (model) => model.replace(/^claude-[a-z]+-/, '').replace('-', '.');
 const AGENTS = [
   ['opus', `Opus ${version(MODELS.manager)}`, 'manager', 'Reads the problem, plans the search, reviews flagged extractions'],
@@ -74,8 +80,8 @@ const store = new Store();
 const jobs = new Set(); // projects and papers with work running in this tab
 const state = {
   id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
-  uploadFor: null, step: 'problem', stepChosen: false, source: 'pubmed', filter: 'all',
-  available: { problem: true, spec: false, progress: false, review: false },
+  uploadFor: null, step: 'setup', stepChosen: false, source: 'pubmed', filter: 'all',
+  available: { setup: true, problem: true, spec: false, progress: false, review: false },
 };
 
 function h(tag, attrs = {}, ...children) {
@@ -136,7 +142,6 @@ function loadSettings() {
   $('#remember-key').checked = Boolean(remembered);
   $('#contact-email').value = readSetting(EMAIL);
   $('#ncbi-key').value = readSetting(NCBI_KEY);
-  if (!$('#contact-email').value) $('#more-settings').open = true;
 }
 
 const apiKey = () => $('#api-key').value.trim();
@@ -160,11 +165,12 @@ function forgetKey() {
 
 function showKeyStatus() {
   $('.keybox').dataset.missing = 'false';
+  $('#setup-flag').hidden = Boolean(apiKey());
   const status = $('#key-status');
   if (apiKey() && !looksLikeAnthropicKey(apiKey())) {
     $('.keybox').dataset.missing = 'true';
     status.textContent = "This doesn't look like an Anthropic API key: those start with sk-ant-. "
-      + 'An NCBI key goes under Contact email and NCBI key below.';
+      + 'An NCBI key goes in the NCBI API key box below.';
   } else if (apiKey()) {
     status.textContent = $('#remember-key').checked
       ? 'Remembered on this browser. It is sent only to Anthropic, straight from this page.'
@@ -196,8 +202,10 @@ async function checkKey() {
   }
 }
 
+// The jobs need a key; without one, the page goes to Setup and says so.
 function haveKey() {
   if (apiKey()) return true;
+  selectStep('setup');
   $('.keybox').dataset.missing = 'true';
   $('#key-status').textContent = 'Enter your Anthropic API key first.';
   $('#api-key').focus();
@@ -262,8 +270,8 @@ async function loadProjects() {
 function newSearch() {
   Object.assign(state, {
     id: null, project: null, papers: [], decisions: {}, usage: [], events: [], specKey: '', papersKey: '',
-    step: 'problem', stepChosen: false,
-    available: { problem: true, spec: false, progress: false, review: false },
+    step: apiKey() ? 'problem' : 'setup', stepChosen: false,
+    available: { setup: true, problem: true, spec: false, progress: false, review: false },
   });
   history.replaceState(null, '', location.pathname);
   const paragraph = $('#paragraph');
@@ -277,7 +285,7 @@ function newSearch() {
   renderTabs();
   renderActivity();
   loadProjects();
-  paragraph.focus();
+  if (state.step === 'problem') paragraph.focus();
 }
 
 async function openProject(id) {
@@ -624,13 +632,7 @@ function renderProgress(project) {
   if (running && progress.stage) parts.push(progress.total ? `${progress.stage}: ${progress.done} of ${progress.total}` : `${progress.stage}…`);
   if (total) parts.push(`${total} records found`, `${kept} kept after screening`, `${counts.extracted || 0} extracted`);
   $('#progress-text').textContent = parts.join(' · ');
-  $('#source-counts').replaceChildren(...(total ? SOURCES.map(([source, label]) => {
-    const mine = state.papers.filter((p) => p.source === source);
-    const n = (statuses) => mine.filter((p) => statuses.includes(p.status)).length;
-    const screenedIn = mine.length - n(['screened_out', 'candidate']);
-    return h('div', {}, h('strong', {}, label),
-      `${mine.length} found · ${screenedIn} kept after screening · ${n(['extracted'])} extracted`);
-  }) : []));
+  renderFunnel(project);
   $('#keep-open').hidden = !running;
   const stopped = !running && (project.status === 'interrupted' || (RUNNING.has(project.status) && project.status !== 'reading'));
   $('#continue').hidden = !(stopped || (project.status === 'error' && project.spec));
@@ -639,11 +641,15 @@ function renderProgress(project) {
   const plan = project.search_plan;
   $('#plan-details').hidden = !plan;
   if (plan) {
+    // Searches planned before the top-down levels had a flat list of PubMed queries.
+    const levels = plan.levels
+      ? [...plan.levels].sort((x, y) => LEVELS.indexOf(x.level) - LEVELS.indexOf(y.level))
+      : (plan.pubmed_queries || []).map((query) => ({ level: null, query, why: '' }));
     $('#plan-summary').textContent = plan.summary;
     $('#plan-queries').replaceChildren(
-      ...plan.pubmed_queries.map((q) => h('li', {}, 'PubMed: ', h('code', {}, q))),
-      ...plan.clinicaltrials_queries.map((q) => h('li', {}, 'ClinicalTrials.gov: ', h('code', {}, q))),
-      ...(plan.extra_ids.length ? [h('li', {}, `Named records: ${plan.extra_ids.join(', ')}`)] : []),
+      ...levels.map((l) => h('li', {}, h('strong', {}, l.level ? LEVEL_NAMES[l.level] : 'PubMed'), l.why && ` · ${l.why}`, h('code', {}, l.query))),
+      ...plan.clinicaltrials_queries.map((q) => h('li', {}, h('strong', {}, LEVEL_NAMES.registry), h('code', {}, q))),
+      ...(plan.extra_ids.length ? [h('li', {}, h('strong', {}, LEVEL_NAMES.named), h('code', {}, plan.extra_ids.join(', ')))] : []),
       ...(plan.failed_queries || []).map((q) => h('li', {}, badge('Failed', 'err'), ' ', q)),
     );
   }
@@ -652,6 +658,48 @@ function renderProgress(project) {
     h('td', {}, u.step), h('td', {}, u.model), h('td', { class: 'num' }, u.calls),
     h('td', { class: 'num' }, u.input_tokens.toLocaleString()), h('td', { class: 'num' }, u.output_tokens.toLocaleString()),
     h('td', { class: 'num' }, u.cache_read_input_tokens.toLocaleString()), h('td', { class: 'num' }, u.web_fetch_requests || ''))));
+}
+
+// The search, level by level: what each found, how much of it screening kept, and how much was extracted.
+function renderFunnel(project) {
+  const log = project.search_log || [];
+  $('#funnel-wrap').hidden = !log.length;
+  if (!log.length) return;
+  const number = (n) => (n == null ? '' : Number(n).toLocaleString('en-US'));
+  const counts = (level) => {
+    const mine = state.papers.filter((p) => (p.found_in || []).includes(level));
+    return [mine.length, mine.filter((p) => !['screened_out', 'candidate'].includes(p.status)).length, mine.filter((p) => p.status === 'extracted').length];
+  };
+  const searched = (e) => (e.error ? `Failed: ${e.error}`
+    : `${number(e.hits)} ${e.hits === 1 ? 'hit' : 'hits'}; the top ${number(e.taken)} taken`);
+  const how = (level, entries) => {
+    if (level === 'cited') {
+      const e = entries[0];
+      if (!e.reviews) return 'No review passed screening, so there were no references to follow.';
+      return `References of ${e.reviews} ${e.reviews === 1 ? 'review' : 'reviews'}: ${number(e.cited)} in PubMed, `
+        + `${number(e.already)} already found, ${number(e.not_studies)} not studies${e.failed ? `; ${e.failed.length} could not be read` : ''}`;
+    }
+    if (level === 'named') return entries.map((e) => e.query).join(', ');
+    return entries.map(searched).join(' · ');
+  };
+  const row = (level, label, mark) => {
+    const entries = log.filter((e) => e.level === level);
+    return h('tr', { 'data-level': level },
+      h('td', { class: 'level' }, mark && h('span', { class: 'step', 'aria-hidden': 'true' }, mark), label, h('span', { class: 'how' }, how(level, entries))),
+      ...counts(level).map((n) => h('td', { class: 'num' }, number(n))));
+  };
+  const rows = [h('tr', { class: 'group' }, h('th', { colspan: '4', scope: 'colgroup' }, 'PubMed'))];
+  let step = 0;
+  for (const level of [...LEVELS, 'cited', 'named']) {
+    if (!log.some((e) => e.level === level)) continue;
+    const mark = LEVELS.includes(level) ? String(++step) : level === 'cited' ? '↳' : '';
+    rows.push(row(level, LEVEL_NAMES[level], mark));
+  }
+  if (log.some((e) => e.level === 'registry')) {
+    rows.push(h('tr', { class: 'group' }, h('th', { colspan: '4', scope: 'colgroup' }, LEVEL_NAMES.registry)));
+    rows.push(row('registry', 'Studies with posted results', ''));
+  }
+  $('#funnel tbody').replaceChildren(...rows);
 }
 
 // -- step 4 ----------------------------------------------------------------------
@@ -718,6 +766,8 @@ function paperCard(paper, trials) {
     paper.year && h('span', {}, paper.year),
     paper.journal && h('span', {}, paper.journal),
     badge(paper.source === 'clinicaltrials' ? 'ClinicalTrials.gov' : 'PubMed'),
+    paper.source === 'pubmed' && LEVEL_SHORT[paper.found_in?.[0]]
+      && h('span', { class: 'badge', title: (paper.found_by || []).join('\n') }, LEVEL_SHORT[paper.found_in[0]]),
     paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind, paper.fulltext_kind === 'abstract' ? 'warn' : ''),
     paper.fetched_by === 'sonnet' && badge('Fetched by Sonnet'),
     paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
@@ -918,9 +968,9 @@ function exportCsv(includedOnly) {
 }
 
 async function exportJson() {
-  const { id, created_at, paragraph, spec, search_plan } = state.project;
+  const { id, created_at, paragraph, spec, search_plan, search_log } = state.project;
   const papers = state.papers.map((p) => ({ ...p, decisions: state.decisions[p.id] || {}, links: links(p) }));
-  const body = { project: { id, created_at, paragraph, spec, search_plan }, papers, usage: state.usage };
+  const body = { project: { id, created_at, paragraph, spec, search_plan, search_log }, papers, usage: state.usage };
   download(`effect-sizes-${id}.json`, JSON.stringify(body, null, 2), 'application/json');
 }
 
@@ -947,6 +997,12 @@ async function start() {
     $(`#tab-${step}`).addEventListener('click', () => selectStep(step));
     $(`#tab-${step}`).addEventListener('keydown', tabKeys);
   }
+  $('#setup-done').addEventListener('click', () => {
+    if (!haveKey()) return;
+    selectStep(state.project ? defaultStep(state.project) : 'problem', true);
+  });
+  $('#roles').replaceChildren(...AGENTS.map(([key, name, role, does]) => h('li', { 'data-agent': key },
+    h('strong', {}, `${name} · ${role}`), does)));
   $('#activity-toggle').addEventListener('click', () => setActivityOpen($('#activity').hidden));
   $('#activity-close').addEventListener('click', () => setActivityOpen(false));
   document.addEventListener('keydown', (event) => {
@@ -964,6 +1020,9 @@ async function start() {
     + `Haiku ${MODELS.worker.replace('claude-haiku-', '').replace('-', '.')} screens and reads`;
   loadSettings();
   showKeyStatus();
+  // Setup comes first until there is a key; after that, a new visit starts at Describe.
+  state.step = apiKey() ? 'problem' : 'setup';
+  renderTabs();
   await store.interruptRunning();
   await loadProjects();
   const id = location.hash.slice(1);

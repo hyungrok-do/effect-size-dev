@@ -26,8 +26,8 @@ from esf.jats import jats_to_text
 from esf.sources import parse_pubmed_xml, trial_results_text
 from esf.verify import in_audit_sample, numbers_in, verify
 from fixtures import (
-    ABSTRACT_LINE, JATS, PDF_LINE, PUBMED_XML, SPEC, TRIAL, FakeLLM, LiteratureAPIs, _extraction, _result, _value, make_pdf,
-    streamed,
+    ABSTRACT_LINE, JATS, PDF_LINE, PLAN, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL, FakeLLM, LiteratureAPIs, _extraction, _result,
+    _value, make_pdf, streamed,
 )
 
 sync_api = pytest.importorskip("playwright.sync_api")
@@ -137,14 +137,15 @@ class Network:
         turns = len(body["messages"])
         if turns == 1:
             return message(OPUS, [
+                {"type": "tool_use", "id": "t0", "name": "count_pubmed", "input": {"queries": ["mindfulness[tiab]", f"mindfulness[tiab] AND {REVIEW_FILTER}"]}},
                 {"type": "tool_use", "id": "t1", "name": "search_pubmed", "input": {"query": "mindfulness[tiab] AND depress*[tiab]", "max_results": 5}},
                 {"type": "tool_use", "id": "t2", "name": "search_clinicaltrials", "input": {"query": "mindfulness AND depression"}},
             ], "tool_use")
         if turns == 3:
-            results = json.dumps(body["messages"][2]["content"])
-            assert "Total hits: 4" in results and "NCT01234567" in results
-            plan = {"pubmed_queries": ["mindfulness[tiab] AND depress*[tiab]"], "clinicaltrials_queries": ["mindfulness AND depression"],
-                    "extra_ids": [], "summary": "One query in each source."}
+            results = body["messages"][2]["content"]
+            assert results[0]["content"] == f"#1 4 | mindfulness[tiab]\n#2 1 | mindfulness[tiab] AND {REVIEW_FILTER}"
+            assert "Total hits: 4" in json.dumps(results) and "NCT01234567" in json.dumps(results)
+            plan = PLAN.model_dump()
             return message(OPUS, [{"type": "tool_use", "id": "t3", "name": "submit_search_plan", "input": plan}], "tool_use")
         return message(OPUS, [{"type": "text", "text": "Done."}], "end_turn")
 
@@ -241,12 +242,20 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.on("console", lambda m: errors.append(m.text) if m.type == "error" and not m.location.get("url", "").startswith("https://example.org/") else None)
 
     page.goto(site_url)
+    # Without a key the page opens at Setup, and a job sent off without one comes back to it.
+    assert page.get_attribute("#tab-setup", "aria-selected") == "true" and page.is_visible("#setup-flag")
+    page.click("#tab-problem")
     page.fill("#paragraph", "We propose a two-arm randomized trial of a 12-week mindfulness app versus waitlist for PHQ-9 in students.")
     page.click("#read")
+    assert page.get_attribute("#tab-setup", "aria-selected") == "true"
     assert page.get_attribute(".keybox", "data-missing") == "true"
     page.fill("#api-key", KEY)
     page.fill("#contact-email", "test@example.com")
     page.dispatch_event("#contact-email", "change")
+    assert page.is_hidden("#setup-flag")
+    assert page.locator("#roles li strong").all_inner_texts()[0] == "Opus 5.5 · manager"
+    page.click("#setup-done")
+    assert page.get_attribute("#tab-problem", "aria-selected") == "true"
     page.click("#read")
     page.wait_for_selector("#spec:not([hidden])")
     assert page.input_value("#f-population") == "University students"
@@ -255,20 +264,33 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     # does that when the search tab is the one open, so this also shows the search tab was followed).
     page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
     page.wait_for_selector("#review:not([hidden]) .paper")
-    assert page.is_hidden("#progress-card") and page.is_hidden("#spec") and page.is_hidden("#problem")
+    assert page.is_hidden("#progress-card") and page.is_hidden("#spec") and page.is_hidden("#problem") and page.is_hidden("#setup")
 
     # Papers and registry records are reviewed separately.
     sources = page.locator("#source-switch button").all_inner_texts()
-    assert sources == ["Papers (PubMed) · 3 extracted of 4", "ClinicalTrials.gov · 1 extracted of 1"], sources
+    assert sources == ["Papers (PubMed) · 5 extracted of 6", "ClinicalTrials.gov · 1 extracted of 1"], sources
     tabs = page.locator("#tabs button").all_inner_texts()
-    assert tabs[0] == "Extracted (3)" and tabs[3] == "Screened out (1)", tabs
+    assert tabs[0] == "Extracted (5)" and tabs[3] == "Screened out (1)", tabs
+    # Each paper says how the search found it.
+    assert page.locator(".paper", has_text="Smartphone mindfulness").locator(".badge", has_text="Cited by a review").count() == 1
+    assert page.locator(".paper", has_text="systematic review and meta-analysis").locator(".badge", has_text="Reviews search").count() == 1
     page.click("#source-switch button:has-text('ClinicalTrials.gov')")
     assert page.locator("#papers .paper").all_inner_texts()[0].startswith("A Randomized Trial of a Mindfulness App")
     page.click("#source-switch button:has-text('Papers')")
+
+    # The search, level by level from the top down: found, kept after screening, extracted.
     page.click("#tab-progress")
-    counts = page.locator("#source-counts div").all_inner_texts()
-    assert counts == ["Papers (PubMed)\n4 found · 3 kept after screening · 3 extracted",
-                      "ClinicalTrials.gov\n1 found · 1 kept after screening · 1 extracted"], counts
+    rows = page.evaluate("""[...document.querySelectorAll('#funnel tbody tr')].map((tr) => tr.dataset.level
+        ? [tr.dataset.level, ...[...tr.querySelectorAll('td.num')].map((td) => Number(td.textContent))]
+        : [tr.textContent])""")
+    assert rows == [["PubMed"], ["reviews", 1, 1, 1], ["primary", 4, 3, 3], ["cited", 1, 1, 1],
+                    ["ClinicalTrials.gov"], ["registry", 1, 1, 1]], rows
+    funnel = page.inner_text("#funnel")
+    assert "1 hit; the top 1 taken" in funnel and "4 hits; the top 4 taken" in funnel
+    assert "References of 1 review: 3 in PubMed, 1 already found, 1 not studies" in funnel
+    page.click("#plan-details summary")
+    strategy = page.locator("#plan-queries li").all_inner_texts()
+    assert strategy[0].startswith("Reviews and meta-analyses · Pooled effects.") and strategy[1].startswith("Studies in the target population")
     page.click("#tab-review")
 
     # The activity panel: what each agent did, newest first.
@@ -278,7 +300,10 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert names == ["Opus 5.5 manager", "Sonnet 5.5 fetcher", "Haiku 5.5 workers", "Code search and checks"], names
     assert "calls" in agents[0] and "Idle" in agents[0]
     timeline = "\n".join(page.locator("#timeline li").all_inner_texts())
-    for expected in ("Reading the problem", "Tries PubMed: mindfulness", "Planning the search", "Collected 5 records to screen",
+    for expected in ("Reading the problem", "Counts 2 PubMed queries", "#1 4, #2 1", "Tries PubMed: mindfulness", "Planning the search",
+                     "Final plan: primary → reviews", "Reviews and meta-analyses: mindfulness", "Collected 6 records to screen",
+                     "Following the references of 1 included review", "References of “Mindfulness apps for depressive",
+                     "Added 1 study cited by the reviews", "Screening “Smartphone mindfulness",
                      "Screening “Stress responses in a mouse model", "exclude: Animal study.",
                      "Fetching example.org, which the browser may not read", "PDF, 1 KB",
                      "Extracting “Brief mindfulness training", "Reviewing “Mindfulness groups", "Search finished"):
@@ -294,7 +319,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert pdf_paper.locator(".badge", has_text="quote found").count() == 4
     assert page.locator(".paper", has_text="pilot randomized trial").locator(".badge", has_text="Reviewed by Opus").count() == 1
 
-    page.locator(".result").first.locator("button.include").click()
+    page.locator(".paper", has_text="A mindfulness app for depressive").locator(".result").first.locator("button.include").click()
     page.wait_for_selector(".result[data-decision='include']")
     with page.expect_download() as download:
         page.click("#export-included")
@@ -348,7 +373,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert "before it finished" in page.inner_text("#project-list")
     page.click("#continue")
     page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
-    page.wait_for_function("document.querySelector('#tabs button').textContent === 'Extracted (3)'")
+    page.wait_for_function("document.querySelector('#tabs button').textContent === 'Extracted (5)'")
     assert "Continuing the search" in page.inner_text("#timeline")
 
     phone = context.new_page()
@@ -376,6 +401,7 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     context.route("**/*", Network())
     page = context.new_page()
     page.goto(site_url)
+    assert page.get_attribute("#tab-setup", "aria-selected") == "true"
 
     # An NCBI key pasted into the Anthropic box is caught before anything is sent.
     page.fill("#api-key", "0123456789abcdef0123456789abcdef1234")
@@ -387,12 +413,14 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     page.wait_for_function("document.querySelector('#key-status').textContent.includes('did not accept')")
     status = page.inner_text("#key-status")
     assert "claude-opus-5-5: Anthropic did not accept the API key (401: invalid x-api-key (request req_test))" in status
+    page.click("#tab-problem")
     page.fill("#paragraph", "A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.")
     page.click("#read")
     page.wait_for_selector("#problem-error:not([hidden])")
     assert "Anthropic did not accept the API key (401: invalid x-api-key" in page.inner_text("#problem-error")
 
     # A good key: every model is reachable.
+    page.click("#tab-setup")
     page.fill("#api-key", KEY)
     page.click("#check-key")
     page.wait_for_function("document.querySelector('#key-status').textContent.startsWith('The key works')")

@@ -1,6 +1,7 @@
 // The search-and-extract pipeline, running in the page:
 //
-//   spec (Opus) -> search plan (Opus + tools) -> run queries -> screen (Haiku)
+//   spec (Opus) -> search plan (Opus + tools) -> run the levels from the top down -> screen (Haiku)
+//   -> add what the included reviews cite -> screen those (Haiku)
 //   -> full text (browser, or Sonnet when the browser may not) -> extract (Haiku)
 //   -> verify (code) -> adjudicate escalations (Opus) -> review (you)
 //
@@ -9,16 +10,23 @@
 
 import { NO_ACTIVITY, short } from './activity.js';
 import { describeError, ModelDeclined, ModelTruncated } from './claude.js';
+import { LEVEL_NAMES, LEVELS } from './generated.js';
 import { jatsToText } from './jats.js';
 import { pdfText } from './pdf.js';
 import { bytesToBase64, trialRecord, trialResultsText } from './sources.js';
 import { escalationReasons, inAuditSample, verify } from './verify.js';
 
 export const DEFAULTS = {
-  auditFraction: 0.1, perQueryLimit: 100, maxCandidates: 300, maxExtractions: 60, concurrency: 6, searchMaxIterations: 25,
+  auditFraction: 0.1, perQueryLimit: 100, maxCandidates: 300, maxReviewsFollowed: 10, maxCited: 150,
+  maxExtractions: 60, concurrency: 6, searchMaxIterations: 25,
 };
 
 const NCT = /^NCT\d{8}$/i;
+// Publication types that are not studies; a review's reference list is full of them.
+const NOT_STUDIES = new Set([
+  'Review', 'Systematic Review', 'Meta-Analysis', 'Editorial', 'Comment', 'Letter', 'News',
+  'Guideline', 'Practice Guideline', 'Published Erratum', 'Retraction of Publication',
+]);
 const TEXT_KIND = { registry: 'registry results', pmc_xml: 'PMC full text', oa_pdf: 'open-access PDF', abstract: 'abstract only', upload: 'your PDF' };
 const countValues = (extraction) => extraction.results.reduce((n, r) => n + r.values.length, 0);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -93,7 +101,7 @@ export class Pipeline {
     const spec = project.spec;
     if (!resume) {
       await this.store.clearPapers(projectId);
-      await this.store.updateProject(projectId, { error: null, search_plan: null, collected: false });
+      await this.store.updateProject(projectId, { error: null, search_plan: null, search_log: null, collected: false, followed: false });
       project = await this.store.project(projectId);
     } else {
       await this.store.updateProject(projectId, { error: null });
@@ -109,7 +117,7 @@ export class Pipeline {
           () => this.claude.planSearch(spec, new Toolbox(this.sources, this.activity), {
             sink: this.sink(projectId), maxIterations: this.settings.searchMaxIterations,
           }),
-          (p) => `Final plan: ${plural(p.pubmed_queries.length, 'PubMed query', 'PubMed queries')}, `
+          (p) => `Final plan: ${p.levels.map((l) => l.level).join(' → ') || 'no PubMed levels'}; `
             + `${plural(p.clinicaltrials_queries.length, 'ClinicalTrials.gov query', 'ClinicalTrials.gov queries')}`,
         );
         await this.store.updateProject(projectId, { search_plan: plan });
@@ -120,6 +128,11 @@ export class Pipeline {
         await this.store.updateProject(projectId, { collected: true });
       }
       await this.store.updateProject(projectId, { status: 'screening' });
+      await this.screenAll(projectId, spec);
+      if (!(await this.store.project(projectId)).followed) {
+        await this.followReviews(projectId);
+        await this.store.updateProject(projectId, { followed: true });
+      }
       await this.screenAll(projectId, spec);
       await this.store.updateProject(projectId, { status: 'extracting' });
       await this.extractAll(projectId, spec);
@@ -133,58 +146,71 @@ export class Pipeline {
     await this.activity.note({ agent: 'code', step: 'run', text: 'Search finished', detail: `${counts.extracted || 0} extracted; ready for review` });
   }
 
-  // Run the planned queries, de-duplicate, and store the candidates.
+  // Run the levels from the top down, then the registry queries, and store the candidates in that
+  // order. Each search's hits and how many records it added go to the search log.
   async collect(projectId, plan) {
     const limit = this.settings.perQueryLimit;
+    // A search planned before the levels existed, continued now: its queries count as one level.
+    const planned = plan.levels || (plan.pubmed_queries || []).map((query) => ({ level: 'primary', query, why: '' }));
+    const levels = planned.filter((l) => l.query.trim()).sort((a, b) => LEVELS.indexOf(a.level) - LEVELS.indexOf(b.level));
+    const queries = [
+      ...levels.map((l) => ['pubmed', l.level, l.query]),
+      ...plan.clinicaltrials_queries.map((q) => ['clinicaltrials', 'registry', q]),
+    ];
+    // id -> where it was found, in the order first found; `first` is the index of the search that found it first.
     const pmids = new Map();
     const trials = new Map();
-    const queries = [...plan.pubmed_queries.map((q) => ['pubmed', q]), ...plan.clinicaltrials_queries.map((q) => ['clinicaltrials', q])];
+    const found = (table, key, level, label, index, study = null) => {
+      const item = table.get(key) || { foundBy: [], foundIn: [], first: index, study };
+      item.foundBy.push(label);
+      if (!item.foundIn.includes(level)) item.foundIn.push(level);
+      table.set(key, item);
+    };
+    const entries = [];
     const failed = [];
-    for (const [i, [source, query]] of queries.entries()) {
-      await this.progress(projectId, 'running the search', i, queries.length);
-      const label = `${source}: ${query}`;
-      const name = source === 'pubmed' ? 'PubMed' : 'ClinicalTrials.gov';
+    for (const [index, [source, level, query]] of queries.entries()) {
+      await this.progress(projectId, 'running the search', index, queries.length);
+      const label = `${LEVEL_NAMES[level]}: ${query}`;
+      const entry = { level, source, query };
       try {
-        await this.activity.track({ agent: 'code', step: 'collect', text: `${name}: ${short(query, 90)}` }, async () => {
+        await this.activity.track({ agent: 'code', step: 'collect', text: `${LEVEL_NAMES[level]}: ${short(query, 90)}` }, async () => {
           if (source === 'pubmed') {
-            const [, ids] = await this.sources.pubmed.search(query, limit);
-            for (const id of ids) pmids.set(id, [...(pmids.get(id) || []), label]);
-            return ids.length;
+            const [hits, ids] = await this.sources.pubmed.search(query, limit);
+            for (const id of ids) found(pmids, id, level, label, index);
+            Object.assign(entry, { hits, taken: ids.length });
+          } else {
+            const [hits, studies] = await this.sources.trials.search(query, limit, true);
+            for (const study of studies) found(trials, trialRecord(study).ext_id, level, label, index, study);
+            Object.assign(entry, { hits, taken: studies.length });
           }
-          const [, studies] = await this.sources.trials.search(query, limit, true);
-          for (const study of studies) {
-            const nct = trialRecord(study).ext_id;
-            const entry = trials.get(nct) || { study, foundBy: [] };
-            entry.foundBy.push(label);
-            trials.set(nct, entry);
-          }
-          return studies.length;
-        }, (n) => `${plural(n, 'record')} taken`);
+        }, () => `${plural(entry.hits, 'hit')}; the top ${entry.taken} taken`);
       } catch (error) {
         failed.push(`${label} (${describeError(error)})`);
+        entry.error = describeError(error);
       }
+      entries.push(entry);
     }
     if (failed.length && failed.length === queries.length) throw new Error(`Every search query failed: ${failed.join('; ')}`);
     if (failed.length) await this.store.updateProject(projectId, { search_plan: { ...plan, failed_queries: failed } });
 
+    const named = LEVEL_NAMES.named;
     for (const extra of plan.extra_ids.map((x) => x.trim())) {
       if (NCT.test(extra)) {
         const study = await this.sources.trials.study(extra.toUpperCase()).catch(() => null);
-        if (study) {
-          const entry = trials.get(extra.toUpperCase()) || { study, foundBy: [] };
-          entry.foundBy.push('named by the search agent');
-          trials.set(extra.toUpperCase(), entry);
-        }
+        if (study) found(trials, extra.toUpperCase(), 'named', named, entries.length, study);
       } else if (/^\d+$/.test(extra)) {
-        pmids.set(extra, [...(pmids.get(extra) || []), 'named by the search agent']);
+        found(pmids, extra, 'named', named, entries.length);
       }
+    }
+    if ([...pmids.values(), ...trials.values()].some((item) => item.first === entries.length)) {
+      entries.push({ level: 'named', source: 'pubmed', query: plan.extra_ids.join(', '), hits: null, taken: null });
     }
 
     const pmidList = [...pmids.keys()].slice(0, this.settings.maxCandidates);
     const records = pmidList.length ? await this.sources.pubmed.fetch(pmidList) : [];
     const byPmid = new Map(records.map((r) => [r.pmid, r]));
     const articles = pmidList.filter((p) => byPmid.has(p)).map((p) => [byPmid.get(p), pmids.get(p)]);
-    const registry = [...trials.values()].map(({ study, foundBy }) => [trialRecord(study), foundBy]);
+    const registry = [...trials.values()].map((item) => [trialRecord(item.study), item]);
     // Interleave the two sources so the cap on candidates keeps the top of each.
     const merged = [];
     for (let i = 0; i < Math.max(articles.length, registry.length); i++) {
@@ -193,18 +219,81 @@ export class Pipeline {
     }
     let added = 0;
     const bySource = { pubmed: 0, clinicaltrials: 0 };
-    for (const [record, foundBy] of merged) {
+    for (const [record, item] of merged) {
       if (added >= this.settings.maxCandidates) break;
-      if (await this.store.addPaper(projectId, { ...record, found_by: foundBy, status: 'candidate' })) {
+      if (await this.store.addPaper(projectId, { ...record, found_by: item.foundBy, found_in: item.foundIn, status: 'candidate' })) {
         added += 1;
         bySource[record.source] += 1;
+        entries[item.first].added = (entries[item.first].added || 0) + 1;
       }
     }
+    for (const entry of entries) if (!entry.error) entry.added ||= 0;
+    await this.store.updateProject(projectId, { search_log: entries });
     await this.activity.note({
       agent: 'code', step: 'collect', text: `Collected ${plural(added, 'record')} to screen`,
       detail: `${plural(bySource.pubmed, 'paper')} from PubMed, ${plural(bySource.clinicaltrials, 'registry record')} from ClinicalTrials.gov`,
     });
     await this.progress(projectId, 'running the search', queries.length, queries.length);
+  }
+
+  // The step down from the reviews: add the studies cited by the reviews that passed screening.
+  async followReviews(projectId) {
+    const papers = await this.store.papers(projectId);
+    const reviews = papers.filter((p) => p.source === 'pubmed' && p.status === 'screened_in'
+      && p.screen?.study_type === 'systematic_review_or_meta_analysis').slice(0, this.settings.maxReviewsFollowed);
+    const entry = { level: 'cited', source: 'pubmed', reviews: reviews.length, cited: 0, already: 0, added: 0 };
+    const known = new Set(papers.map((p) => p.pmid).filter(Boolean));
+    const cited = new Map();
+    const failed = [];
+    if (reviews.length) {
+      await this.activity.note({ agent: 'code', step: 'follow', text: `Following the references of ${plural(reviews.length, 'included review')}` });
+    }
+    for (const [i, review] of reviews.entries()) {
+      await this.progress(projectId, "reading the reviews' references", i, reviews.length);
+      let refs;
+      try {
+        refs = await this.activity.track(
+          { agent: 'code', step: 'follow', text: `References of “${short(review.title)}”`, paperId: review.id },
+          () => this.sources.references(review.pmid),
+          (r) => `${plural(r.length, 'cited record')} in PubMed`,
+        );
+      } catch (error) {
+        failed.push(`PMID ${review.pmid} (${describeError(error)})`);
+        continue;
+      }
+      entry.cited += refs.length;
+      const label = `${LEVEL_NAMES.cited}: ${review.title} (PMID ${review.pmid})`;
+      for (const pmid of refs) {
+        if (known.has(pmid)) entry.already += 1;
+        else cited.set(pmid, [...(cited.get(pmid) || []), label]);
+      }
+    }
+    // Fetch more than the cap: reference lists are full of reviews, guidelines and methods papers.
+    const ids = [...cited.keys()].slice(0, this.settings.maxCited * 3);
+    let fetched = [];
+    try {
+      if (ids.length) fetched = await this.sources.pubmed.fetch(ids);
+    } catch (error) {
+      failed.push(`fetching the ${ids.length} cited records (${describeError(error)})`);
+    }
+    const records = fetched.filter((r) => !r.pubtypes.some((t) => NOT_STUDIES.has(t)));
+    for (const record of records) {
+      if (entry.added >= this.settings.maxCited) break;
+      if (await this.store.addPaper(projectId, { ...record, found_by: cited.get(record.pmid), found_in: ['cited'], status: 'candidate' })) {
+        entry.added += 1;
+      }
+    }
+    entry.not_studies = fetched.length - records.length;
+    if (failed.length) entry.failed = failed;
+    const log = (await this.store.project(projectId)).search_log || [];
+    await this.store.updateProject(projectId, { search_log: [...log.filter((e) => e.level !== 'cited'), entry] });
+    if (reviews.length) {
+      await this.activity.note({
+        agent: 'code', step: 'follow', text: `Added ${plural(entry.added, 'study', 'studies')} cited by the reviews`,
+        detail: `${entry.cited} cited in PubMed; ${entry.already} already found; ${entry.not_studies} not studies (reviews, guidelines, letters)`,
+      });
+    }
+    await this.progress(projectId, "reading the reviews' references", reviews.length, reviews.length);
   }
 
   async screenAll(projectId, spec) {
@@ -382,6 +471,22 @@ export class Toolbox {
   constructor(sources, activity = NO_ACTIVITY) {
     this.sources = sources;
     this.activity = activity;
+  }
+
+  countPubmed(queries) {
+    return this.activity.track({ agent: 'opus', step: 'search', text: `Counts ${plural(queries.length, 'PubMed query', 'PubMed queries')}` }, async () => {
+      const lines = [];
+      for (const [i, query] of queries.entries()) {
+        let hits;
+        try {
+          hits = (await this.sources.pubmed.search(query, 0))[0].toLocaleString('en-US');
+        } catch (error) {
+          hits = `error: ${describeError(error)}`;
+        }
+        lines.push(`#${i + 1} ${hits} | ${query}`);
+      }
+      return lines.join('\n');
+    }, (out) => out.split('\n').map((line) => line.split(' | ')[0]).join(', '));
   }
 
   previewPubmed(query, maxResults) {

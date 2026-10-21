@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT NOT NULL,
     progress TEXT,
     error TEXT,
-    search_plan TEXT
+    search_plan TEXT,
+    search_log TEXT
 );
 CREATE TABLE IF NOT EXISTS papers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS papers (
     pubtypes TEXT,
     abstract TEXT,
     found_by TEXT,
+    found_in TEXT,
     status TEXT NOT NULL,
     screen TEXT,
     fulltext_kind TEXT,
@@ -73,9 +75,11 @@ JSON_COLUMNS = {
     "spec",
     "progress",
     "search_plan",
+    "search_log",
     "nct_ids",
     "pubtypes",
     "found_by",
+    "found_in",
     "screen",
     "extraction",
     "verification",
@@ -116,6 +120,10 @@ class Store:
             if str(path) != ":memory:":
                 self._db.execute("PRAGMA journal_mode = WAL")
             self._db.executescript(SCHEMA)
+            # Columns added since the first version; CREATE TABLE IF NOT EXISTS leaves old tables as they were.
+            for table, column in (("projects", "search_log"), ("papers", "found_in")):
+                if column not in {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}:
+                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
 
     def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
         with self._lock:

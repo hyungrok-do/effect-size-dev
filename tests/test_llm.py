@@ -117,6 +117,10 @@ class Toolbox:
     def __init__(self):
         self.queries = []
 
+    def count_pubmed(self, queries):
+        self.queries.append(("count", tuple(queries)))
+        return "\n".join(f"#{i} 12 | {q}" for i, q in enumerate(queries, start=1))
+
     def preview_pubmed(self, query, max_results):
         self.queries.append(("pubmed", query, max_results))
         return "Total hits: 12\n11111111 | 2021 | Randomized Controlled Trial | A trial"
@@ -127,9 +131,17 @@ class Toolbox:
 
 
 def test_search_agent_explores_then_submits_a_plan():
-    plan = {"pubmed_queries": ["mindfulness[tiab]"], "clinicaltrials_queries": ["mindfulness"], "extra_ids": ["11111111"], "summary": "S."}
+    plan = {
+        "levels": [
+            {"level": "reviews", "query": "mindfulness[tiab] AND meta-analysis[pt]", "why": "Pooled effects."},
+            {"level": "primary", "query": "mindfulness[tiab] AND randomized[tiab]", "why": "Trials."},
+        ],
+        "clinicaltrials_queries": ["mindfulness"], "extra_ids": ["11111111"], "summary": "S.",
+    }
+    many = [f"q{i}" for i in range(20)]
     llm, api = make_llm([
         ("json", _message([
+            {"type": "tool_use", "id": "t0", "name": "count_pubmed", "input": {"queries": many}},
             {"type": "tool_use", "id": "t1", "name": "search_pubmed", "input": {"query": "mindfulness[tiab]", "max_results": 500}},
             {"type": "tool_use", "id": "t2", "name": "search_clinicaltrials", "input": {"query": "mindfulness"}},
         ], "tool_use")),
@@ -138,16 +150,33 @@ def test_search_agent_explores_then_submits_a_plan():
     ])
     toolbox = Toolbox()
     result = llm.plan_search(SPEC, toolbox)
+    assert [(lv.level, lv.query) for lv in result.levels] == [(lv["level"], lv["query"]) for lv in plan["levels"]]
     assert result.extra_ids == ["11111111"]
-    assert toolbox.queries == [("pubmed", "mindfulness[tiab]", 50), ("trials", "mindfulness", 20)]
+    # At most 12 counts per call; previews capped at 50 records.
+    assert toolbox.queries == [("count", tuple(many[:12])), ("pubmed", "mindfulness[tiab]", 50), ("trials", "mindfulness", 20)]
 
     first = api.requests[0][1]
     assert first["model"] == "claude-opus-5-5" and first["output_config"]["effort"] == "high"
     assert first["fallbacks"] == "default"
-    assert {t["name"] for t in first["tools"]} == {"search_pubmed", "search_clinicaltrials", "submit_search_plan"}
+    assert [t["name"] for t in first["tools"]] == ["count_pubmed", "search_pubmed", "search_clinicaltrials", "submit_search_plan"]
+    assert "top down" in first["system"][0]["text"]
     results = api.requests[1][1]["messages"][-1]["content"]
-    assert [r["tool_use_id"] for r in results] == ["t1", "t2"]
-    assert "Total hits: 12" in json.dumps(results[0]["content"])
+    assert [r["tool_use_id"] for r in results] == ["t0", "t1", "t2"]
+    assert "#12 12 | q11" in json.dumps(results[0]["content"])
+    assert "Total hits: 12" in json.dumps(results[1]["content"])
+
+
+def test_a_plan_with_an_unknown_level_goes_back_to_the_agent():
+    bad = {"levels": [{"level": "everything", "query": "q", "why": ""}], "clinicaltrials_queries": [], "extra_ids": [], "summary": ""}
+    good = {**bad, "levels": [{"level": "primary", "query": "q", "why": ""}]}
+    llm, api = make_llm([
+        ("json", _message([{"type": "tool_use", "id": "t1", "name": "submit_search_plan", "input": bad}], "tool_use")),
+        ("json", _message([{"type": "tool_use", "id": "t2", "name": "submit_search_plan", "input": good}], "tool_use")),
+        ("json", _message([{"type": "text", "text": "Done."}], "end_turn")),
+    ])
+    assert llm.plan_search(SPEC, Toolbox()).levels[0].level == "primary"
+    error = api.requests[1][1]["messages"][-1]["content"][0]
+    assert error["is_error"] is True
 
 
 def test_search_agent_without_a_plan_is_an_error():

@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from . import prompts
 from .config import Settings
-from .schemas import PaperExtraction, ScreenDecision, SearchPlan, SearchSpec
+from .schemas import PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec
 
 # Opus only: when a safety classifier declines a benign request, the API retries it on the
 # model Anthropic recommends for that refusal category. Haiku has no server-side fallback.
@@ -35,6 +35,8 @@ class ModelTruncated(RuntimeError):
 
 
 class SearchToolbox(Protocol):
+    def count_pubmed(self, queries: list[str]) -> str: ...
+
     def preview_pubmed(self, query: str, max_results: int) -> str: ...
 
     def preview_trials(self, query: str, max_results: int) -> str: ...
@@ -42,6 +44,17 @@ class SearchToolbox(Protocol):
 
 def search_tools(toolbox: SearchToolbox, submitted: dict[str, SearchPlan]) -> list:
     """The search agent's tools. A submitted plan is stored in `submitted["plan"]`."""
+
+    @beta_tool
+    def count_pubmed(queries: list[str]) -> str:
+        """Count the PubMed hits of several queries at once, like a PubMed search history.
+
+        Use it to check each concept block alone and to compare the levels before reading titles.
+
+        Args:
+            queries: Up to 12 E-utilities queries, e.g. ['mindfulness[mh] OR mindfulness[tiab]', 'depression[mh] OR depress*[tiab]'].
+        """
+        return toolbox.count_pubmed(queries[:MAX_COUNTED])
 
     @beta_tool
     def search_pubmed(query: str, max_results: int = 20) -> str:
@@ -69,28 +82,29 @@ def search_tools(toolbox: SearchToolbox, submitted: dict[str, SearchPlan]) -> li
 
     @beta_tool
     def submit_search_plan(
-        pubmed_queries: list[str], clinicaltrials_queries: list[str], extra_ids: list[str], summary: str
+        levels: list[SearchLevel], clinicaltrials_queries: list[str], extra_ids: list[str], summary: str
     ) -> str:
-        """Record the final search plan. Call this exactly once, when the queries are final.
+        """Record the final search plan. Call this exactly once, when the levels are final.
 
         Args:
-            pubmed_queries: The final PubMed queries; every record they return will be screened.
+            levels: The PubMed levels from the top down (reviews, primary, then wider or outcome_data if used); the top records of each are screened.
             clinicaltrials_queries: The final ClinicalTrials.gov queries (studies with posted results).
             extra_ids: Specific PMIDs or NCT IDs to include regardless of the queries.
             summary: Two or three sentences on the strategy, for the methods section.
         """
         submitted["plan"] = SearchPlan(
-            pubmed_queries=pubmed_queries,
+            levels=levels,
             clinicaltrials_queries=clinicaltrials_queries,
             extra_ids=extra_ids,
             summary=summary,
         )
         return SEARCH_PLAN_RECORDED
 
-    return [search_pubmed, search_clinicaltrials, submit_search_plan]
+    return [count_pubmed, search_pubmed, search_clinicaltrials, submit_search_plan]
 
 
 SEARCH_PLAN_RECORDED = "Recorded. Reply with a one-paragraph summary and stop."
+MAX_COUNTED = 12  # queries per count_pubmed call
 
 
 def _cached_system(text: str) -> list[dict]:

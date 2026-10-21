@@ -33,6 +33,10 @@ class Settings:
     audit_fraction: float = 0.1
     per_query_limit: int = 100
     max_candidates: int = 300
+    # After screening, the references of the included reviews are added: from this many reviews,
+    # at most this many new records.
+    max_reviews_followed: int = 10
+    max_cited: int = 150
     max_extractions: int = 60
     worker_concurrency: int = 8
     search_max_iterations: int = 25
@@ -49,6 +53,8 @@ class Settings:
             audit_fraction=_float("ESF_AUDIT_FRACTION", cls.audit_fraction),
             per_query_limit=_int("ESF_PER_QUERY_LIMIT", cls.per_query_limit),
             max_candidates=_int("ESF_MAX_CANDIDATES", cls.max_candidates),
+            max_reviews_followed=_int("ESF_MAX_REVIEWS_FOLLOWED", cls.max_reviews_followed),
+            max_cited=_int("ESF_MAX_CITED", cls.max_cited),
             max_extractions=_int("ESF_MAX_EXTRACTIONS", cls.max_extractions),
             worker_concurrency=_int("ESF_WORKER_CONCURRENCY", cls.worker_concurrency),
             search_max_iterations=_int("ESF_SEARCH_MAX_ITERATIONS", cls.search_max_iterations),

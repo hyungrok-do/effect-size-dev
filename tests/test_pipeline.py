@@ -2,10 +2,11 @@ import httpx
 
 from esf.config import Settings
 from esf.pipeline import Pipeline
+from esf.schemas import SearchLevel
 from esf.server import export_rows
 from esf.sources import Sources
 from esf.store import Store
-from fixtures import FakeLLM, LiteratureAPIs, mock_client
+from fixtures import CITED_TRIAL, NOT_A_STUDY, PLAN, REVIEW, FakeLLM, LiteratureAPIs, mock_client
 
 
 def make_pipeline(tmp_path, **overrides):
@@ -29,18 +30,21 @@ def test_search_screen_extract_end_to_end(tmp_path):
     pipeline, store, llm, project_id = run_all(tmp_path)
     project = store.project(project_id)
     assert project["status"] == "done", project["error"]
-    assert project["search_plan"]["pubmed_queries"] == ["mindfulness[tiab] AND depress*[tiab]"]
+    assert [lv["level"] for lv in project["search_plan"]["levels"]] == ["primary", "reviews"]
 
     papers = {p["ext_id"]: p for p in store.papers(project_id)}
-    assert set(papers) == {"11111111", "22222222", "33333333", "44444444", "NCT01234567"}
+    assert set(papers) == {"11111111", "22222222", "33333333", "44444444", "NCT01234567", REVIEW, CITED_TRIAL}
     assert papers["33333333"]["status"] == "screened_out"
-    assert papers["NCT01234567"]["found_by"] == ["clinicaltrials: mindfulness AND depression"]
+    assert papers["NCT01234567"]["found_by"] == ["ClinicalTrials.gov: mindfulness AND depression"]
 
     kinds = {k: p["fulltext_kind"] for k, p in papers.items() if p["status"] == "extracted"}
-    assert kinds == {"11111111": "pmc_xml", "22222222": "oa_pdf", "44444444": "abstract", "NCT01234567": "registry"}
+    assert kinds == {
+        "11111111": "pmc_xml", "22222222": "oa_pdf", "44444444": "abstract", "NCT01234567": "registry",
+        REVIEW: "abstract", CITED_TRIAL: "abstract",
+    }
 
     # Clean extractions stand as the worker made them.
-    for key in ("11111111", "22222222", "NCT01234567"):
+    for key in ("11111111", "22222222", "NCT01234567", REVIEW, CITED_TRIAL):
         assert papers[key]["extracted_by"] == "worker", (key, papers[key]["escalation"])
         assert papers[key]["verification"]["flags"] == []
     # The abstract-only pilot had a number that is not in its quote: the manager redid it.
@@ -51,9 +55,54 @@ def test_search_screen_extract_end_to_end(tmp_path):
     assert [v["value"] for v in pilot["extraction"]["results"][0]["values"]] == [7.9, 3.8, 20, 9.6, 4.1, 21]
 
     assert llm.calls.count("spec") == 1 and llm.calls.count("search") == 1
-    assert llm.calls.count("screen") == 5
-    assert llm.calls.count("extract") == 4 and llm.calls.count("adjudicate") == 1
+    assert llm.calls.count("screen") == 7
+    assert llm.calls.count("extract") == 6 and llm.calls.count("adjudicate") == 1
     assert "8.1 (4.2)" in pipeline.source_text(project_id, papers["11111111"]["id"])
+
+
+def test_the_search_runs_from_the_top_down(tmp_path):
+    _, store, _, project_id = run_all(tmp_path)
+    papers = store.papers(project_id)
+    # The plan listed the primary level first; the reviews still run first, and the registry
+    # records are interleaved with the articles.
+    assert [p["ext_id"] for p in papers][:3] == [REVIEW, "NCT01234567", "11111111"]
+    found_in = {p["ext_id"]: p["found_in"] for p in papers}
+    assert found_in[REVIEW] == ["reviews"] and found_in["22222222"] == ["primary"]
+    assert found_in["NCT01234567"] == ["registry"] and found_in[CITED_TRIAL] == ["cited"]
+
+    # The trial only the review cites was added after screening; the narrative review it also
+    # cites was not, and the trial already found was not added twice.
+    cited = next(p for p in papers if p["ext_id"] == CITED_TRIAL)
+    assert cited["found_by"] == [f"Cited by the included reviews: {next(p for p in papers if p['ext_id'] == REVIEW)['title']} (PMID {REVIEW})"]
+    assert NOT_A_STUDY not in found_in
+
+    log = store.project(project_id)["search_log"]
+    assert [(e["level"], e.get("hits"), e.get("taken"), e["added"]) for e in log] == [
+        ("reviews", 1, 1, 1), ("primary", 4, 4, 4), ("registry", 1, 1, 1), ("cited", None, None, 1),
+    ]
+    assert log[0]["query"] == PLAN.levels[1].query
+    assert {k: log[3][k] for k in ("reviews", "cited", "already", "not_studies")} == {
+        "reviews": 1, "cited": 3, "already": 1, "not_studies": 1,
+    }
+
+
+def test_no_included_review_means_nothing_to_follow(tmp_path):
+    pipeline, store, llm = make_pipeline(tmp_path)
+    plan_search = llm.plan_search
+    llm.plan_search = lambda *a, **k: plan_search(*a, **k).model_copy(update={"levels": [PLAN.levels[0]]})
+    project_id = store.create_project("A paragraph long enough to be a study description.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    log = store.project(project_id)["search_log"]
+    assert log[-1] == {"level": "cited", "source": "pubmed", "reviews": 0, "cited": 0, "already": 0, "added": 0, "not_studies": 0}
+    assert REVIEW not in {p["ext_id"] for p in store.papers(project_id)}
+
+
+def test_the_follow_up_is_capped(tmp_path):
+    _, store, _, project_id = run_all(tmp_path, max_cited=0)
+    assert CITED_TRIAL not in {p["ext_id"] for p in store.papers(project_id)}
+    _, store, _, project_id = run_all(tmp_path / "again", max_reviews_followed=0)
+    assert store.project(project_id)["search_log"][-1]["reviews"] == 0
 
 
 def test_decisions_drive_the_export(tmp_path):
@@ -76,8 +125,8 @@ def test_decisions_drive_the_export(tmp_path):
 def test_audit_sends_clean_papers_to_the_manager(tmp_path):
     _, store, llm, project_id = run_all(tmp_path, audit_fraction=1.0)
     audited = [p for p in store.papers(project_id) if (p["escalation"] or {}).get("audit")]
-    assert len(audited) == 3
-    assert llm.calls.count("adjudicate") == 4
+    assert len(audited) == 5
+    assert llm.calls.count("adjudicate") == 6
 
 
 def test_one_failing_query_does_not_stop_the_search(tmp_path):
@@ -94,7 +143,7 @@ def test_one_failing_query_does_not_stop_the_search(tmp_path):
 
     def plan_with_a_bad_query(spec, toolbox, sink=None):
         plan = plan_search(spec, toolbox, sink)
-        return plan.model_copy(update={"pubmed_queries": ["BROKEN", *plan.pubmed_queries]})
+        return plan.model_copy(update={"levels": [SearchLevel(level="wider", query="BROKEN", why=""), *plan.levels]})
 
     llm.plan_search = plan_with_a_bad_query
     project_id = store.create_project("A paragraph long enough to be a study description.")
@@ -102,8 +151,9 @@ def test_one_failing_query_does_not_stop_the_search(tmp_path):
     pipeline.run(project_id)
     project = store.project(project_id)
     assert project["status"] == "done"
-    assert project["search_plan"]["failed_queries"][0].startswith("pubmed: BROKEN")
-    assert len(store.papers(project_id)) == 5
+    assert project["search_plan"]["failed_queries"][0].startswith("Studies in related populations: BROKEN")
+    assert [e["level"] for e in project["search_log"] if "error" in e] == ["wider"]
+    assert len(store.papers(project_id)) == 7
 
 
 def test_a_failed_worker_is_never_dropped(tmp_path):
@@ -123,3 +173,24 @@ def test_a_failed_worker_is_never_dropped(tmp_path):
     # Unscreenable records go forward as "unsure"; unextractable ones wait for a person.
     assert {p["status"] for p in papers} == {"needs_manual"}
     assert all("Neither model" in p["error"] for p in papers)
+
+
+def test_cited_records_that_cannot_be_fetched_do_not_stop_the_search(tmp_path, monkeypatch):
+    monkeypatch.setattr("esf.sources.time.sleep", lambda _: None)  # no waiting between retries
+    pipeline, store, _ = make_pipeline(tmp_path)
+    handler = LiteratureAPIs()
+
+    def no_cited_records(request):
+        if request.url.path.endswith("efetch.fcgi") and CITED_TRIAL.encode() in request.content:
+            return httpx.Response(500, text="unavailable")
+        return handler(request)
+
+    pipeline.sources = Sources(pipeline.settings, client=httpx.Client(transport=httpx.MockTransport(no_cited_records)))
+    project_id = store.create_project("A paragraph long enough to be a study description.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    project = store.project(project_id)
+    assert project["status"] == "done", project["error"]
+    cited = project["search_log"][-1]
+    assert cited["added"] == 0 and cited["failed"][0].startswith("fetching the 2 cited records")
+    assert store.status_counts(project_id) == {"extracted": 5, "screened_out": 1}

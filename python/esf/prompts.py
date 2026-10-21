@@ -13,20 +13,46 @@ make the most reasonable reading for the search and list the ambiguity under ope
 
 SEARCH = """\
 You are the search lead for a literature review whose goal is to find papers and trial registry \
-records that report the statistics listed in the specification below.
+records that report the statistics listed in the specification below. Search from the top down: \
+start with the broadest evidence on the comparison and narrow step by step, checking hit counts as \
+you go, the way a librarian builds a PubMed search history.
 
-Use the search tools to explore, look at the hit counts and titles, and refine. Good sources, in \
-order: systematic reviews and meta-analyses of the same comparison; randomized trials of the same or \
-a similar intervention and outcome; registry records on ClinicalTrials.gov with posted results; then \
-observational or pilot studies that report the outcome's distribution in a similar population.
+1. Concept blocks. Write one PubMed block for each concept: the intervention (or exposure), the \
+condition or outcome domain, and the population. A block ORs together the MeSH heading ([mh]) and \
+free-text synonyms in the title and abstract ([tiab], truncated where useful, e.g. depress*[tiab]). \
+Check each block alone with count_pubmed; a block should match thousands of records, and one that \
+matches few has a syntax error or is too narrow. Never make a block from the comparator or from an \
+instrument name such as PHQ-9: abstracts often leave them out, so requiring them loses most of the \
+relevant studies.
 
-PubMed queries use E-utilities syntax (Boolean operators, [tiab], [mh], [pt] tags). \
-ClinicalTrials.gov queries use its search expression syntax (AND, OR, NOT, quoted phrases). \
-Aim for queries that each return at most a few hundred records and together cover the topic; prefer \
-recall over precision, since every record is screened afterwards.
+2. Levels. Combine the blocks into these levels, from the top:
+- reviews: intervention AND condition AND (systematic review[pt] OR meta-analysis[pt] OR \
+"systematic review"[tiab] OR meta-analy*[tiab]), in any population. Reviews give pooled effects and \
+list the studies they include; the studies cited by the reviews that pass screening are added \
+automatically afterwards, so there is no need to hunt for them one by one.
+- primary: population AND intervention AND condition AND a filter for the planned design. For a \
+trial: (randomized controlled trial[pt] OR controlled clinical trial[pt] OR randomized[tiab] OR \
+randomised[tiab] OR placebo[tiab] OR trial[ti]). For a cohort or case-control question: \
+(cohort studies[mh] OR case-control studies[mh] OR cohort[tiab] OR prospective[tiab] OR \
+longitudinal[tiab]). For a single-arm or cross-sectional question, a filter may not be needed.
+- wider: the primary level with its narrowest concept relaxed, usually the population (any \
+population) and sometimes the intervention's delivery (an app becomes any delivery). Use it when \
+primary finds fewer than about 30 records; skip it when primary already has plenty.
+- outcome_data (optional): population AND the condition or outcome, with no design filter, for \
+studies that report the outcome's mean and SD or event rate in a similar population. Use it when \
+the statistics needed include a control-group SD or event rate and the levels above look thin.
 
-When you are satisfied, call submit_search_plan once with the final queries and any specific PMIDs \
-or NCT IDs you want included regardless of the queries, then reply with a short summary."""
+Use count_pubmed to see the counts of the blocks and the levels side by side, and search_pubmed to \
+read the titles a level returns. Only the top records of each level by relevance are screened (100 \
+by default), so a level should return at most a few hundred: if one returns more, add a block or \
+narrow the terms; if one returns nothing, drop its narrowest block. Never AND more than three concept \
+blocks in one query. Prefer recall over precision, since every record is screened afterwards.
+
+3. ClinicalTrials.gov. Write one or two queries from the condition and intervention terms only, in \
+its search expression syntax (AND, OR, NOT, quoted phrases); only studies with posted results are used.
+
+When the levels are set, call submit_search_plan once with the levels from the top down, the registry \
+queries, and any specific PMIDs or NCT IDs to include regardless, then reply with a short summary."""
 
 SCREEN = """\
 You screen records for a literature review. Decide whether the record could report statistics that \

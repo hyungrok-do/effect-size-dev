@@ -4,6 +4,7 @@ Claude that stands in for the models in pipeline and server tests."""
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import parse_qs
 
 import httpx
@@ -13,6 +14,7 @@ from esf.schemas import (
     PaperExtraction,
     ReportedValue,
     ScreenDecision,
+    SearchLevel,
     SearchPlan,
     SearchSpec,
 )
@@ -78,10 +80,61 @@ PUBMED_XML = """<?xml version="1.0" ?>
   </MedlineCitation>
   <PubmedData><ArticleIdList><ArticleId IdType="pubmed">44444444</ArticleId></ArticleIdList></PubmedData>
 </PubmedArticle>
+<PubmedArticle>
+  <MedlineCitation Status="MEDLINE" Owner="NLM">
+    <PMID Version="1">55555555</PMID>
+    <Article PubModel="Print">
+      <Journal><JournalIssue><PubDate><Year>2022</Year></PubDate></JournalIssue><Title>Digital Mental Health Reviews</Title></Journal>
+      <ArticleTitle>Mindfulness apps for depressive symptoms: a systematic review and meta-analysis.</ArticleTitle>
+      <Abstract><AbstractText Label="RESULTS">Twelve trials were included. Apps reduced depressive symptoms (pooled SMD 0.35, 95% CI 0.20 to 0.50).</AbstractText></Abstract>
+      <PublicationTypeList><PublicationType UI="D000078182">Systematic Review</PublicationType>
+        <PublicationType UI="D017418">Meta-Analysis</PublicationType></PublicationTypeList>
+    </Article>
+  </MedlineCitation>
+  <PubmedData><ArticleIdList><ArticleId IdType="pubmed">55555555</ArticleId></ArticleIdList></PubmedData>
+</PubmedArticle>
+<PubmedArticle>
+  <MedlineCitation Status="MEDLINE" Owner="NLM">
+    <PMID Version="1">66666666</PMID>
+    <Article PubModel="Print">
+      <Journal><JournalIssue><PubDate><Year>2020</Year></PubDate></JournalIssue><Title>Campus Health Trials</Title></Journal>
+      <ArticleTitle>Smartphone mindfulness for student depression: a randomized controlled trial.</ArticleTitle>
+      <Abstract><AbstractText Label="RESULTS">PHQ-9 at 12 weeks: app 8.4 (SD 4.0, n = 75); waitlist 10.1 (SD 4.3, n = 74).</AbstractText></Abstract>
+      <PublicationTypeList><PublicationType UI="D016449">Randomized Controlled Trial</PublicationType></PublicationTypeList>
+    </Article>
+  </MedlineCitation>
+  <PubmedData><ArticleIdList><ArticleId IdType="pubmed">66666666</ArticleId></ArticleIdList></PubmedData>
+</PubmedArticle>
+<PubmedArticle>
+  <MedlineCitation Status="MEDLINE" Owner="NLM">
+    <PMID Version="1">77777777</PMID>
+    <Article PubModel="Print">
+      <Journal><JournalIssue><PubDate><Year>2015</Year></PubDate></JournalIssue><Title>Methods Notes</Title></Journal>
+      <ArticleTitle>Pooling continuous outcomes: a narrative review of methods.</ArticleTitle>
+      <PublicationTypeList><PublicationType UI="D016428">Journal Article</PublicationType>
+        <PublicationType UI="D016454">Review</PublicationType></PublicationTypeList>
+    </Article>
+  </MedlineCitation>
+  <PubmedData><ArticleIdList><ArticleId IdType="pubmed">77777777</ArticleId></ArticleIdList></PubmedData>
+</PubmedArticle>
 </PubmedArticleSet>
 """
 
+# What the primary level's query finds; the reviews level finds REVIEW, which cites CITED_TRIAL (found
+# only through the review), one of PMIDS, and NOT_A_STUDY (a narrative review, which is dropped).
 PMIDS = ["11111111", "22222222", "33333333", "44444444"]
+REVIEW, CITED_TRIAL, NOT_A_STUDY = "55555555", "66666666", "77777777"
+ALL_PMIDS = [*PMIDS, REVIEW, CITED_TRIAL, NOT_A_STUDY]
+REFERENCES = {
+    "hitCount": 5,
+    "referenceList": {"reference": [
+        {"id": CITED_TRIAL, "source": "MED", "title": "Smartphone mindfulness for student depression"},
+        {"id": "11111111", "source": "MED", "title": "A mindfulness app for depressive symptoms"},
+        {"id": NOT_A_STUDY, "source": "MED", "title": "Pooling continuous outcomes"},
+        {"id": "PPR12345", "source": "PPR", "title": "A preprint"},
+        {"title": "A book chapter with no identifier"},
+    ]},
+}
 
 ESUMMARY = {
     "header": {"type": "esummary", "version": "0.3"},
@@ -215,12 +268,22 @@ class LiteratureAPIs:
             # The Python client POSTs a form; the browser edition sends a GET with a query string.
             form = {**dict(url.params), **{k: v[0] for k, v in parse_qs(request.content.decode()).items()}}
             if url.path.endswith("esearch.fcgi"):
-                return httpx.Response(200, json={"esearchresult": {"count": "4", "retmax": "4", "idlist": PMIDS}})
+                ids = [REVIEW] if "systematic review" in form["term"] or "meta-analy" in form["term"] else PMIDS
+                shown = [] if form.get("retmax") == "0" else ids
+                return httpx.Response(200, json={"esearchresult": {"count": str(len(ids)), "retmax": str(len(shown)), "idlist": shown}})
             if url.path.endswith("esummary.fcgi"):
                 return httpx.Response(200, json=ESUMMARY)
             if url.path.endswith("efetch.fcgi"):
-                assert set(form["id"].split(",")) <= set(PMIDS)
-                return httpx.Response(200, text=PUBMED_XML, headers={"content-type": "text/xml"})
+                wanted = set(form["id"].split(","))
+                assert wanted <= set(ALL_PMIDS)
+                # Like PubMed, return only the records asked for.
+                kept = re.findall(r"<PubmedArticle>.*?</PubmedArticle>", PUBMED_XML, re.DOTALL)
+                kept = [a for a in kept if re.search(r"<PMID Version=\"1\">(\d+)</PMID>", a).group(1) in wanted]
+                body = PUBMED_XML.split("<PubmedArticle>")[0] + "".join(kept) + "\n</PubmedArticleSet>\n"
+                return httpx.Response(200, text=body, headers={"content-type": "text/xml"})
+            if url.path.endswith("elink.fcgi"):
+                links = [{"dbto": "pubmed", "linkname": "pubmed_pubmed_refs", "links": [CITED_TRIAL]}] if form["id"] == "88888888" else []
+                return httpx.Response(200, json={"linksets": [{"dbfrom": "pubmed", "ids": [form["id"]], "linksetdbs": links}]})
         if url.host == "clinicaltrials.gov":
             if url.path == "/api/v2/studies":
                 return httpx.Response(200, json={"totalCount": 1, "studies": [TRIAL]})
@@ -228,6 +291,8 @@ class LiteratureAPIs:
                 return httpx.Response(200, json=TRIAL)
         if url.host == "www.ebi.ac.uk" and url.path.endswith("/PMC9000001/fullTextXML"):
             return httpx.Response(200, text=JATS, headers={"content-type": "application/xml"})
+        if url.host == "www.ebi.ac.uk" and url.path.endswith(f"/MED/{REVIEW}/references"):
+            return httpx.Response(200, json=REFERENCES)
         if url.host == "api.unpaywall.org" and url.path == "/v2/10.1000/rct2":
             return httpx.Response(200, json={"doi": "10.1000/rct2", "is_oa": True, "best_oa_location": {"url_for_pdf": "https://example.org/rct2.pdf"}})
         if url.host == "example.org" and url.path == "/rct2.pdf":
@@ -284,6 +349,20 @@ def _extraction(results):
 ROW = "PHQ-9, 12 weeks | 8.1 (4.2) | 10.3 (4.5) | −2.2 (−3.4 to −1.0)"
 HEADER = "Outcome | App (n = 100) | Waitlist (n = 100) | Difference (95% CI)"
 ABSTRACT_LINE = "PHQ-9 at 12 weeks: mindfulness 7.9 (SD 3.8, n = 20); control 9.6 (SD 4.1, n = 21)."
+REVIEW_LINE = "Apps reduced depressive symptoms (pooled SMD 0.35, 95% CI 0.20 to 0.50)."
+CITED_LINE = "PHQ-9 at 12 weeks: app 8.4 (SD 4.0, n = 75); waitlist 10.1 (SD 4.3, n = 74)."
+
+REVIEW_FILTER = "(systematic review[pt] OR meta-analysis[pt])"
+PLAN = SearchPlan(
+    levels=[
+        # Submitted out of order on purpose: the pipeline runs the levels from the top down.
+        SearchLevel(level="primary", query="mindfulness[tiab] AND depress*[tiab]", why="Trials in students."),
+        SearchLevel(level="reviews", query=f"mindfulness[tiab] AND depress*[tiab] AND {REVIEW_FILTER}", why="Pooled effects."),
+    ],
+    clinicaltrials_queries=["mindfulness AND depression"],
+    extra_ids=[],
+    summary="Reviews first, then trials, then the registry.",
+)
 
 
 class FakeLLM:
@@ -298,22 +377,21 @@ class FakeLLM:
 
     def plan_search(self, spec, toolbox, sink=None):
         self.calls.append("search")
+        assert toolbox.count_pubmed(["mindfulness[tiab]", f"mindfulness[tiab] AND {REVIEW_FILTER}"]) == (
+            f"#1 4 | mindfulness[tiab]\n#2 1 | mindfulness[tiab] AND {REVIEW_FILTER}"
+        )
         assert "Total hits: 4" in toolbox.preview_pubmed("mindfulness", 5)
         assert "NCT01234567" in toolbox.preview_trials("mindfulness", 5)
-        return SearchPlan(
-            pubmed_queries=["mindfulness[tiab] AND depress*[tiab]"],
-            clinicaltrials_queries=["mindfulness AND depression"],
-            extra_ids=[],
-            summary="One PubMed and one registry query.",
-        )
+        return PLAN
 
     def screen(self, spec, record_text, sink=None):
         self.calls.append("screen")
         excluded = "mouse" in record_text.lower()
+        review = "systematic review" in record_text.lower()
         return ScreenDecision(
             decision="exclude" if excluded else "include",
-            reason="Animal study." if excluded else "Relevant trial.",
-            study_type="other" if excluded else "rct",
+            reason="Animal study." if excluded else "Relevant review." if review else "Relevant trial.",
+            study_type="other" if excluded else "systematic_review_or_meta_analysis" if review else "rct",
             reports_relevant_outcome="no" if excluded else "yes",
         )
 
@@ -335,6 +413,20 @@ class FakeLLM:
                 _value("Waitlist", "n", 60, PDF_LINE, "Page 1"),
                 _value("Mindfulness", "mean", 9.0, PDF_LINE, "Page 1"),
                 _value("Waitlist", "mean", 11.0, PDF_LINE, "Page 1"),
+            ])])
+        if title.startswith("Mindfulness apps for depressive symptoms"):
+            return _extraction([OutcomeResult(
+                outcome_measure="Depressive symptoms", timepoint="post-treatment", analysis_population="unclear",
+                adjusted="unadjusted", relevance="partial", confidence="high", concerns=[],
+                values=[ReportedValue(group="App vs control", statistic=s, value=v, describes="Pooled SMD of depressive symptoms",
+                                      quote=REVIEW_LINE, location="Abstract")
+                        for s, v in (("standardized_mean_difference", 0.35), ("ci_lower", 0.2), ("ci_upper", 0.5))],
+            )])
+        if title.startswith("Smartphone mindfulness"):
+            return _extraction([_result([
+                _value("App", "mean", 8.4, CITED_LINE, "Abstract"), _value("App", "sd", 4.0, CITED_LINE, "Abstract"),
+                _value("App", "n", 75, CITED_LINE, "Abstract"), _value("Waitlist", "mean", 10.1, CITED_LINE, "Abstract"),
+                _value("Waitlist", "sd", 4.3, CITED_LINE, "Abstract"), _value("Waitlist", "n", 74, CITED_LINE, "Abstract"),
             ])])
         if title.startswith("A Randomized Trial"):
             return _extraction([_result([

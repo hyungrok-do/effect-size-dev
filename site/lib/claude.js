@@ -8,7 +8,7 @@
 // give Claude the same instructions. Claude only reads and quotes; code does any arithmetic.
 
 import { Anthropic } from '../vendor/anthropic-sdk.mjs';
-import { PROMPTS, SCHEMAS, SEARCH_PLAN_RECORDED, SEARCH_TOOLS } from './generated.js';
+import { LEVELS, MAX_COUNTED, PROMPTS, SCHEMAS, SEARCH_PLAN_RECORDED, SEARCH_TOOLS } from './generated.js';
 import { SourceError } from './sources.js';
 
 export const MODELS = { manager: 'claude-opus-5-5', fetcher: 'claude-sonnet-5-5', worker: 'claude-haiku-5-5' };
@@ -109,11 +109,17 @@ export class Claude {
   async planSearch(spec, toolbox, { sink, maxIterations = 25 } = {}) {
     let plan = null;
     const tools = {
+      count_pubmed: (input) => toolbox.countPubmed((input.queries || []).slice(0, MAX_COUNTED)),
       search_pubmed: (input) => toolbox.previewPubmed(input.query, Math.max(1, Math.min(input.max_results ?? 20, 50))),
       search_clinicaltrials: (input) => toolbox.previewTrials(input.query, Math.max(1, Math.min(input.max_results ?? 20, 50))),
       submit_search_plan: (input) => {
+        const levels = input.levels || [];
+        // The Python edition validates the input against the tool's schema; refuse the same things here.
+        if (!levels.every((l) => LEVELS.includes(l?.level) && typeof l.query === 'string')) {
+          throw new Error(`Each level needs a level (${LEVELS.join(', ')}) and a query.`);
+        }
         plan = {
-          pubmed_queries: input.pubmed_queries || [],
+          levels: levels.map((l) => ({ level: l.level, query: l.query, why: l.why || '' })),
           clinicaltrials_queries: input.clinicaltrials_queries || [],
           extra_ids: input.extra_ids || [],
           summary: input.summary || '',

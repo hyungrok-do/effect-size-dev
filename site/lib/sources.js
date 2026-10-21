@@ -166,6 +166,19 @@ export class PubMed {
     }
     return records;
   }
+
+  // PMIDs an article cites, from its reference list in PubMed Central (none when PMC has no list).
+  async references(pmid) {
+    const payload = await this.call('elink.fcgi', {
+      dbfrom: 'pubmed', db: 'pubmed', id: pmid, linkname: 'pubmed_pubmed_refs', retmode: 'json',
+    }, 'json');
+    for (const linkset of payload?.linksets || []) {
+      for (const links of linkset.linksetdbs || []) {
+        if (links.linkname === 'pubmed_pubmed_refs') return (links.links || []).map(String);
+      }
+    }
+    return [];
+  }
 }
 
 const kids = (el, name) => [...(el?.children || [])].filter((c) => c.localName === name);
@@ -323,6 +336,13 @@ export class EuropePMC {
     const xml = await this.http.get(`${EuropePMC.BASE}${id}/fullTextXML`, 'text');
     return xml && xml.trimStart().startsWith('<') ? xml : null;
   }
+
+  // PMIDs an article cites, as far as Europe PMC matched its reference list to PubMed.
+  async references(pmid) {
+    const params = new URLSearchParams({ page: '1', pageSize: '1000', format: 'json' });
+    const payload = await this.http.get(`${EuropePMC.BASE}MED/${pmid}/references?${params}`, 'json');
+    return (payload?.referenceList?.reference || []).filter((r) => r.source === 'MED' && r.id).map((r) => String(r.id));
+  }
 }
 
 export class Unpaywall {
@@ -355,5 +375,11 @@ export class Sources {
     this.trials = new ClinicalTrials(this.http);
     this.europepmc = new EuropePMC(this.http);
     this.unpaywall = new Unpaywall(this.http, email);
+  }
+
+  // PMIDs cited by an article: Europe PMC's reference list, else PubMed Central's.
+  async references(pmid) {
+    const found = await this.europepmc.references(pmid).catch(() => []);
+    return found.length ? found : this.pubmed.references(pmid);
   }
 }
