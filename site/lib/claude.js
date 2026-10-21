@@ -20,15 +20,31 @@ const FALLBACK = { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'defau
 export class ModelDeclined extends Error {}
 export class ModelTruncated extends Error {}
 
+// Anthropic's own words for a failed request, e.g. "401: invalid x-api-key (request req_011…)".
+function apiDetail(error) {
+  const body = error?.error?.error || error?.error;
+  const text = typeof body?.message === 'string' ? body.message : error?.message || String(error);
+  const id = error?.requestID || error?.error?.request_id;
+  return `${error?.status ? `${error.status}: ` : ''}${text}${id ? ` (request ${id})` : ''}`;
+}
+
 export function describeError(error) {
   const message = error?.message || String(error);
-  if (error?.status === 401 || /authentication method|api key|apiKey/i.test(message)) {
-    return 'The Anthropic API key is missing or was not accepted. Enter a valid key at the top of the page and try again.';
+  if (/Could not resolve authentication method/i.test(message)) {
+    return 'No Anthropic API key was given. Enter your key at the top of the page and try again.';
   }
-  if (error?.status === 403) return "This Anthropic API key may not use the model. Check the key's workspace and model access.";
-  if (error?.status === 429) return 'The Anthropic API rate limit was reached. Wait a minute and try again.';
+  if (error?.status === 401) {
+    return `Anthropic did not accept the API key (${apiDetail(error)}). Check the key at the top of the page; Anthropic keys start with sk-ant-.`;
+  }
+  if (error?.status === 403 || error?.status === 404) {
+    return `Anthropic refused the request (${apiDetail(error)}). Check that the key's workspace may use this model.`;
+  }
+  if (error?.status === 429) return `The Anthropic API rate limit was reached (${apiDetail(error)}). Wait a minute and try again.`;
+  if (error?.status) return `The Anthropic API returned an error (${apiDetail(error)}).`;
   return message;
 }
+
+export const looksLikeAnthropicKey = (key) => /^sk-ant-[A-Za-z0-9_-]{8,}$/.test(key);
 
 const cachedSystem = (text) => [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
 const withSpec = (prompt, spec) => `${prompt}\n\nSpecification:\n${JSON.stringify(spec, null, 2)}`;
@@ -48,6 +64,21 @@ export class Claude {
   constructor({ apiKey, models = MODELS, client = null }) {
     this.models = models;
     this.client = client || new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 3 });
+  }
+
+  // Does the key work, and may it use each model? Model lookups cost nothing.
+  async checkAccess() {
+    const results = [];
+    for (const [role, model] of Object.entries(this.models)) {
+      try {
+        const info = await this.client.models.retrieve(model);
+        results.push({ role, model, ok: true, name: info.display_name || model });
+      } catch (error) {
+        results.push({ role, model, ok: false, status: error?.status, error: describeError(error) });
+        if (error?.status === 401) break; // the key itself was refused; the other lookups would say the same
+      }
+    }
+    return results;
   }
 
   static record(sink, step, message) {

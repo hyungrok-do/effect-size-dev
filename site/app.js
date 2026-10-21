@@ -1,7 +1,7 @@
 // Effect Size Finder, browser edition: the whole app runs in this page. Searches are kept in
 // IndexedDB; Claude is called with the user's own key; nothing goes to a server of ours.
 
-import { Claude, MODELS } from './lib/claude.js';
+import { Claude, looksLikeAnthropicKey, MODELS } from './lib/claude.js';
 import { download, exportRows, PAPER, toCsv } from './lib/export.js';
 import { Pipeline } from './lib/pipeline.js';
 import { Sources } from './lib/sources.js';
@@ -144,13 +144,38 @@ function forgetKey() {
 function showKeyStatus() {
   $('.keybox').dataset.missing = 'false';
   const status = $('#key-status');
-  if (apiKey()) {
+  if (apiKey() && !looksLikeAnthropicKey(apiKey())) {
+    $('.keybox').dataset.missing = 'true';
+    status.textContent = "This doesn't look like an Anthropic API key: those start with sk-ant-. "
+      + 'An NCBI key goes under Contact email and NCBI key below.';
+  } else if (apiKey()) {
     status.textContent = $('#remember-key').checked
       ? 'Remembered on this browser. It is sent only to Anthropic, straight from this page.'
       : 'Kept for this tab only. It is sent only to Anthropic, straight from this page.';
   } else {
     status.replaceChildren('Needed to read the problem, search, and extract. Create one in the ',
       h('a', { href: 'https://console.anthropic.com/settings/keys', target: '_blank', rel: 'noopener' }, 'Anthropic Console'), '.');
+  }
+}
+
+async function checkKey() {
+  if (!haveKey()) return;
+  const button = $('#check-key');
+  const status = $('#key-status');
+  button.disabled = true;
+  status.textContent = 'Checking the key with Anthropic…';
+  try {
+    const results = await new Claude({ apiKey: apiKey() }).checkAccess();
+    const failed = results.filter((r) => !r.ok);
+    $('.keybox').dataset.missing = String(failed.length > 0);
+    status.textContent = failed.length
+      ? failed.map((r) => `${r.model}: ${r.error}`).join(' ')
+      : `The key works, and it may use ${results.map((r) => r.name).join(', ')}.`;
+  } catch (error) {
+    $('.keybox').dataset.missing = 'true';
+    status.textContent = `Could not reach Anthropic: ${error?.message || error}`;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -704,6 +729,7 @@ async function start() {
   $('#api-key').addEventListener('input', saveKey);
   $('#remember-key').addEventListener('change', saveKey);
   $('#forget-key').addEventListener('click', forgetKey);
+  $('#check-key').addEventListener('click', checkKey);
   $('#contact-email').addEventListener('change', (e) => writeSetting(EMAIL, e.target.value.trim()));
   $('#ncbi-key').addEventListener('change', (e) => writeSetting(NCBI_KEY, e.target.value.trim()));
   $('#upload').addEventListener('change', uploaded);

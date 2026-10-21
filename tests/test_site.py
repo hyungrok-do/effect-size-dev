@@ -101,6 +101,16 @@ class Network:
         route.fulfill(status=response.status_code, headers=headers, body=response.content)
 
     def anthropic(self, route, request):
+        headers = request.headers
+        given = headers.get("x-api-key") or headers.get("authorization", "").removeprefix("Bearer ")
+        if given != KEY:
+            error = {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}, "request_id": "req_test"}
+            return route.fulfill(status=401, headers={**CORS, "content-type": "application/json", "request-id": "req_test"}, body=json.dumps(error))
+        path = urlparse(request.url).path
+        if request.method == "GET" and path.startswith("/v1/models/"):
+            model = path.rsplit("/", 1)[1]
+            info = {"type": "model", "id": model, "display_name": model.replace("claude-", "Claude ").replace("-5-5", " 5.5").title(), "created_at": "2026-01-01T00:00:00Z"}
+            return route.fulfill(status=200, headers={**CORS, "content-type": "application/json"}, body=json.dumps(info))
         body = json.loads(request.post_data)
         self.claude.append((request.headers, body))
         if body.get("stream"):
@@ -319,3 +329,32 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
         phone.screenshot(path=os.path.join(os.environ["ESF_SCREENSHOTS"], "site-phone.png"), full_page=True)
     context.close()
     assert errors == []
+
+
+def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
+    context = browser.new_context()
+    context.route("**/*", Network())
+    page = context.new_page()
+    page.goto(site_url)
+
+    # An NCBI key pasted into the Anthropic box is caught before anything is sent.
+    page.fill("#api-key", "0123456789abcdef0123456789abcdef1234")
+    assert "doesn't look like an Anthropic API key" in page.inner_text("#key-status")
+
+    # A refused key: Check key and a failed step both quote Anthropic's own error.
+    page.fill("#api-key", "sk-ant-api03-not-a-real-key")
+    page.click("#check-key")
+    page.wait_for_function("document.querySelector('#key-status').textContent.includes('did not accept')")
+    status = page.inner_text("#key-status")
+    assert "claude-opus-5-5: Anthropic did not accept the API key (401: invalid x-api-key (request req_test))" in status
+    page.fill("#paragraph", "A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.")
+    page.click("#read")
+    page.wait_for_selector("#problem-error:not([hidden])")
+    assert "Anthropic did not accept the API key (401: invalid x-api-key" in page.inner_text("#problem-error")
+
+    # A good key: every model is reachable.
+    page.fill("#api-key", KEY)
+    page.click("#check-key")
+    page.wait_for_function("document.querySelector('#key-status').textContent.startsWith('The key works')")
+    assert page.inner_text("#key-status") == "The key works, and it may use Claude Opus 5.5, Claude Sonnet 5.5, Claude Haiku 5.5."
+    context.close()
