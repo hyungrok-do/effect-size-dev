@@ -8,3 +8,5 @@ dist/
 data/
 .env
 node_modules/
+site/node_modules/
+site/vendor/

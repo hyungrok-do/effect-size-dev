@@ -9,7 +9,7 @@ import pytest
 
 from esf.config import Settings
 from esf.llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error
-from fixtures import SPEC, sse
+from fixtures import SPEC, streamed
 
 DOC = {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "PHQ-9 8.1 (4.2)"}}
 EXTRACTION = {
@@ -22,21 +22,6 @@ EXTRACTION = {
     }],
 }
 SCREEN = {"decision": "include", "reason": "Relevant.", "study_type": "rct", "reports_relevant_outcome": "yes"}
-
-
-def streamed(model, payload, stop_reason="end_turn"):
-    text = json.dumps(payload)
-    return sse([
-        {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": model,
-                                              "content": [], "stop_reason": None, "stop_sequence": None,
-                                              "usage": {"input_tokens": 100, "output_tokens": 1}}},
-        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
-        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text[:20]}},
-        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text[20:]}},
-        {"type": "content_block_stop", "index": 0},
-        {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": 50}},
-        {"type": "message_stop"},
-    ])
 
 
 class FakeAPI:

@@ -96,13 +96,13 @@ def plausibility(result: OutcomeResult) -> list[str]:
     for v in result.values:
         by_group[v.group][v.statistic].append(v.value)
         if v.statistic == "p_value" and not 0 <= v.value <= 1:
-            flags.append(f"p-value {v.value} outside [0, 1]")
+            flags.append(f"p-value {v.value:g} outside [0, 1]")
         if v.statistic in RATIO_MEASURES and v.value <= 0:
-            flags.append(f"{v.statistic.replace('_', ' ')} {v.value} is not positive")
+            flags.append(f"{v.statistic.replace('_', ' ')} {v.value:g} is not positive")
         if v.statistic in ("sd", "se", "sd_change") and v.value < 0:
-            flags.append(f"negative {v.statistic.upper()} ({v.value}) for {v.group}")
+            flags.append(f"negative {v.statistic.upper()} ({v.value:g}) for {v.group}")
         if v.statistic == "percent" and not 0 <= v.value <= 100:
-            flags.append(f"percent {v.value} outside [0, 100] for {v.group}")
+            flags.append(f"percent {v.value:g} outside [0, 100] for {v.group}")
 
     for group, stats in by_group.items():
         lows, highs = stats.get("ci_lower", []), stats.get("ci_upper", [])

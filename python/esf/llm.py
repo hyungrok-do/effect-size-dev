@@ -40,6 +40,59 @@ class SearchToolbox(Protocol):
     def preview_trials(self, query: str, max_results: int) -> str: ...
 
 
+def search_tools(toolbox: SearchToolbox, submitted: dict[str, SearchPlan]) -> list:
+    """The search agent's tools. A submitted plan is stored in `submitted["plan"]`."""
+
+    @beta_tool
+    def search_pubmed(query: str, max_results: int = 20) -> str:
+        """Run a PubMed search and list the top records by relevance.
+
+        Returns the total number of hits and, for each listed record: PMID | year | publication types | title.
+
+        Args:
+            query: An E-utilities query, e.g. '"mindfulness"[tiab] AND depress*[tiab] AND randomized controlled trial[pt]'.
+            max_results: How many records to list, at most 50.
+        """
+        return toolbox.preview_pubmed(query, max(1, min(max_results, 50)))
+
+    @beta_tool
+    def search_clinicaltrials(query: str, max_results: int = 20) -> str:
+        """Search ClinicalTrials.gov for studies with posted results.
+
+        Returns the total number of matching studies and, for each listed study: NCT ID | status | start year | title.
+
+        Args:
+            query: A ClinicalTrials.gov search expression, e.g. 'mindfulness AND depression'.
+            max_results: How many studies to list, at most 50.
+        """
+        return toolbox.preview_trials(query, max(1, min(max_results, 50)))
+
+    @beta_tool
+    def submit_search_plan(
+        pubmed_queries: list[str], clinicaltrials_queries: list[str], extra_ids: list[str], summary: str
+    ) -> str:
+        """Record the final search plan. Call this exactly once, when the queries are final.
+
+        Args:
+            pubmed_queries: The final PubMed queries; every record they return will be screened.
+            clinicaltrials_queries: The final ClinicalTrials.gov queries (studies with posted results).
+            extra_ids: Specific PMIDs or NCT IDs to include regardless of the queries.
+            summary: Two or three sentences on the strategy, for the methods section.
+        """
+        submitted["plan"] = SearchPlan(
+            pubmed_queries=pubmed_queries,
+            clinicaltrials_queries=clinicaltrials_queries,
+            extra_ids=extra_ids,
+            summary=summary,
+        )
+        return SEARCH_PLAN_RECORDED
+
+    return [search_pubmed, search_clinicaltrials, submit_search_plan]
+
+
+SEARCH_PLAN_RECORDED = "Recorded. Reply with a one-paragraph summary and stop."
+
+
 def _cached_system(text: str) -> list[dict]:
     # The instructions and the specification are identical across a project's calls, so cache them.
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
@@ -113,56 +166,11 @@ class ClaudeLLM:
 
     def plan_search(self, spec: SearchSpec, toolbox: SearchToolbox, sink: UsageSink | None = None) -> SearchPlan:
         submitted: dict[str, SearchPlan] = {}
-
-        @beta_tool
-        def search_pubmed(query: str, max_results: int = 20) -> str:
-            """Run a PubMed search and list the top records by relevance.
-
-            Returns the total number of hits and, for each listed record: PMID | year | publication types | title.
-
-            Args:
-                query: An E-utilities query, e.g. '"mindfulness"[tiab] AND depress*[tiab] AND randomized controlled trial[pt]'.
-                max_results: How many records to list, at most 50.
-            """
-            return toolbox.preview_pubmed(query, max(1, min(max_results, 50)))
-
-        @beta_tool
-        def search_clinicaltrials(query: str, max_results: int = 20) -> str:
-            """Search ClinicalTrials.gov for studies with posted results.
-
-            Returns the total number of matching studies and, for each listed study: NCT ID | status | start year | title.
-
-            Args:
-                query: A ClinicalTrials.gov search expression, e.g. 'mindfulness AND depression'.
-                max_results: How many studies to list, at most 50.
-            """
-            return toolbox.preview_trials(query, max(1, min(max_results, 50)))
-
-        @beta_tool
-        def submit_search_plan(
-            pubmed_queries: list[str], clinicaltrials_queries: list[str], extra_ids: list[str], summary: str
-        ) -> str:
-            """Record the final search plan. Call this exactly once, when the queries are final.
-
-            Args:
-                pubmed_queries: The final PubMed queries; every record they return will be screened.
-                clinicaltrials_queries: The final ClinicalTrials.gov queries (studies with posted results).
-                extra_ids: Specific PMIDs or NCT IDs to include regardless of the queries.
-                summary: Two or three sentences on the strategy, for the methods section.
-            """
-            submitted["plan"] = SearchPlan(
-                pubmed_queries=pubmed_queries,
-                clinicaltrials_queries=clinicaltrials_queries,
-                extra_ids=extra_ids,
-                summary=summary,
-            )
-            return "Recorded. Reply with a one-paragraph summary and stop."
-
         runner = self.client.beta.messages.tool_runner(
             model=self.settings.manager_model,
             max_tokens=16000,
             system=_cached_system(prompts.SEARCH),
-            tools=[search_pubmed, search_clinicaltrials, submit_search_plan],
+            tools=search_tools(toolbox, submitted),
             messages=[{"role": "user", "content": "Specification:\n" + spec.model_dump_json(indent=2)}],
             output_config={"effort": "high"},
             max_iterations=self.settings.search_max_iterations,

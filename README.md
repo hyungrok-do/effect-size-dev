@@ -10,6 +10,20 @@ numbers**. It does not pool them or compute a sample size yet.
 
 This project was largely generated with Claude Code and is under validation.
 
+## Two editions
+
+| | Browser edition (`site/`) | Local server (`python/`, `web/`) |
+|---|---|---|
+| Runs | Entirely in the page; published on GitHub Pages | A Python server on your computer |
+| Install | None: open the page | `pip install -e .` and `esf serve` |
+| API key | Each person pastes their own; it goes only to Anthropic | Pasted in the page, or set on the server |
+| Searches stored | In that person's browser (IndexedDB) | In `data/` on the server |
+| PDFs the browser can't download | Fetched by Claude Sonnet 5.5 (web fetch) | Downloaded by the server |
+
+Both give Claude the same prompts, schemas and tools: `scripts/build_site_data.py` writes them
+from the Python package into `site/lib/generated.js`. The browser edition's quote checks, JATS
+reader and registry formatting are ports of the Python ones, and the tests require identical output.
+
 ## How it works
 
 ```
@@ -21,6 +35,7 @@ OPUS    Plan the search: explores PubMed and ClinicalTrials.gov with tools, then
 CODE    Run the queries, de-duplicate, fetch PubMed records
 HAIKU   Screen every title and abstract: include / exclude / unsure
 CODE    Get text: posted registry results → PMC full text (Europe PMC) → open-access PDF (Unpaywall) → abstract
+SONNET  (browser edition) Download what the browser may not: PDFs, and any site that refuses web pages
 HAIKU   Extract every reported number with its verbatim quote and location
 CODE    Check each quote is in the source and each number is in its quote; plausibility checks
 OPUS    Re-extract anything that failed a check, was flagged, or fell in the random audit sample
@@ -35,8 +50,16 @@ against the text it was read from.
 | Read the problem | Claude Opus 5.5 (`claude-opus-5-5`) | high |
 | Plan the search (tool use) | Claude Opus 5.5 | high |
 | Screen titles and abstracts | Claude Haiku 5.5 (`claude-haiku-5-5`) | low |
+| Download a PDF the browser can't (browser edition) | Claude Sonnet 5.5 (`claude-sonnet-5-5`) | low |
 | Extract | Claude Haiku 5.5 | medium |
 | Re-extract escalated papers | Claude Opus 5.5 | xhigh |
+
+**Sonnet's download step.** A web page may only read files from sites that allow it (CORS), and
+most publishers don't. The browser edition first tries each download itself; when the browser
+refuses, Sonnet fetches the address with the web fetch tool on Anthropic's servers and the page
+hands the document to Haiku. The fetch tool is limited to one fetch per call, so nothing inside a
+fetched document can make Sonnet fetch anything else. Sonnet reads the whole PDF to fetch it, so
+this step costs more per paper than Haiku's reading; the **Tokens used** panel shows it.
 
 Opus calls opt into server-side refusal fallbacks (`fallbacks: "default"`), so a safety
 classifier's false positive on a biomedical paper is retried on another model rather than lost.
@@ -57,7 +80,44 @@ Haiku has no server-side fallback; a paper Haiku declines goes to Opus.
 Nothing is dropped silently: a record that cannot be screened goes forward as "unsure", and a paper
 neither model could extract shows up under **Needs attention**.
 
-## Run it
+## Publish the browser edition on GitHub Pages
+
+1. In the repository's **Settings → Pages**, set **Source** to **GitHub Actions**. Pages for a
+   private repository needs a GitHub plan that includes it; the published page itself can be opened
+   by anyone who has its address, which is fine here because nothing is stored on a server.
+2. Merge to `main`. The **Pages** workflow builds `site/` (it bundles the Anthropic TypeScript SDK
+   and pdf.js at pinned versions) and publishes it; the workflow run shows the address.
+3. Share the address. Each person pastes their own Anthropic API key and, under **Contact email and
+   NCBI key**, an email address (NCBI asks for one; Unpaywall needs it to find open-access PDFs).
+
+Keep the tab open while a search runs; if it closes, open the search again and choose **Continue**.
+Searches live in that browser only: another browser or computer starts empty, and clearing the
+site's data deletes them. Export what you want to keep.
+
+To try the page on your own computer:
+
+```bash
+cd site && npm ci && npm run build && cd ..
+python3 -m http.server --directory site 8080   # then open http://localhost:8080
+```
+
+**Which sites accept requests from a web page** decides how often Sonnet is needed. To check from
+your own browser, open https://example.com, press F12, and paste this into the Console:
+
+```js
+for (const u of [
+  'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=mindfulness&retmode=json&retmax=1',
+  'https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=mindfulness&format=json&pageSize=1',
+  'https://clinicaltrials.gov/api/v2/studies?query.term=mindfulness&pageSize=1',
+  'https://api.unpaywall.org/v2/10.1038/nature12373?email=you@example.com',
+]) fetch(u).then(r => console.log('OK', r.status, u)).catch(() => console.log('BLOCKED', u));
+```
+
+A blocked search API still works through Sonnet, but its results then pass through the model as
+tokens, and the web fetch tool accepts addresses of at most 250 characters, so long PubMed queries
+fail there. If one of these turns out to be blocked, a small proxy for it is the better fix.
+
+## Run the local server
 
 Requirements: Python 3.10 or later and an Anthropic API key.
 
@@ -108,12 +168,15 @@ flags, and your decision.
 ## Privacy
 
 Your paragraph and the text of the papers are sent to Anthropic's API. Literature requests go to
-NCBI, ClinicalTrials.gov, Europe PMC, and Unpaywall. Everything else stays on the machine running
-the server.
+NCBI, ClinicalTrials.gov, Europe PMC, and Unpaywall, and, in the browser edition, to the sites that
+host open-access PDFs. Nothing else leaves your browser (browser edition) or the machine running the
+server (local server).
 
-The API key travels from the page to the server in a request header. On your own computer that
-stays local; if you host the server for others, serve it over HTTPS so keys are not sent in the
-clear.
+In the browser edition the API key goes from the page straight to Anthropic, with the header
+Anthropic requires for calls from a browser. Anyone who can run scripts in the page could read it,
+so use the page only from its published address and don't add third-party scripts to it. In the
+local server edition the key travels from the page to the server in a request header; if you host
+that server for others, serve it over HTTPS.
 
 ## Not yet
 
@@ -123,13 +186,19 @@ clear.
 - Numbers shown only in figures: figure captions are kept, figure images are not read.
 - The Message Batches API (half price, slower) for screening large searches; screening uses direct
   parallel calls.
-- Accounts and hosting: the server is meant to run locally, with your own API key.
+- Shared searches: the browser edition keeps each person's searches in their own browser.
 
 ## Development
 
 ```bash
+pip install -e ".[dev]" playwright
+(cd site && npm ci && npm run build)   # the browser edition's vendored libraries
+python scripts/build_site_data.py      # after changing prompts or schemas in python/esf
 pytest
 ```
 
 The tests use recorded-format responses for the literature APIs and a mock HTTP transport for the
-Claude API, so they need neither network access nor an API key.
+Claude API, so they need neither network access nor an API key. `tests/test_site.py` drives the
+browser edition in Chromium with every request answered from the same fixtures, including a PDF host
+that refuses web pages so the download goes through Sonnet; it is skipped if Playwright or the
+built `site/vendor/` is missing. Set `ESF_CHROMIUM` to use a particular Chromium binary.

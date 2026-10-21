@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Python package
+        run: pip install -e ".[dev]" playwright
+      - name: Shared prompts and schemas are current
+        run: python scripts/build_site_data.py --check
+      - name: Browser edition's libraries
+        working-directory: site
+        run: npm ci && npm run build
+      - name: Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Tests
+        run: pytest -q

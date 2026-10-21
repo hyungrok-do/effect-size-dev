@@ -1,0 +1,53 @@
+# Builds the browser edition (site/) and publishes it to GitHub Pages.
+# Only the page and the files it loads are published, not the repository.
+# Needs Settings → Pages → Source: GitHub Actions. A private repository needs a plan that includes
+# Pages for private repositories; the published page itself can be opened by anyone with its address.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: The vendored libraries
+        working-directory: site
+        run: npm ci && npm run build
+      - name: The site
+        run: |
+          mkdir -p _site
+          cp -r site/index.html site/app.js site/lib site/vendor _site/
+          ls -lR _site
+      - uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

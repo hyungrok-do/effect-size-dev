@@ -1,0 +1,16 @@
+{
+  "name": "effect-size-finder-site",
+  "private": true,
+  "type": "module",
+  "description": "Browser edition of Effect Size Finder: a static page for GitHub Pages.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.0.0",
+    "pdfjs-dist": "6.4.299"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

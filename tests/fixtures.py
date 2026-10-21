@@ -212,7 +212,8 @@ class LiteratureAPIs:
         self.requests.append(request)
         url = request.url
         if url.host == "eutils.ncbi.nlm.nih.gov":
-            form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+            # The Python client POSTs a form; the browser edition sends a GET with a query string.
+            form = {**dict(url.params), **{k: v[0] for k, v in parse_qs(request.content.decode()).items()}}
             if url.path.endswith("esearch.fcgi"):
                 return httpx.Response(200, json={"esearchresult": {"count": "4", "retmax": "4", "idlist": PMIDS}})
             if url.path.endswith("esummary.fcgi"):
@@ -318,7 +319,10 @@ class FakeLLM:
 
     def extract(self, spec, document, sink=None):
         self.calls.append("extract")
-        title = document["title"]
+        return self._first_pass(document["title"])
+
+    @staticmethod
+    def _first_pass(title):
         if title.startswith("A mindfulness app"):
             return _extraction([_result([
                 _value("App", "n", 100, HEADER), _value("Waitlist", "n", 100, HEADER),
@@ -347,6 +351,10 @@ class FakeLLM:
     def adjudicate(self, spec, document, worker, flags, sink=None):
         self.calls.append("adjudicate")
         assert flags
+        # Only the pilot's first pass is wrong; a paper reviewed for any other reason (the random
+        # audit) comes back as it was.
+        if not document["title"].startswith("Mindfulness groups"):
+            return self._first_pass(document["title"])
         return _extraction([_result([
             _value("Mindfulness", "mean", 7.9, ABSTRACT_LINE, "Abstract"),
             _value("Mindfulness", "sd", 3.8, ABSTRACT_LINE, "Abstract"),
@@ -359,3 +367,18 @@ class FakeLLM:
 
 def sse(events: list[dict]) -> bytes:
     return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
+
+
+def streamed(model, payload, stop_reason="end_turn"):
+    text = json.dumps(payload)
+    return sse([
+        {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": model,
+                                              "content": [], "stop_reason": None, "stop_sequence": None,
+                                              "usage": {"input_tokens": 100, "output_tokens": 1}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text[:20]}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text[20:]}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": 50}},
+        {"type": "message_stop"},
+    ])

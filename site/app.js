@@ -1,0 +1,727 @@
+// Effect Size Finder, browser edition: the whole app runs in this page. Searches are kept in
+// IndexedDB; Claude is called with the user's own key; nothing goes to a server of ours.
+
+import { Claude, MODELS } from './lib/claude.js';
+import { download, exportRows, PAPER, toCsv } from './lib/export.js';
+import { Pipeline } from './lib/pipeline.js';
+import { Sources } from './lib/sources.js';
+import { RUNNING, Store } from './lib/store.js';
+
+const DESIGNS = {
+  parallel_rct: 'Parallel-group randomized trial',
+  cluster_rct: 'Cluster randomized trial',
+  crossover_rct: 'Crossover trial',
+  single_arm: 'Single-arm study',
+  cohort: 'Cohort study',
+  case_control: 'Case–control study',
+  cross_sectional: 'Cross-sectional study',
+  other: 'Other',
+};
+const OUTCOME_TYPES = {
+  continuous: 'Continuous', binary: 'Binary', count: 'Count',
+  time_to_event: 'Time to event', ordinal: 'Ordinal', unclear: 'Unclear',
+};
+const TEXT_FIELDS = ['population', 'intervention', 'comparator', 'timepoint'];
+const LIST_FIELDS = ['outcomes', 'statistics_needed', 'inclusion_criteria', 'exclusion_criteria', 'search_terms'];
+const TEXT_KIND = {
+  registry: 'Registry results', pmc_xml: 'PMC full text', oa_pdf: 'Open-access PDF', abstract: 'Abstract only', upload: 'Your PDF',
+};
+const STATISTICS = {
+  n: 'n', mean: 'Mean', sd: 'SD', se: 'SE', ci_lower: 'CI lower', ci_upper: 'CI upper', median: 'Median',
+  q1: 'Q1', q3: 'Q3', min: 'Min', max: 'Max', events: 'Events', percent: '%', mean_change: 'Mean change',
+  sd_change: 'SD of change', mean_difference: 'Mean difference', standardized_mean_difference: 'SMD',
+  odds_ratio: 'Odds ratio', risk_ratio: 'Risk ratio', hazard_ratio: 'Hazard ratio', risk_difference: 'Risk difference',
+  p_value: 'p', t_statistic: 't', icc: 'ICC', correlation: 'Correlation', other: 'Other',
+};
+const POPULATIONS = {
+  itt: 'ITT', modified_itt: 'Modified ITT', per_protocol: 'Per protocol', completers: 'Completers', unclear: 'Population unclear',
+};
+const EXCLUDE_REASONS = [
+  'Different outcome', 'Different timepoint', 'Different population', 'Different comparison',
+  'Same trial as another record', 'Numbers look wrong', 'Other',
+];
+const STAGES = [
+  ['searching', 'Plan and run the search'],
+  ['screening', 'Screen titles and abstracts'],
+  ['extracting', 'Read and extract'],
+  ['done', 'Ready for review'],
+];
+const TABS = [
+  ['extracted', 'Extracted'],
+  ['attention', 'Needs attention'],
+  ['pending', 'In progress'],
+  ['excluded', 'Screened out'],
+];
+const KEY = 'esf-anthropic-api-key';
+const EMAIL = 'esf-contact-email';
+const NCBI_KEY = 'esf-ncbi-api-key';
+
+const $ = (selector) => document.querySelector(selector);
+const store = new Store();
+const jobs = new Set(); // projects and papers with work running in this tab
+const state = { id: null, project: null, papers: [], decisions: {}, usage: [], tab: 'extracted', specKey: '', papersKey: '', uploadFor: null };
+
+function h(tag, attrs = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value == null || value === false) continue;
+    if (key === 'class') el.className = value;
+    else if (key.startsWith('on')) el.addEventListener(key.slice(2), value);
+    else el.setAttribute(key, value === true ? '' : value);
+  }
+  for (const child of children.flat()) {
+    if (child == null || child === false) continue;
+    el.append(child instanceof Node ? child : String(child));
+  }
+  return el;
+}
+
+function showError(el, message) {
+  el.textContent = message || '';
+  el.hidden = !message;
+}
+
+const lines = (text) => text.split('\n').map((s) => s.trim()).filter(Boolean);
+const statusLabel = (status) => ({
+  new: 'new', reading: 'reading the problem', spec_ready: 'ready to search', searching: 'searching',
+  screening: 'screening', extracting: 'extracting', done: 'done', error: 'stopped with an error',
+  interrupted: 'stopped before it finished',
+}[status] || status);
+
+// -- settings: kept in this tab (sessionStorage) or, if asked, this browser (localStorage) -----
+
+function storage(kind) {
+  try {
+    return kind === 'local' ? window.localStorage : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function readSetting(name) {
+  try {
+    return storage('local')?.getItem(name) || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeSetting(name, value) {
+  try {
+    if (value) storage('local')?.setItem(name, value);
+    else storage('local')?.removeItem(name);
+  } catch { /* storage unavailable: the value lives only in the field */ }
+}
+
+function loadSettings() {
+  const remembered = storage('local')?.getItem(KEY);
+  $('#api-key').value = remembered || storage('session')?.getItem(KEY) || '';
+  $('#remember-key').checked = Boolean(remembered);
+  $('#contact-email').value = readSetting(EMAIL);
+  $('#ncbi-key').value = readSetting(NCBI_KEY);
+  if (!$('#contact-email').value) $('#more-settings').open = true;
+}
+
+const apiKey = () => $('#api-key').value.trim();
+
+function saveKey() {
+  const key = apiKey();
+  try {
+    storage('local')?.removeItem(KEY);
+    storage('session')?.removeItem(KEY);
+    if (key) storage($('#remember-key').checked ? 'local' : 'session')?.setItem(KEY, key);
+  } catch { /* storage unavailable */ }
+  showKeyStatus();
+}
+
+function forgetKey() {
+  $('#api-key').value = '';
+  $('#remember-key').checked = false;
+  saveKey();
+  $('#api-key').focus();
+}
+
+function showKeyStatus() {
+  $('.keybox').dataset.missing = 'false';
+  const status = $('#key-status');
+  if (apiKey()) {
+    status.textContent = $('#remember-key').checked
+      ? 'Remembered on this browser. It is sent only to Anthropic, straight from this page.'
+      : 'Kept for this tab only. It is sent only to Anthropic, straight from this page.';
+  } else {
+    status.replaceChildren('Needed to read the problem, search, and extract. Create one in the ',
+      h('a', { href: 'https://console.anthropic.com/settings/keys', target: '_blank', rel: 'noopener' }, 'Anthropic Console'), '.');
+  }
+}
+
+function haveKey() {
+  if (apiKey()) return true;
+  $('.keybox').dataset.missing = 'true';
+  $('#key-status').textContent = 'Enter your Anthropic API key first.';
+  $('#api-key').focus();
+  return false;
+}
+
+// A pipeline wired to the settings as they are when a job starts.
+function pipeline(projectId) {
+  const claude = new Claude({ apiKey: apiKey() });
+  const sources = new Sources({
+    email: $('#contact-email').value.trim(),
+    ncbiApiKey: $('#ncbi-key').value.trim(),
+    proxy: (url) => claude.fetchUrl(url, { sink: (step, model, usage) => store.addUsage(projectId, step, model, usage) }),
+  });
+  return new Pipeline({ store, claude, sources });
+}
+
+async function startJob(key, work) {
+  if (jobs.has(key)) return;
+  jobs.add(key);
+  try {
+    await work();
+  } finally {
+    jobs.delete(key);
+    refresh();
+    loadProjects();
+  }
+}
+
+// -- projects list ---------------------------------------------------------------
+
+async function loadProjects() {
+  const list = $('#project-list');
+  const projects = await store.projects();
+  if (!projects.length) {
+    list.replaceChildren(h('li', { class: 'muted small' }, 'None yet.'));
+    return;
+  }
+  list.replaceChildren(...projects.map((p) => {
+    const text = p.paragraph.length > 90 ? `${p.paragraph.slice(0, 90)}…` : p.paragraph;
+    return h('li', {}, h('button', {
+      type: 'button', class: 'project-link', 'aria-current': p.id === state.id ? 'true' : null,
+      onclick: () => openProject(p.id),
+    }, text, h('small', {}, `${new Date(p.created_at).toLocaleString()} · ${statusLabel(p.status)}`)));
+  }));
+}
+
+function newSearch() {
+  Object.assign(state, { id: null, project: null, papers: [], decisions: {}, usage: [], specKey: '', papersKey: '' });
+  history.replaceState(null, '', location.pathname);
+  const paragraph = $('#paragraph');
+  paragraph.value = '';
+  paragraph.readOnly = false;
+  $('#read').hidden = false;
+  $('#read').textContent = 'Read the problem';
+  $('#delete-project').hidden = true;
+  $('#read-status').textContent = '';
+  showError($('#problem-error'), '');
+  for (const id of ['#spec', '#progress-card', '#review']) $(id).hidden = true;
+  loadProjects();
+  paragraph.focus();
+}
+
+async function openProject(id) {
+  Object.assign(state, { id, project: null, papers: [], decisions: {}, usage: [], specKey: '', papersKey: '' });
+  history.replaceState(null, '', `#${id}`);
+  await refresh();
+  if (!state.project) {
+    newSearch();
+    showError($('#problem-error'), 'That search is not stored in this browser.');
+  }
+  loadProjects();
+}
+
+async function deleteProject() {
+  if (!state.id || jobs.has(state.id)) return;
+  if (!confirm('Delete this search, its papers and your decisions from this browser?')) return;
+  await store.deleteProject(state.id);
+  newSearch();
+}
+
+let refreshing = null;
+let again = false;
+
+// Re-read the open search from storage and redraw. Calls during a redraw are folded into one more.
+async function refresh() {
+  if (refreshing) {
+    again = true;
+    return refreshing;
+  }
+  refreshing = (async () => {
+    do {
+      again = false;
+      if (!state.id) break;
+      const id = state.id;
+      const project = await store.project(id);
+      if (id !== state.id) continue;
+      state.project = project;
+      if (!project) break;
+      project.counts = await store.statusCounts(id);
+      state.papers = await store.papers(id);
+      state.decisions = await store.decisions(id);
+      state.usage = await store.usage(id);
+      renderProblem(project);
+      renderSpec(project);
+      renderProgress(project);
+      if (state.papers.length) renderReview();
+      else $('#review').hidden = true;
+    } while (again);
+  })();
+  try {
+    await refreshing;
+  } finally {
+    refreshing = null;
+  }
+}
+
+let pending = null;
+store.addEventListener('change', (event) => {
+  if (event.detail.projectId !== state.id) return;
+  clearTimeout(pending);
+  pending = setTimeout(refresh, 150);
+});
+
+// -- step 1 ----------------------------------------------------------------------
+
+function renderProblem(project) {
+  const paragraph = $('#paragraph');
+  paragraph.value = project.paragraph;
+  paragraph.readOnly = true;
+  $('#read').hidden = true;
+  $('#delete-project').hidden = jobs.has(project.id);
+  $('#read-status').textContent = project.status === 'reading' ? 'Opus is reading the problem…' : '';
+  showError($('#problem-error'), !project.spec && project.error ? project.error : '');
+  if (!project.spec && project.status === 'interrupted') {
+    $('#read').hidden = false;
+    $('#read').textContent = 'Read the problem again';
+  }
+}
+
+async function readProblem() {
+  const text = $('#paragraph').value.trim();
+  if (state.project && !state.project.spec) {
+    // Retrying a search whose reading failed or was cut short.
+    if (!haveKey()) return;
+    const id = state.project.id;
+    startJob(id, () => pipeline(id).readSpec(id));
+    return;
+  }
+  if (text.length < 20) {
+    showError($('#problem-error'), 'Describe the study in a sentence or two first.');
+    return;
+  }
+  if (!haveKey()) return;
+  const id = await store.createProject(text);
+  await store.updateProject(id, { status: 'reading' });
+  startJob(id, () => pipeline(id).readSpec(id));
+  await openProject(id);
+}
+
+// -- step 2 ----------------------------------------------------------------------
+
+function fillSelect(select, options) {
+  if (select.options.length) return;
+  for (const [value, label] of Object.entries(options)) select.append(h('option', { value }, label));
+}
+
+function renderSpec(project) {
+  const card = $('#spec');
+  if (!project.spec) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  const spec = project.spec;
+  const key = JSON.stringify(spec);
+  if (key !== state.specKey) {
+    state.specKey = key;
+    fillSelect($('#f-design'), DESIGNS);
+    fillSelect($('#f-outcome_type'), OUTCOME_TYPES);
+    $('#spec-question').textContent = spec.question;
+    for (const f of TEXT_FIELDS) $(`#f-${f}`).value = spec[f] || '';
+    for (const f of LIST_FIELDS) $(`#f-${f}`).value = (spec[f] || []).join('\n');
+    $('#f-design').value = spec.design;
+    $('#f-outcome_type').value = spec.outcome_type;
+    $('#stated-wrap').hidden = !spec.stated_values.length;
+    $('#stated').replaceChildren(...spec.stated_values.map((v) => h('li', {}, `${v.parameter}: ${v.value} — “${v.quote}”`)));
+    $('#questions-wrap').hidden = !spec.open_questions.length;
+    $('#questions').replaceChildren(...spec.open_questions.map((q) => h('li', {}, q)));
+  }
+  const running = jobs.has(project.id);
+  for (const el of $('#spec-form').elements) el.disabled = running;
+  const hasPapers = state.papers.length > 0;
+  $('#run').textContent = hasPapers ? 'Search again' : 'Search and extract';
+  $('#run-status').textContent = hasPapers && !running ? 'Searching again replaces the papers and decisions below.' : '';
+}
+
+function collectSpec() {
+  const spec = { ...state.project.spec };
+  for (const f of TEXT_FIELDS) spec[f] = $(`#f-${f}`).value.trim();
+  for (const f of LIST_FIELDS) spec[f] = lines($(`#f-${f}`).value);
+  spec.design = $('#f-design').value;
+  spec.outcome_type = $('#f-outcome_type').value;
+  return spec;
+}
+
+async function runSearch(event) {
+  event.preventDefault();
+  if (!haveKey()) return;
+  const id = state.id;
+  if (state.papers.length && !confirm('Search again? This replaces the papers and your decisions for this search.')) return;
+  await store.updateProject(id, { spec: collectSpec(), status: 'searching' });
+  state.papersKey = '';
+  startJob(id, () => pipeline(id).run(id));
+  await refresh();
+  $('#progress-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function continueSearch() {
+  if (!haveKey() || jobs.has(state.id)) return;
+  const id = state.id;
+  startJob(id, () => pipeline(id).run(id, { resume: true }));
+  refresh();
+}
+
+// -- step 3 ----------------------------------------------------------------------
+
+function renderProgress(project) {
+  const card = $('#progress-card');
+  const counts = project.counts || {};
+  const running = jobs.has(project.id);
+  const started = RUNNING.has(project.status) && project.status !== 'reading';
+  card.hidden = !(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
+  if (card.hidden) return;
+
+  const order = STAGES.map(([s]) => s);
+  const current = project.status === 'done' ? 3 : order.indexOf(project.status);
+  $('#stages').replaceChildren(...STAGES.map(([key, label], i) => h('li', {
+    'data-state': i < current || project.status === 'done' ? 'done' : i === current ? 'active' : null,
+  }, label)));
+
+  const progress = project.progress || {};
+  const bar = $('#progress');
+  bar.hidden = !running;
+  bar.max = progress.total || 1;
+  bar.value = progress.total ? progress.done : 0;
+
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const kept = total - (counts.screened_out || 0) - (counts.candidate || 0);
+  const parts = [];
+  if (running && progress.stage) parts.push(progress.total ? `${progress.stage}: ${progress.done} of ${progress.total}` : `${progress.stage}…`);
+  if (total) parts.push(`${total} records found`, `${kept} kept after screening`, `${counts.extracted || 0} extracted`);
+  $('#progress-text').textContent = parts.join(' · ');
+  $('#keep-open').hidden = !running;
+  const stopped = !running && (project.status === 'interrupted' || (RUNNING.has(project.status) && project.status !== 'reading'));
+  $('#continue').hidden = !(stopped || (project.status === 'error' && project.spec));
+  showError($('#run-error'), project.spec && project.error ? project.error : '');
+
+  const plan = project.search_plan;
+  $('#plan-details').hidden = !plan;
+  if (plan) {
+    $('#plan-summary').textContent = plan.summary;
+    $('#plan-queries').replaceChildren(
+      ...plan.pubmed_queries.map((q) => h('li', {}, 'PubMed: ', h('code', {}, q))),
+      ...plan.clinicaltrials_queries.map((q) => h('li', {}, 'ClinicalTrials.gov: ', h('code', {}, q))),
+      ...(plan.extra_ids.length ? [h('li', {}, `Named records: ${plan.extra_ids.join(', ')}`)] : []),
+      ...(plan.failed_queries || []).map((q) => h('li', {}, badge('Failed', 'err'), ' ', q)),
+    );
+  }
+  $('#usage-details').hidden = !state.usage.length;
+  $('#usage').replaceChildren(...state.usage.map((u) => h('tr', {},
+    h('td', {}, u.step), h('td', {}, u.model), h('td', { class: 'num' }, u.calls),
+    h('td', { class: 'num' }, u.input_tokens.toLocaleString()), h('td', { class: 'num' }, u.output_tokens.toLocaleString()),
+    h('td', { class: 'num' }, u.cache_read_input_tokens.toLocaleString()), h('td', { class: 'num' }, u.web_fetch_requests || ''))));
+}
+
+// -- step 4 ----------------------------------------------------------------------
+
+function groupOf(paper) {
+  const running = jobs.has(state.id);
+  if (paper.status === 'extracted') return 'extracted';
+  if (paper.status === 'screened_out') return 'excluded';
+  if (['fetching', 'extracting'].includes(paper.status)) return 'pending';
+  if (running && ['candidate', 'screened_in', 'unsure'].includes(paper.status)) return 'pending';
+  return 'attention';
+}
+
+function renderReview() {
+  const key = JSON.stringify([state.papers.map((p) => [p.id, p.status, p.extracted_by, p.error]), state.decisions, state.tab, jobs.has(state.id)]);
+  if (key === state.papersKey) return;
+  state.papersKey = key;
+  $('#review').hidden = false;
+
+  const groups = Object.fromEntries(TABS.map(([k]) => [k, []]));
+  for (const paper of state.papers) groups[groupOf(paper)].push(paper);
+  $('#tabs').replaceChildren(...TABS.map(([k, label]) => h('button', {
+    type: 'button', class: 'secondary small', 'aria-pressed': String(state.tab === k),
+    onclick: () => { state.tab = k; state.papersKey = ''; renderReview(); },
+  }, `${label} (${groups[k].length})`)));
+
+  const trials = new Map();
+  for (const paper of state.papers) {
+    for (const nct of paper.nct_ids || []) trials.set(nct, (trials.get(nct) || 0) + 1);
+  }
+  const shown = groups[state.tab];
+  $('#papers').replaceChildren(...(shown.length ? shown.map((p) => paperCard(p, trials)) : [h('p', { class: 'muted' }, 'Nothing here.')]));
+}
+
+function badge(text, kind = '') {
+  return h('span', { class: `badge ${kind}`.trim() }, text);
+}
+
+function links(paper) {
+  const out = {};
+  if (paper.pmid) out.PubMed = `https://pubmed.ncbi.nlm.nih.gov/${paper.pmid}/`;
+  if (paper.pmcid) out.PMC = `https://pmc.ncbi.nlm.nih.gov/articles/${paper.pmcid}/`;
+  if (paper.doi) out.DOI = `https://doi.org/${paper.doi}`;
+  for (const nct of paper.nct_ids || []) out[nct] = `https://clinicaltrials.gov/study/${nct}`;
+  return out;
+}
+
+function paperCard(paper, trials) {
+  const decisions = state.decisions[paper.id] || {};
+  const paperDecision = decisions[PAPER]?.decision;
+  const sharedTrial = (paper.nct_ids || []).find((nct) => trials.get(nct) > 1);
+  const busy = jobs.has(state.id) || jobs.has(`paper-${paper.id}`);
+
+  const meta = h('div', { class: 'meta' },
+    paper.year && h('span', {}, paper.year),
+    paper.journal && h('span', {}, paper.journal),
+    badge(paper.source === 'clinicaltrials' ? 'ClinicalTrials.gov' : 'PubMed'),
+    paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind, paper.fulltext_kind === 'abstract' ? 'warn' : ''),
+    paper.fetched_by === 'sonnet' && badge('Fetched by Sonnet'),
+    paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
+    paper.extracted_by === 'worker' && badge('Extracted by Haiku'),
+    paper.escalation?.audit && badge('Audit sample'),
+    sharedTrial && badge(`Another record shares ${sharedTrial}`, 'warn'),
+    ...Object.entries(links(paper)).map(([label, url]) => h('a', { href: url, target: '_blank', rel: 'noopener' }, label)),
+  );
+
+  const screen = paper.screen;
+  const children = [
+    h('h3', {}, paper.title || paper.ext_id),
+    meta,
+    screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
+    paper.error && h('p', { class: 'reason' }, badge('Note', 'warn'), ' ', paper.error),
+  ];
+  if (paper.escalation?.reasons?.length) {
+    children.push(h('details', {}, h('summary', {}, 'Why Opus reviewed this paper'),
+      h('ul', {}, paper.escalation.reasons.map((r) => h('li', {}, r)))));
+  }
+
+  const actions = h('div', { class: 'paper-actions' });
+  if (paper.status === 'extracted') {
+    actions.append(h('button', {
+      type: 'button', class: 'secondary small', 'aria-pressed': String(paperDecision === 'exclude'),
+      onclick: () => decide(paper, PAPER, paperDecision === 'exclude' ? null : 'exclude', ''),
+    }, paperDecision === 'exclude' ? 'Undo excluding the paper' : 'Exclude the whole paper'));
+  }
+  if (paper.fulltext_kind) {
+    actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => showSource(paper) }, 'Show source text'));
+  }
+  if (!busy && ['screened_out', 'no_fulltext', 'needs_manual', 'screened_in', 'unsure', 'candidate', 'error'].includes(paper.status)) {
+    actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => extractPaper(paper) },
+      paper.status === 'screened_out' ? 'Extract anyway' : 'Try extracting again'));
+  }
+  if (!busy && paper.source === 'pubmed') {
+    actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => chooseUpload(paper) },
+      paper.status === 'extracted' ? 'Re-extract from your PDF' : 'Upload the PDF'));
+  }
+  if (actions.childElementCount) children.push(actions);
+
+  const extraction = paper.extraction;
+  if (paper.status === 'extracted' && extraction) {
+    if (!extraction.matches_spec && extraction.mismatch_reasons.length) {
+      children.push(h('p', { class: 'reason' }, badge('Differs from the plan', 'warn'), ' ', extraction.mismatch_reasons.join('; ')));
+    }
+    if (!extraction.results.length) children.push(h('p', { class: 'reason muted' }, 'No relevant results were reported.'));
+    extraction.results.forEach((result, i) => children.push(resultBlock(paper, result, i, decisions)));
+    if (extraction.notes) children.push(h('p', { class: 'reason small muted' }, `Notes: ${extraction.notes}`));
+  }
+  return h('article', { class: 'paper' }, children);
+}
+
+function checkBadge(check) {
+  if (!check) return '';
+  if (!check.number_in_quote) return badge('number not in quote', 'err');
+  if (check.quote === 'exact') return badge('quote found', 'ok');
+  if (check.quote === 'approximate') return badge('near match', 'warn');
+  return check.number_in_source ? badge('number in text, quote not matched', 'warn') : badge('not found', 'err');
+}
+
+function resultBlock(paper, result, index, decisions) {
+  const own = decisions[index];
+  const decision = (own || decisions[PAPER])?.decision || '';
+  const checks = paper.verification?.values?.[index] || [];
+  const flags = (paper.verification?.flags || [])
+    .filter((f) => f.startsWith(`result ${index + 1} `))
+    .map((f) => f.replace(/^result \d+ \([^)]*\): /, ''));
+  const notes = [...result.concerns, ...flags];
+
+  const relevanceKind = { direct: 'ok', partial: 'warn', indirect: 'err' }[result.relevance];
+  const reason = h('select', {
+    'aria-label': 'Reason for excluding', hidden: decision !== 'exclude' || null,
+    onchange: (e) => decide(paper, index, 'exclude', e.target.value),
+  }, h('option', { value: '' }, 'Reason…'), EXCLUDE_REASONS.map((r) => h('option', { value: r }, r)));
+  reason.value = own?.reason || '';
+
+  const head = h('div', { class: 'result-head' },
+    h('div', {},
+      h('h4', {}, result.outcome_measure),
+      h('div', { class: 'meta' },
+        result.timepoint && h('span', {}, result.timepoint),
+        h('span', {}, POPULATIONS[result.analysis_population] || result.analysis_population),
+        result.adjusted !== 'unclear' && h('span', {}, result.adjusted),
+        badge(`${result.relevance} match`, relevanceKind),
+        badge(`${result.confidence} confidence`, result.confidence === 'low' ? 'warn' : ''))),
+    h('div', { class: 'decide', role: 'group', 'aria-label': `Decision for ${result.outcome_measure}` },
+      h('button', {
+        type: 'button', class: 'secondary small include', 'aria-pressed': String(decision === 'include'),
+        onclick: () => decide(paper, index, own?.decision === 'include' ? null : 'include', ''),
+      }, 'Include'),
+      h('button', {
+        type: 'button', class: 'secondary small exclude', 'aria-pressed': String(decision === 'exclude'),
+        onclick: () => decide(paper, index, own?.decision === 'exclude' ? null : 'exclude', own?.reason || ''),
+      }, 'Exclude'),
+      reason));
+
+  const rows = result.values.map((v, j) => h('tr', {},
+    h('td', {}, v.group),
+    h('td', {}, STATISTICS[v.statistic] || v.statistic),
+    h('td', { class: 'num' }, String(v.value)),
+    h('td', {}, v.describes),
+    h('td', { class: 'quote' }, h('q', {}, v.quote), h('span', {}, v.location)),
+    h('td', {}, checkBadge(checks[j]))));
+
+  return h('section', { class: 'result', 'data-decision': decision || null },
+    head,
+    notes.length > 0 && h('ul', { class: 'flags' }, notes.map((n) => h('li', {}, n))),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Group', 'Statistic', 'Value', 'What it is', 'Quote', 'Check'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, rows))));
+}
+
+async function decide(paper, resultIndex, decision, reason) {
+  await store.setDecision(state.id, paper.id, resultIndex, decision, reason);
+}
+
+function extractPaper(paper, upload = null, uploadName = '') {
+  if (!haveKey()) return;
+  const projectId = state.id;
+  const spec = state.project.spec;
+  state.tab = 'pending';
+  state.papersKey = '';
+  startJob(`paper-${paper.id}`, async () => {
+    await store.clearDecisions(paper.id);
+    await pipeline(projectId).extractPaper(projectId, spec, paper.id, { upload, uploadName });
+  });
+  refresh();
+}
+
+function chooseUpload(paper) {
+  if (!haveKey()) return;
+  state.uploadFor = paper;
+  $('#upload').value = '';
+  $('#upload').click();
+}
+
+async function uploaded() {
+  const file = $('#upload').files[0];
+  const paper = state.uploadFor;
+  if (!file || !paper) return;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!(bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46)) {
+    alert('That file is not a PDF.');
+    return;
+  }
+  extractPaper(paper, bytes, file.name);
+}
+
+// -- source text and exports ---------------------------------------------------------
+
+function quoteRanges(text, quotes) {
+  const ranges = [];
+  for (const quote of quotes) {
+    const words = quote.split(/\s+/).filter(Boolean).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (!words.length) continue;
+    const match = new RegExp(words.join('\\s+'), 'i').exec(text);
+    if (match) ranges.push([match.index, match.index + match[0].length]);
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const range of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  return merged;
+}
+
+async function showSource(paper) {
+  const dialog = $('#source-dialog');
+  const pre = $('#source-text');
+  $('#source-title').textContent = paper.title || 'Source text';
+  dialog.showModal();
+  const doc = await store.document(paper.id);
+  if (!doc) {
+    pre.textContent = 'No text was retrieved for this paper.';
+    return;
+  }
+  const text = doc.text || '';
+  const quotes = (paper.extraction?.results || []).flatMap((r) => r.values.map((v) => v.quote));
+  const nodes = [];
+  let at = 0;
+  for (const [start, end] of quoteRanges(text, quotes)) {
+    nodes.push(text.slice(at, start), h('mark', {}, text.slice(start, end)));
+    at = end;
+  }
+  nodes.push(text.slice(at));
+  pre.replaceChildren(...nodes);
+  if (doc.pdf) pre.prepend(h('span', { class: 'muted' }, 'Text layer of the PDF; tables may be out of order.\n\n'));
+  pre.querySelector('mark')?.scrollIntoView({ block: 'center' });
+}
+
+function exportCsv(includedOnly) {
+  const rows = exportRows(state.papers, state.decisions, includedOnly);
+  download(`effect-sizes-${state.id}${includedOnly ? '-included' : ''}.csv`, toCsv(rows), 'text/csv');
+}
+
+async function exportJson() {
+  const { id, created_at, paragraph, spec, search_plan } = state.project;
+  const papers = state.papers.map((p) => ({ ...p, decisions: state.decisions[p.id] || {}, links: links(p) }));
+  const body = { project: { id, created_at, paragraph, spec, search_plan }, papers, usage: state.usage };
+  download(`effect-sizes-${id}.json`, JSON.stringify(body, null, 2), 'application/json');
+}
+
+// -- start -------------------------------------------------------------------------
+
+async function start() {
+  $('#read').addEventListener('click', readProblem);
+  $('#spec-form').addEventListener('submit', runSearch);
+  $('#new-project').addEventListener('click', newSearch);
+  $('#delete-project').addEventListener('click', deleteProject);
+  $('#continue').addEventListener('click', continueSearch);
+  $('#source-close').addEventListener('click', () => $('#source-dialog').close());
+  $('#api-key').addEventListener('input', saveKey);
+  $('#remember-key').addEventListener('change', saveKey);
+  $('#forget-key').addEventListener('click', forgetKey);
+  $('#contact-email').addEventListener('change', (e) => writeSetting(EMAIL, e.target.value.trim()));
+  $('#ncbi-key').addEventListener('change', (e) => writeSetting(NCBI_KEY, e.target.value.trim()));
+  $('#upload').addEventListener('change', uploaded);
+  $('#export-included').addEventListener('click', () => exportCsv(true));
+  $('#export-all').addEventListener('click', () => exportCsv(false));
+  $('#export-json').addEventListener('click', exportJson);
+  window.addEventListener('beforeunload', (event) => {
+    if (jobs.size) event.preventDefault();
+  });
+  $('#models').textContent = `Opus ${MODELS.manager.replace('claude-opus-', '').replace('-', '.')} plans and reviews · `
+    + `Sonnet ${MODELS.fetcher.replace('claude-sonnet-', '').replace('-', '.')} fetches · `
+    + `Haiku ${MODELS.worker.replace('claude-haiku-', '').replace('-', '.')} screens and reads`;
+  loadSettings();
+  showKeyStatus();
+  await store.interruptRunning();
+  await loadProjects();
+  const id = location.hash.slice(1);
+  if (id) await openProject(id);
+}
+
+start();
