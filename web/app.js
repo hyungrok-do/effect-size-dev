@@ -1,0 +1,571 @@
+// Effect Size Finder: the page. Talks to the JSON API in python/esf/server.py.
+
+const RUNNING = new Set(['reading', 'searching', 'screening', 'extracting']);
+const DESIGNS = {
+  parallel_rct: 'Parallel-group randomized trial',
+  cluster_rct: 'Cluster randomized trial',
+  crossover_rct: 'Crossover trial',
+  single_arm: 'Single-arm study',
+  cohort: 'Cohort study',
+  case_control: 'Case–control study',
+  cross_sectional: 'Cross-sectional study',
+  other: 'Other',
+};
+const OUTCOME_TYPES = {
+  continuous: 'Continuous', binary: 'Binary', count: 'Count',
+  time_to_event: 'Time to event', ordinal: 'Ordinal', unclear: 'Unclear',
+};
+const TEXT_FIELDS = ['population', 'intervention', 'comparator', 'timepoint'];
+const LIST_FIELDS = ['outcomes', 'statistics_needed', 'inclusion_criteria', 'exclusion_criteria', 'search_terms'];
+const TEXT_KIND = {
+  registry: 'Registry results', pmc_xml: 'PMC full text', oa_pdf: 'Open-access PDF', abstract: 'Abstract only',
+};
+const STATISTICS = {
+  n: 'n', mean: 'Mean', sd: 'SD', se: 'SE', ci_lower: 'CI lower', ci_upper: 'CI upper', median: 'Median',
+  q1: 'Q1', q3: 'Q3', min: 'Min', max: 'Max', events: 'Events', percent: '%', mean_change: 'Mean change',
+  sd_change: 'SD of change', mean_difference: 'Mean difference', standardized_mean_difference: 'SMD',
+  odds_ratio: 'Odds ratio', risk_ratio: 'Risk ratio', hazard_ratio: 'Hazard ratio', risk_difference: 'Risk difference',
+  p_value: 'p', t_statistic: 't', icc: 'ICC', correlation: 'Correlation', other: 'Other',
+};
+const POPULATIONS = {
+  itt: 'ITT', modified_itt: 'Modified ITT', per_protocol: 'Per protocol', completers: 'Completers', unclear: 'Population unclear',
+};
+const EXCLUDE_REASONS = [
+  'Different outcome', 'Different timepoint', 'Different population', 'Different comparison',
+  'Same trial as another record', 'Numbers look wrong', 'Other',
+];
+const STAGES = [
+  ['searching', 'Plan and run the search'],
+  ['screening', 'Screen titles and abstracts'],
+  ['extracting', 'Read and extract'],
+  ['done', 'Ready for review'],
+];
+const TABS = [
+  ['extracted', 'Extracted'],
+  ['attention', 'Needs attention'],
+  ['pending', 'In progress'],
+  ['excluded', 'Screened out'],
+];
+
+const $ = (selector) => document.querySelector(selector);
+const state = { id: null, project: null, papers: [], tab: 'extracted', timer: null, specKey: '', papersKey: '' };
+
+function h(tag, attrs = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value == null || value === false) continue;
+    if (key === 'class') el.className = value;
+    else if (key.startsWith('on')) el.addEventListener(key.slice(2), value);
+    else el.setAttribute(key, value === true ? '' : value);
+  }
+  for (const child of children.flat()) {
+    if (child == null || child === false) continue;
+    el.append(child instanceof Node ? child : String(child));
+  }
+  return el;
+}
+
+async function api(path, options = {}) {
+  const init = { ...options, headers: { 'Content-Type': 'application/json' } };
+  if (init.body !== undefined && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
+  const response = await fetch(path, init);
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+    } catch { /* not JSON */ }
+    throw new Error(detail);
+  }
+  const type = response.headers.get('content-type') || '';
+  return type.includes('json') ? response.json() : response.text();
+}
+
+function showError(el, message) {
+  el.textContent = message || '';
+  el.hidden = !message;
+}
+
+const lines = (text) => text.split('\n').map((s) => s.trim()).filter(Boolean);
+const statusLabel = (status) => ({
+  new: 'new', reading: 'reading the problem', spec_ready: 'ready to search', searching: 'searching',
+  screening: 'screening', extracting: 'extracting', done: 'done', error: 'stopped with an error',
+  interrupted: 'interrupted',
+}[status] || status);
+
+// -- projects list ---------------------------------------------------------------
+
+async function loadProjects() {
+  const list = $('#project-list');
+  let projects;
+  try {
+    projects = await api('/api/projects');
+  } catch {
+    return;
+  }
+  if (!projects.length) {
+    list.replaceChildren(h('li', { class: 'muted small' }, 'None yet.'));
+    return;
+  }
+  list.replaceChildren(...projects.map((p) => {
+    const text = p.paragraph.length > 90 ? `${p.paragraph.slice(0, 90)}…` : p.paragraph;
+    return h('li', {}, h('button', {
+      type: 'button', class: 'project-link', 'aria-current': p.id === state.id ? 'true' : null,
+      onclick: () => openProject(p.id),
+    }, text, h('small', {}, `${new Date(p.created_at).toLocaleString()} · ${statusLabel(p.status)}`)));
+  }));
+}
+
+function newSearch() {
+  clearTimeout(state.timer);
+  Object.assign(state, { id: null, project: null, papers: [], specKey: '', papersKey: '' });
+  history.replaceState(null, '', location.pathname);
+  const paragraph = $('#paragraph');
+  paragraph.value = '';
+  paragraph.readOnly = false;
+  $('#read').hidden = false;
+  $('#read-status').textContent = '';
+  showError($('#problem-error'), '');
+  for (const id of ['#spec', '#progress-card', '#review']) $(id).hidden = true;
+  loadProjects();
+  paragraph.focus();
+}
+
+async function openProject(id) {
+  clearTimeout(state.timer);
+  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '' });
+  history.replaceState(null, '', `#${id}`);
+  try {
+    await refresh();
+  } catch (error) {
+    showError($('#problem-error'), `Could not open this search: ${error.message}`);
+  }
+  loadProjects();
+}
+
+async function refresh() {
+  if (!state.id) return;
+  const id = state.id;
+  const project = await api(`/api/projects/${id}`);
+  if (id !== state.id) return;
+  const wasRunning = state.project && RUNNING.has(state.project.status);
+  state.project = project;
+  renderProblem(project);
+  renderSpec(project);
+  renderProgress(project);
+  if (Object.keys(project.counts || {}).length) {
+    state.papers = await api(`/api/projects/${id}/papers`);
+    renderReview();
+  } else {
+    $('#review').hidden = true;
+  }
+  const extracting = state.papers.some((p) => p.status === 'fetching' || p.status === 'extracting');
+  if (RUNNING.has(project.status) || extracting) {
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => refresh().catch(() => {}), 2500);
+  } else if (wasRunning) {
+    loadProjects();
+  }
+}
+
+// -- step 1 ----------------------------------------------------------------------
+
+function renderProblem(project) {
+  const paragraph = $('#paragraph');
+  paragraph.value = project.paragraph;
+  paragraph.readOnly = true;
+  $('#read').hidden = true;
+  $('#read-status').textContent = project.status === 'reading' ? 'Opus is reading the problem…' : '';
+  showError($('#problem-error'), !project.spec && project.error ? project.error : '');
+}
+
+async function readProblem() {
+  const text = $('#paragraph').value.trim();
+  if (text.length < 20) {
+    showError($('#problem-error'), 'Describe the study in a sentence or two first.');
+    return;
+  }
+  $('#read').disabled = true;
+  try {
+    const { id } = await api('/api/projects', { method: 'POST', body: { paragraph: text } });
+    await openProject(id);
+  } catch (error) {
+    showError($('#problem-error'), error.message);
+  } finally {
+    $('#read').disabled = false;
+  }
+}
+
+// -- step 2 ----------------------------------------------------------------------
+
+function fillSelect(select, options) {
+  if (select.options.length) return;
+  for (const [value, label] of Object.entries(options)) select.append(h('option', { value }, label));
+}
+
+function renderSpec(project) {
+  const card = $('#spec');
+  if (!project.spec) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  const spec = project.spec;
+  const key = JSON.stringify(spec);
+  if (key !== state.specKey) {
+    state.specKey = key;
+    fillSelect($('#f-design'), DESIGNS);
+    fillSelect($('#f-outcome_type'), OUTCOME_TYPES);
+    $('#spec-question').textContent = spec.question;
+    for (const f of TEXT_FIELDS) $(`#f-${f}`).value = spec[f] || '';
+    for (const f of LIST_FIELDS) $(`#f-${f}`).value = (spec[f] || []).join('\n');
+    $('#f-design').value = spec.design;
+    $('#f-outcome_type').value = spec.outcome_type;
+    $('#stated-wrap').hidden = !spec.stated_values.length;
+    $('#stated').replaceChildren(...spec.stated_values.map((v) => h('li', {}, `${v.parameter}: ${v.value} — “${v.quote}”`)));
+    $('#questions-wrap').hidden = !spec.open_questions.length;
+    $('#questions').replaceChildren(...spec.open_questions.map((q) => h('li', {}, q)));
+  }
+  const running = RUNNING.has(project.status);
+  for (const el of $('#spec-form').elements) el.disabled = running;
+  const hasPapers = Object.keys(project.counts || {}).length > 0;
+  $('#run').textContent = hasPapers ? 'Search again' : 'Search and extract';
+  $('#run-status').textContent = hasPapers && !running ? 'Searching again replaces the papers and decisions below.' : '';
+}
+
+function collectSpec() {
+  const spec = { ...state.project.spec };
+  for (const f of TEXT_FIELDS) spec[f] = $(`#f-${f}`).value.trim();
+  for (const f of LIST_FIELDS) spec[f] = lines($(`#f-${f}`).value);
+  spec.design = $('#f-design').value;
+  spec.outcome_type = $('#f-outcome_type').value;
+  return spec;
+}
+
+async function runSearch(event) {
+  event.preventDefault();
+  const hasPapers = Object.keys(state.project.counts || {}).length > 0;
+  if (hasPapers && !confirm('Search again? This replaces the papers and your decisions for this search.')) return;
+  $('#run').disabled = true;
+  try {
+    await api(`/api/projects/${state.id}/spec`, { method: 'PUT', body: collectSpec() });
+    await api(`/api/projects/${state.id}/run`, { method: 'POST' });
+    state.papersKey = '';
+    await refresh();
+    $('#progress-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (error) {
+    $('#run-status').textContent = error.message;
+  } finally {
+    $('#run').disabled = false;
+  }
+}
+
+// -- step 3 ----------------------------------------------------------------------
+
+function renderProgress(project) {
+  const card = $('#progress-card');
+  const counts = project.counts || {};
+  const started = RUNNING.has(project.status) && project.status !== 'reading';
+  card.hidden = !(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
+  if (card.hidden) return;
+
+  const order = STAGES.map(([s]) => s);
+  const current = project.status === 'done' ? 3 : order.indexOf(project.status);
+  $('#stages').replaceChildren(...STAGES.map(([key, label], i) => h('li', {
+    'data-state': i < current || project.status === 'done' ? 'done' : i === current ? 'active' : null,
+  }, label)));
+
+  const progress = project.progress || {};
+  const bar = $('#progress');
+  bar.hidden = !RUNNING.has(project.status);
+  bar.max = progress.total || 1;
+  bar.value = progress.total ? progress.done : 0;
+
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const kept = total - (counts.screened_out || 0) - (counts.candidate || 0);
+  const parts = [];
+  if (RUNNING.has(project.status) && progress.stage) {
+    parts.push(progress.total ? `${progress.stage}: ${progress.done} of ${progress.total}` : `${progress.stage}…`);
+  }
+  if (total) parts.push(`${total} records found`, `${kept} kept after screening`, `${counts.extracted || 0} extracted`);
+  if (project.status === 'interrupted') parts.push('interrupted by a server restart; search again to finish');
+  $('#progress-text').textContent = parts.join(' · ');
+  showError($('#run-error'), project.spec && project.error ? project.error : '');
+
+  const plan = project.search_plan;
+  $('#plan-details').hidden = !plan;
+  if (plan) {
+    $('#plan-summary').textContent = plan.summary;
+    $('#plan-queries').replaceChildren(
+      ...plan.pubmed_queries.map((q) => h('li', {}, 'PubMed: ', h('code', {}, q))),
+      ...plan.clinicaltrials_queries.map((q) => h('li', {}, 'ClinicalTrials.gov: ', h('code', {}, q))),
+      ...(plan.extra_ids.length ? [h('li', {}, `Named records: ${plan.extra_ids.join(', ')}`)] : []),
+      ...(plan.failed_queries || []).map((q) => h('li', {}, badge('Failed', 'err'), ' ', q)),
+    );
+  }
+  const usage = project.usage || [];
+  $('#usage-details').hidden = !usage.length;
+  $('#usage').replaceChildren(...usage.map((u) => h('tr', {},
+    h('td', {}, u.step), h('td', {}, u.model), h('td', { class: 'num' }, u.calls),
+    h('td', { class: 'num' }, u.input_tokens.toLocaleString()), h('td', { class: 'num' }, u.output_tokens.toLocaleString()),
+    h('td', { class: 'num' }, u.cache_read_input_tokens.toLocaleString()))));
+}
+
+// -- step 4 ----------------------------------------------------------------------
+
+function groupOf(paper) {
+  const running = RUNNING.has(state.project.status);
+  if (paper.status === 'extracted') return 'extracted';
+  if (paper.status === 'screened_out') return 'excluded';
+  if (['fetching', 'extracting'].includes(paper.status)) return 'pending';
+  if (running && ['candidate', 'screened_in', 'unsure'].includes(paper.status)) return 'pending';
+  return 'attention';
+}
+
+function renderReview() {
+  const key = JSON.stringify(state.papers.map((p) => [p.id, p.status, p.decisions, p.extracted_by])) + state.tab + state.project.status;
+  if (key === state.papersKey) return;
+  state.papersKey = key;
+  $('#review').hidden = false;
+
+  const groups = Object.fromEntries(TABS.map(([k]) => [k, []]));
+  for (const paper of state.papers) groups[groupOf(paper)].push(paper);
+  $('#tabs').replaceChildren(...TABS.map(([k, label]) => h('button', {
+    type: 'button', class: 'secondary small', 'aria-pressed': String(state.tab === k),
+    onclick: () => { state.tab = k; state.papersKey = ''; renderReview(); },
+  }, `${label} (${groups[k].length})`)));
+
+  const base = `/api/projects/${state.id}`;
+  $('#export-included').href = `${base}/export.csv?included_only=true`;
+  $('#export-all').href = `${base}/export.csv`;
+  $('#export-json').href = `${base}/export.json`;
+
+  const trials = new Map();
+  for (const paper of state.papers) {
+    for (const nct of paper.nct_ids || []) trials.set(nct, (trials.get(nct) || 0) + 1);
+  }
+  const shown = groups[state.tab];
+  $('#papers').replaceChildren(...(shown.length
+    ? shown.map((p) => paperCard(p, trials))
+    : [h('p', { class: 'muted' }, 'Nothing here.')]));
+}
+
+function badge(text, kind = '') {
+  return h('span', { class: `badge ${kind}`.trim() }, text);
+}
+
+function paperCard(paper, trials) {
+  const decisions = paper.decisions || {};
+  const paperDecision = decisions['-1']?.decision;
+  const sharedTrial = (paper.nct_ids || []).find((nct) => trials.get(nct) > 1);
+  const running = RUNNING.has(state.project.status);
+
+  const meta = h('div', { class: 'meta' },
+    paper.year && h('span', {}, paper.year),
+    paper.journal && h('span', {}, paper.journal),
+    badge(paper.source === 'clinicaltrials' ? 'ClinicalTrials.gov' : 'PubMed'),
+    paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind, paper.fulltext_kind === 'abstract' ? 'warn' : ''),
+    paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
+    paper.extracted_by === 'worker' && badge('Extracted by Haiku'),
+    paper.escalation?.audit && badge('Audit sample'),
+    sharedTrial && badge(`Another record shares ${sharedTrial}`, 'warn'),
+    ...Object.entries(paper.links || {}).map(([label, url]) => h('a', { href: url, target: '_blank', rel: 'noopener' }, label)),
+  );
+
+  const screen = paper.screen;
+  const children = [
+    h('h3', {}, paper.title || paper.ext_id),
+    meta,
+    screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
+    paper.error && h('p', { class: 'reason' }, badge('Note', 'warn'), ' ', paper.error),
+  ];
+
+  if (paper.escalation?.reasons?.length) {
+    children.push(h('details', {}, h('summary', {}, 'Why Opus reviewed this paper'),
+      h('ul', {}, paper.escalation.reasons.map((r) => h('li', {}, r)))));
+  }
+
+  const actions = h('div', { class: 'paper-actions' });
+  if (paper.status === 'extracted') {
+    actions.append(h('button', {
+      type: 'button', class: 'secondary small', 'aria-pressed': String(paperDecision === 'exclude'),
+      onclick: () => decide(paper, -1, paperDecision === 'exclude' ? null : 'exclude', ''),
+    }, paperDecision === 'exclude' ? 'Undo excluding the paper' : 'Exclude the whole paper'));
+  }
+  if (paper.fulltext_kind) {
+    actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => showSource(paper) }, 'Show source text'));
+  }
+  if (!running && ['screened_out', 'no_fulltext', 'needs_manual', 'screened_in', 'unsure', 'candidate'].includes(paper.status)) {
+    actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => extractAnyway(paper) },
+      paper.status === 'screened_out' ? 'Extract anyway' : 'Try extracting again'));
+  }
+  if (actions.childElementCount) children.push(actions);
+
+  const extraction = paper.extraction;
+  if (paper.status === 'extracted' && extraction) {
+    if (!extraction.matches_spec && extraction.mismatch_reasons.length) {
+      children.push(h('p', { class: 'reason' }, badge('Differs from the plan', 'warn'), ' ', extraction.mismatch_reasons.join('; ')));
+    }
+    if (!extraction.results.length) children.push(h('p', { class: 'reason muted' }, 'No relevant results were reported.'));
+    extraction.results.forEach((result, i) => children.push(resultBlock(paper, result, i, decisions)));
+    if (extraction.notes) children.push(h('p', { class: 'reason small muted' }, `Notes: ${extraction.notes}`));
+  }
+  return h('article', { class: 'paper' }, children);
+}
+
+function checkBadge(check) {
+  if (!check) return '';
+  if (!check.number_in_quote) return badge('number not in quote', 'err');
+  if (check.quote === 'exact') return badge('quote found', 'ok');
+  if (check.quote === 'approximate') return badge('near match', 'warn');
+  return check.number_in_source ? badge('number in text, quote not matched', 'warn') : badge('not found', 'err');
+}
+
+function resultBlock(paper, result, index, decisions) {
+  const own = decisions[String(index)];
+  const effective = own || decisions['-1'];
+  const decision = effective?.decision || '';
+  const checks = paper.verification?.values?.[index] || [];
+  const flags = (paper.verification?.flags || [])
+    .filter((f) => f.startsWith(`result ${index + 1} `))
+    .map((f) => f.replace(/^result \d+ \([^)]*\): /, ''));
+  const notes = [...result.concerns, ...flags];
+
+  const relevanceKind = { direct: 'ok', partial: 'warn', indirect: 'err' }[result.relevance];
+  const reason = h('select', {
+    'aria-label': 'Reason for excluding', hidden: decision !== 'exclude' || null,
+    onchange: (e) => decide(paper, index, 'exclude', e.target.value),
+  }, h('option', { value: '' }, 'Reason…'), EXCLUDE_REASONS.map((r) => h('option', { value: r }, r)));
+  reason.value = own?.reason || '';
+
+  const head = h('div', { class: 'result-head' },
+    h('div', {},
+      h('h4', {}, result.outcome_measure),
+      h('div', { class: 'meta' },
+        result.timepoint && h('span', {}, result.timepoint),
+        h('span', {}, POPULATIONS[result.analysis_population] || result.analysis_population),
+        result.adjusted !== 'unclear' && h('span', {}, result.adjusted),
+        badge(`${result.relevance} match`, relevanceKind),
+        badge(`${result.confidence} confidence`, result.confidence === 'low' ? 'warn' : ''))),
+    h('div', { class: 'decide', role: 'group', 'aria-label': `Decision for ${result.outcome_measure}` },
+      h('button', {
+        type: 'button', class: 'secondary small include', 'aria-pressed': String(decision === 'include'),
+        onclick: () => decide(paper, index, own?.decision === 'include' ? null : 'include', ''),
+      }, 'Include'),
+      h('button', {
+        type: 'button', class: 'secondary small exclude', 'aria-pressed': String(decision === 'exclude'),
+        onclick: () => decide(paper, index, own?.decision === 'exclude' ? null : 'exclude', own?.reason || ''),
+      }, 'Exclude'),
+      reason));
+
+  const rows = result.values.map((v, j) => h('tr', {},
+    h('td', {}, v.group),
+    h('td', {}, STATISTICS[v.statistic] || v.statistic),
+    h('td', { class: 'num' }, String(v.value)),
+    h('td', {}, v.describes),
+    h('td', { class: 'quote' }, h('q', {}, v.quote), h('span', {}, v.location)),
+    h('td', {}, checkBadge(checks[j]))));
+
+  return h('section', { class: 'result', 'data-decision': decision || null },
+    head,
+    notes.length > 0 && h('ul', { class: 'flags' }, notes.map((n) => h('li', {}, n))),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Group', 'Statistic', 'Value', 'What it is', 'Quote', 'Check'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, rows))));
+}
+
+async function decide(paper, resultIndex, decision, reason) {
+  try {
+    await api(`/api/projects/${state.id}/papers/${paper.id}/decisions`, {
+      method: 'PUT', body: { result_index: resultIndex, decision, reason },
+    });
+    const key = String(resultIndex);
+    paper.decisions = { ...(paper.decisions || {}) };
+    if (decision) paper.decisions[key] = { decision, reason };
+    else delete paper.decisions[key];
+    state.papersKey = '';
+    renderReview();
+  } catch (error) {
+    alert(`Could not save the decision: ${error.message}`);
+  }
+}
+
+async function extractAnyway(paper) {
+  try {
+    await api(`/api/projects/${state.id}/papers/${paper.id}/extract`, { method: 'POST' });
+    state.tab = 'pending';
+    state.papersKey = '';
+    await refresh();
+  } catch (error) {
+    alert(`Could not start the extraction: ${error.message}`);
+  }
+}
+
+// -- source text -------------------------------------------------------------------
+
+function quoteRanges(text, quotes) {
+  const ranges = [];
+  for (const quote of quotes) {
+    const words = quote.split(/\s+/).filter(Boolean).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (!words.length) continue;
+    const match = new RegExp(words.join('\\s+'), 'i').exec(text);
+    if (match) ranges.push([match.index, match.index + match[0].length]);
+  }
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const range of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+    else merged.push([...range]);
+  }
+  return merged;
+}
+
+async function showSource(paper) {
+  const dialog = $('#source-dialog');
+  const pre = $('#source-text');
+  $('#source-title').textContent = paper.title || 'Source text';
+  pre.textContent = 'Loading…';
+  dialog.showModal();
+  let text;
+  try {
+    text = await api(`/api/projects/${state.id}/papers/${paper.id}/source`);
+  } catch (error) {
+    pre.textContent = error.message;
+    return;
+  }
+  const quotes = (paper.extraction?.results || []).flatMap((r) => r.values.map((v) => v.quote));
+  const nodes = [];
+  let at = 0;
+  for (const [start, end] of quoteRanges(text, quotes)) {
+    nodes.push(text.slice(at, start), h('mark', {}, text.slice(start, end)));
+    at = end;
+  }
+  nodes.push(text.slice(at));
+  pre.replaceChildren(...nodes);
+  if (paper.fulltext_kind === 'oa_pdf') {
+    pre.prepend(h('span', { class: 'muted' }, 'Text layer of the PDF; tables may be out of order.\n\n'));
+  }
+  pre.querySelector('mark')?.scrollIntoView({ block: 'center' });
+}
+
+// -- start -------------------------------------------------------------------------
+
+async function start() {
+  $('#read').addEventListener('click', readProblem);
+  $('#spec-form').addEventListener('submit', runSearch);
+  $('#new-project').addEventListener('click', newSearch);
+  $('#source-close').addEventListener('click', () => $('#source-dialog').close());
+  try {
+    const config = await api('/api/config');
+    $('#models').textContent = `Manager ${config.manager_model} · workers ${config.worker_model}`
+      + (config.contact_email_set ? '' : ' · set ESF_CONTACT_EMAIL to fetch open-access PDFs');
+  } catch {
+    $('#models').textContent = 'The server is not responding.';
+  }
+  await loadProjects();
+  const id = location.hash.slice(1);
+  if (id) await openProject(id);
+}
+
+start();

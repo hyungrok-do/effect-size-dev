@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Effect Size Finder</title>
+<meta name="description" content="Describe a planned study; Claude searches PubMed and ClinicalTrials.gov and extracts the statistics papers report, each with its quote, for you to include or exclude.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232457c5' stroke-width='2.5' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f6f3;
+    --surface: #ffffff;
+    --surface-2: #f0efea;
+    --ink: #1c1c1a;
+    --ink-2: #4a4a45;
+    --muted: #6f6f68;
+    --line: #dddcd4;
+    --field-line: #878780;
+    --accent: #2457c5;
+    --accent-ink: #ffffff;
+    --accent-soft: #e8eefb;
+    --error: #a8261d;
+    --error-soft: #fbeceb;
+    --ok: #1d6b3a;
+    --ok-soft: #e6f3ea;
+    --warn: #8a5a00;
+    --warn-soft: #fbf1dc;
+    --mark: #ffe58a;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161615;
+      --surface: #1f1f1d;
+      --surface-2: #2a2a27;
+      --ink: #ecebe6;
+      --ink-2: #c9c8c1;
+      --muted: #9d9c94;
+      --line: #3a3a36;
+      --field-line: #74746e;
+      --accent: #84a9f5;
+      --accent-ink: #0f1420;
+      --accent-soft: #22304c;
+      --error: #f0a29b;
+      --error-soft: #3a201e;
+      --ok: #8fd3a6;
+      --ok-soft: #1c3325;
+      --warn: #f0c56b;
+      --warn-soft: #3a2f17;
+      --mark: #6b5a17;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161615;
+    --surface: #1f1f1d;
+    --surface-2: #2a2a27;
+    --ink: #ecebe6;
+    --ink-2: #c9c8c1;
+    --muted: #9d9c94;
+    --line: #3a3a36;
+    --field-line: #74746e;
+    --accent: #84a9f5;
+    --accent-ink: #0f1420;
+    --accent-soft: #22304c;
+    --error: #f0a29b;
+    --error-soft: #3a201e;
+    --ok: #8fd3a6;
+    --ok-soft: #1c3325;
+    --warn: #f0c56b;
+    --warn-soft: #3a2f17;
+    --mark: #6b5a17;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  [hidden] { display: none !important; }
+  h1, h2, h3, h4 { margin: 0; line-height: 1.25; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  .top {
+    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px;
+    padding: 14px 24px; background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .brand h1 { font-size: 18px; }
+  .status { margin: 0; font-size: 13px; color: var(--muted); }
+
+  .intro { max-width: 1240px; margin: 0 auto; padding: 28px 24px 4px; }
+  .intro h2 { font-size: 24px; letter-spacing: -0.01em; }
+  .lede { margin: 6px 0 0; color: var(--ink-2); font-size: 16px; max-width: 72ch; }
+  .points {
+    list-style: none; margin: 18px 0 0; padding: 0;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px;
+  }
+  .points li { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .points h3 { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+  .points svg { width: 18px; height: 18px; flex: none; color: var(--accent); }
+  .points p { margin: 6px 0 0; font-size: 14px; color: var(--ink-2); }
+
+  .layout {
+    display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 24px;
+    max-width: 1240px; margin: 0 auto; padding: 20px 24px 48px;
+  }
+  .projects { position: sticky; top: 16px; align-self: start; }
+  .projects h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 4px 10px 6px;
+  }
+  .projects ul { list-style: none; margin: 0; padding: 0; max-height: calc(100vh - 120px); overflow-y: auto; }
+  .project-link {
+    display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 8px;
+    padding: 6px 10px; color: var(--ink-2); font: inherit; font-size: 14px; line-height: 1.35; cursor: pointer;
+  }
+  .project-link:hover { background: var(--surface-2); color: var(--ink); }
+  .project-link[aria-current] { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+  .project-link small { display: block; color: var(--muted); font-weight: 400; }
+  .projects .new { margin: 0 0 10px; width: 100%; }
+
+  main { display: grid; gap: 20px; min-width: 0; align-content: start; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; min-width: 0; }
+  .eyebrow { font-size: 13px; color: var(--muted); margin: 0 0 4px; }
+  .card h2 { font-size: 21px; }
+  .summary { color: var(--ink-2); margin: 8px 0 0; max-width: 75ch; }
+
+  textarea, input[type="text"], select {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--field-line); border-radius: 8px;
+    background: var(--bg); color: var(--ink); font: inherit; font-size: 16px;
+  }
+  textarea { resize: vertical; line-height: 1.45; }
+  #paragraph { min-height: 150px; margin-top: 14px; }
+  fieldset { border: 0; margin: 0 0 18px; padding: 0; min-width: 0; }
+  legend {
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+    padding: 0; margin-bottom: 8px;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px 18px; }
+  .field { min-width: 0; }
+  .field.wide { grid-column: 1 / -1; }
+  .field label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+  .hint { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 14px; }
+  button.primary, button.secondary, a.button {
+    font: inherit; font-weight: 600; border-radius: 8px; padding: 8px 18px; cursor: pointer; text-decoration: none;
+    display: inline-block;
+  }
+  button.primary { background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent); }
+  button.secondary, a.button { background: transparent; color: var(--ink); border: 1px solid var(--field-line); }
+  button.small, a.button.small { padding: 4px 10px; font-size: 13px; }
+  button:disabled { opacity: .55; cursor: default; }
+
+  .notice { padding: 10px 14px; border-radius: 10px; background: var(--accent-soft); color: var(--ink-2); font-size: 14px; margin: 14px 0 0; }
+  .error { border: 1px solid var(--error); background: var(--error-soft); border-radius: 10px; padding: 10px 14px; overflow-wrap: anywhere; margin: 12px 0 0; }
+  .stated, .questions { margin: 6px 0 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; }
+
+  .stages { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  .stages li {
+    padding: 6px 12px; border: 1px solid var(--field-line); border-radius: 999px; font-size: 13.5px; color: var(--muted);
+  }
+  .stages li[data-state="active"] { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+  .stages li[data-state="done"] { color: var(--ink-2); }
+  .stages li[data-state="done"]::before { content: '✓ '; color: var(--ok); }
+  progress { width: 100%; height: 8px; margin-top: 12px; accent-color: var(--accent); }
+  #progress-text { margin: 6px 0 0; font-size: 14px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  details { margin-top: 12px; color: var(--ink-2); font-size: 14px; }
+  summary { cursor: pointer; }
+  details ul { margin: 6px 0; padding-left: 20px; }
+  code { font-size: 13px; overflow-wrap: anywhere; }
+
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
+  .tabs button { border-radius: 999px; font-weight: 500; }
+  .tabs button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .exports { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+  .paper { border-top: 1px solid var(--line); padding: 18px 0 6px; }
+  .paper:first-child { border-top: 0; }
+  .paper h3 { font-size: 16px; overflow-wrap: anywhere; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 6px; font-size: 13px; color: var(--muted); }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); color: var(--ink-2); }
+  .badge.ok { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+  .badge.warn { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+  .badge.err { background: var(--error-soft); border-color: transparent; color: var(--error); }
+  .badge.accent { background: var(--accent-soft); border-color: transparent; color: var(--ink); }
+  .reason { margin: 8px 0 0; font-size: 14px; color: var(--ink-2); }
+  .paper-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+  .result { margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .result[data-decision="include"] { border-color: var(--ok); }
+  .result[data-decision="exclude"] { opacity: .6; }
+  .result-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; padding: 10px 14px; background: var(--surface-2); }
+  .result-head h4 { font-size: 14.5px; }
+  .result-head .meta { margin-top: 2px; }
+  .decide { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .decide button[aria-pressed="true"].include { background: var(--ok); color: var(--surface); border-color: var(--ok); }
+  .decide button[aria-pressed="true"].exclude { background: var(--error); color: var(--surface); border-color: var(--error); }
+  .decide select { width: auto; font-size: 13px; padding: 3px 6px; }
+  .flags { margin: 0; padding: 8px 14px 8px 32px; font-size: 13px; color: var(--warn); background: var(--warn-soft); }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { padding: 6px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+  th { color: var(--ink-2); font-weight: 600; white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.quote { min-width: 260px; color: var(--ink-2); }
+  td.quote q { quotes: '“' '”'; }
+  td.quote span { display: block; color: var(--muted); font-size: 12px; }
+
+  dialog { width: min(920px, calc(100vw - 32px)); max-height: calc(100vh - 48px); border: 1px solid var(--line); border-radius: 12px; padding: 0; background: var(--surface); color: var(--ink); }
+  dialog::backdrop { background: rgb(0 0 0 / .45); }
+  .dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); }
+  .dialog-head h2 { font-size: 16px; }
+  #source-text { margin: 0; padding: 14px 18px; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; }
+
+  footer { max-width: 1240px; margin: 0 auto; padding: 0 24px 32px; font-size: 13px; color: var(--muted); }
+  footer p { margin: 0 0 4px; max-width: 90ch; }
+  footer a { color: inherit; }
+
+  @media (max-width: 800px) {
+    .top { padding: 12px 16px; }
+    .intro { padding: 20px 16px 0; }
+    .intro h2 { font-size: 20px; }
+    .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 16px; }
+    .projects { position: static; }
+    .projects ul { max-height: 30vh; }
+    .card { padding: 16px; }
+    footer { padding: 0 16px 24px; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><h1>Effect Size Finder</h1></div>
+  <p id="models" class="status" aria-live="polite"></p>
+</header>
+
+<section class="intro" aria-labelledby="intro-title">
+  <h2 id="intro-title">Find the published numbers a study plan needs</h2>
+  <p class="lede">Describe the study you are planning. Claude searches PubMed and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include.</p>
+  <ul class="points">
+    <li>
+      <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
+      <p>PubMed, open-access full text from PubMed Central and Unpaywall, and results posted on ClinicalTrials.gov.</p>
+    </li>
+    <li>
+      <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7h10M7 12h10M7 17h6"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>Every number is quoted</h3>
+      <p>Each value carries its quote, which is checked against the paper. Anything that fails a check goes to a second, stronger review.</p>
+    </li>
+    <li>
+      <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>You decide</h3>
+      <p>Include or exclude each result, then export what you kept as CSV or JSON.</p>
+    </li>
+  </ul>
+  <p class="notice">Your paragraph and the text of the papers are sent to Anthropic's API to be read. Don't paste anything you can't share with it.</p>
+</section>
+
+<div class="layout">
+  <aside class="projects" aria-labelledby="projects-title">
+    <button id="new-project" type="button" class="secondary new">New search</button>
+    <h2 id="projects-title">Your searches</h2>
+    <ul id="project-list"><li class="muted small">None yet.</li></ul>
+  </aside>
+
+  <main>
+    <section id="problem" class="card" aria-labelledby="problem-title">
+      <p class="eyebrow">Step 1</p>
+      <h2 id="problem-title">Describe the study</h2>
+      <p class="summary">A short paragraph is enough: who is studied, what is compared, the outcome, and when it is measured.</p>
+      <label for="paragraph" class="sr-only">Study description</label>
+      <textarea id="paragraph" placeholder="We propose a two-arm randomized trial testing whether a 12-week mindfulness app reduces depressive symptoms (PHQ-9) compared with a waitlist among undergraduate students…"></textarea>
+      <div class="actions">
+        <button id="read" type="button" class="primary">Read the problem</button>
+        <span id="read-status" class="muted small" aria-live="polite"></span>
+      </div>
+      <div id="problem-error" class="error" role="alert" hidden></div>
+    </section>
+
+    <section id="spec" class="card" aria-labelledby="spec-title" hidden>
+      <p class="eyebrow">Step 2</p>
+      <h2 id="spec-title">Check what to look for</h2>
+      <p id="spec-question" class="summary"></p>
+      <form id="spec-form" novalidate>
+        <fieldset>
+          <legend>The comparison</legend>
+          <div class="grid">
+            <div class="field"><label for="f-population">Population</label><input id="f-population" type="text"></div>
+            <div class="field"><label for="f-intervention">Intervention or exposure</label><input id="f-intervention" type="text"></div>
+            <div class="field"><label for="f-comparator">Comparator</label><input id="f-comparator" type="text"></div>
+            <div class="field"><label for="f-timepoint">Primary timepoint</label><input id="f-timepoint" type="text"></div>
+            <div class="field"><label for="f-design">Design</label><select id="f-design"></select></div>
+            <div class="field"><label for="f-outcome_type">Outcome type</label><select id="f-outcome_type"></select></div>
+            <div class="field wide"><label for="f-outcomes">Outcomes <span class="hint">One per line, primary first.</span></label><textarea id="f-outcomes" rows="2"></textarea></div>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>What the papers should report</legend>
+          <div class="grid">
+            <div class="field wide"><label for="f-statistics_needed">Statistics to extract <span class="hint">One per line.</span></label><textarea id="f-statistics_needed" rows="3"></textarea></div>
+            <div class="field"><label for="f-inclusion_criteria">Include papers that… <span class="hint">One per line.</span></label><textarea id="f-inclusion_criteria" rows="3"></textarea></div>
+            <div class="field"><label for="f-exclusion_criteria">Exclude papers that… <span class="hint">One per line.</span></label><textarea id="f-exclusion_criteria" rows="3"></textarea></div>
+            <div class="field wide"><label for="f-search_terms">Search terms <span class="hint">Synonyms, MeSH terms, instrument names; one per line.</span></label><textarea id="f-search_terms" rows="3"></textarea></div>
+          </div>
+        </fieldset>
+        <div id="stated-wrap" hidden><h3 class="small">Values your paragraph states</h3><ul id="stated" class="stated"></ul></div>
+        <div id="questions-wrap" hidden><h3 class="small">Worth deciding</h3><ul id="questions" class="questions"></ul></div>
+        <div class="actions">
+          <button id="run" type="submit" class="primary">Search and extract</button>
+          <span id="run-status" class="muted small" aria-live="polite"></span>
+        </div>
+      </form>
+    </section>
+
+    <section id="progress-card" class="card" aria-labelledby="progress-title" hidden>
+      <p class="eyebrow">Step 3</p>
+      <h2 id="progress-title">Search and extraction</h2>
+      <ol id="stages" class="stages"></ol>
+      <progress id="progress" max="1" value="0"></progress>
+      <p id="progress-text" aria-live="polite"></p>
+      <div id="run-error" class="error" role="alert" hidden></div>
+      <details id="plan-details" hidden>
+        <summary>Search strategy</summary>
+        <p id="plan-summary"></p>
+        <ul id="plan-queries"></ul>
+      </details>
+      <details id="usage-details" hidden>
+        <summary>Tokens used</summary>
+        <div class="table-wrap"><table><thead><tr><th>Step</th><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache read</th></tr></thead><tbody id="usage"></tbody></table></div>
+      </details>
+    </section>
+
+    <section id="review" class="card" aria-labelledby="review-title" hidden>
+      <p class="eyebrow">Step 4</p>
+      <h2 id="review-title">Review what was found</h2>
+      <p class="summary">Include or exclude each result. A result's decision overrides one made for its whole paper.</p>
+      <div id="tabs" class="tabs" role="group" aria-label="Show papers"></div>
+      <div class="exports">
+        <a id="export-included" class="button small" href="#">CSV: included results</a>
+        <a id="export-all" class="button small" href="#">CSV: everything extracted</a>
+        <a id="export-json" class="button small" href="#">JSON</a>
+      </div>
+      <div id="papers"></div>
+    </section>
+  </main>
+</div>
+
+<dialog id="source-dialog" aria-labelledby="source-title">
+  <div class="dialog-head">
+    <h2 id="source-title">Source text</h2>
+    <button id="source-close" type="button" class="secondary small">Close</button>
+  </div>
+  <pre id="source-text"></pre>
+</dialog>
+
+<footer>
+  <p>Effect Size Finder. Numbers come from the papers as printed; check them against the source before you rely on them.</p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

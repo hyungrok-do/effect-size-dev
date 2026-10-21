@@ -1,0 +1,400 @@
+"""Clients for the literature sources: PubMed, ClinicalTrials.gov, Europe PMC and Unpaywall."""
+
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Literal
+from urllib.parse import quote
+
+import httpx
+from defusedxml.ElementTree import fromstring
+
+from . import __version__
+from .config import Settings
+
+# Base64 adds a third, and a request to the Claude API may be at most 32 MB.
+MAX_PDF_BYTES = 20 * 1024 * 1024
+
+
+@dataclass
+class Record:
+    source: Literal["pubmed", "clinicaltrials"]
+    ext_id: str
+    title: str
+    year: str = ""
+    journal: str = ""
+    pubtypes: list[str] = field(default_factory=list)
+    abstract: str = ""
+    doi: str | None = None
+    pmid: str | None = None
+    pmcid: str | None = None
+    nct_ids: list[str] = field(default_factory=list)
+
+
+class SourceError(RuntimeError):
+    pass
+
+
+class Http:
+    """A shared HTTP client with retries on rate limits and server errors."""
+
+    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+        contact = f" (mailto:{settings.contact_email})" if settings.contact_email else ""
+        self.client = client or httpx.Client(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            follow_redirects=True,
+            headers={"User-Agent": f"effect-size-finder/{__version__}{contact}"},
+        )
+
+    def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        delay = 1.0
+        for attempt in range(4):
+            try:
+                response = self.client.request(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                if attempt == 3:
+                    raise SourceError(f"{url}: {exc}") from exc
+            else:
+                if response.status_code not in (429, 500, 502, 503, 504) or attempt == 3:
+                    return response
+            time.sleep(delay)
+            delay *= 2
+        raise AssertionError("unreachable")
+
+
+def _year(text: str | None) -> str:
+    text = text or ""
+    for i in range(len(text) - 3):
+        chunk = text[i : i + 4]
+        if chunk.isdigit() and chunk[0] in "12":
+            return chunk
+    return ""
+
+
+class PubMed:
+    BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+
+    def __init__(self, http: Http, settings: Settings):
+        self.http = http
+        self.common = {"tool": "effect-size-finder"}
+        if settings.contact_email:
+            self.common["email"] = settings.contact_email
+        if settings.ncbi_api_key:
+            self.common["api_key"] = settings.ncbi_api_key
+        # NCBI allows 3 requests a second without a key and 10 with one.
+        self.min_interval = 0.11 if settings.ncbi_api_key else 0.34
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def _call(self, endpoint: str, data: dict[str, Any]) -> httpx.Response:
+        with self._lock:
+            wait = self._last + self.min_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last = time.monotonic()
+        response = self.http.request("POST", self.BASE + endpoint, data={**self.common, **data})
+        if response.status_code != 200:
+            raise SourceError(f"PubMed {endpoint} returned HTTP {response.status_code}")
+        return response
+
+    def search(self, term: str, retmax: int) -> tuple[int, list[str]]:
+        payload = self._call(
+            "esearch.fcgi",
+            {"db": "pubmed", "term": term, "retmax": retmax, "retmode": "json", "sort": "relevance"},
+        ).json()
+        result = payload.get("esearchresult", {})
+        if "ERROR" in result:
+            raise SourceError(f"PubMed rejected the query: {result['ERROR']}")
+        return int(result.get("count", 0)), list(result.get("idlist", []))
+
+    def summaries(self, pmids: list[str]) -> list[Record]:
+        records: list[Record] = []
+        for start in range(0, len(pmids), 200):
+            chunk = pmids[start : start + 200]
+            payload = self._call("esummary.fcgi", {"db": "pubmed", "id": ",".join(chunk), "retmode": "json"}).json()
+            result = payload.get("result", {})
+            for uid in result.get("uids", []):
+                item = result.get(uid, {})
+                ids = {a.get("idtype"): a.get("value") for a in item.get("articleids", [])}
+                records.append(
+                    Record(
+                        source="pubmed",
+                        ext_id=uid,
+                        pmid=uid,
+                        title=item.get("title", ""),
+                        year=_year(item.get("pubdate") or item.get("sortpubdate")),
+                        journal=item.get("source", ""),
+                        pubtypes=list(item.get("pubtype", [])),
+                        doi=ids.get("doi"),
+                        pmcid=ids.get("pmc") or ids.get("pmcid"),
+                    )
+                )
+        return records
+
+    def fetch(self, pmids: list[str]) -> list[Record]:
+        """Full records, abstracts included."""
+        records: list[Record] = []
+        for start in range(0, len(pmids), 200):
+            chunk = pmids[start : start + 200]
+            response = self._call("efetch.fcgi", {"db": "pubmed", "id": ",".join(chunk), "retmode": "xml"})
+            records.extend(parse_pubmed_xml(response.content))
+        return records
+
+
+def _text(el: Any) -> str:
+    return " ".join("".join(el.itertext()).split()) if el is not None else ""
+
+
+def parse_pubmed_xml(xml: bytes | str) -> list[Record]:
+    root = fromstring(xml)
+    records: list[Record] = []
+    for article in root.iter("PubmedArticle"):
+        citation = article.find("MedlineCitation")
+        if citation is None:
+            continue
+        pmid = (citation.findtext("PMID") or "").strip()
+        art = citation.find("Article")
+        if art is None or not pmid:
+            continue
+        parts = []
+        for block in art.findall("Abstract/AbstractText"):
+            label = block.get("Label")
+            text = _text(block)
+            if text:
+                parts.append(f"{label}: {text}" if label else text)
+        year = (
+            art.findtext("Journal/JournalIssue/PubDate/Year")
+            or _year(art.findtext("Journal/JournalIssue/PubDate/MedlineDate"))
+            or art.findtext("ArticleDate/Year")
+            or ""
+        )
+        ids = {
+            a.get("IdType"): (a.text or "").strip()
+            for a in article.findall("PubmedData/ArticleIdList/ArticleId")
+        }
+        doi = ids.get("doi")
+        if not doi:
+            for loc in art.findall("ELocationID"):
+                if loc.get("EIdType") == "doi":
+                    doi = (loc.text or "").strip()
+        nct_ids = []
+        for bank in art.findall("DataBankList/DataBank"):
+            if (bank.findtext("DataBankName") or "").strip() == "ClinicalTrials.gov":
+                nct_ids += [(n.text or "").strip() for n in bank.findall("AccessionNumberList/AccessionNumber")]
+        records.append(
+            Record(
+                source="pubmed",
+                ext_id=pmid,
+                pmid=pmid,
+                title=_text(art.find("ArticleTitle")),
+                year=year,
+                journal=art.findtext("Journal/Title") or art.findtext("Journal/ISOAbbreviation") or "",
+                pubtypes=[(p.text or "").strip() for p in art.findall("PublicationTypeList/PublicationType")],
+                abstract="\n".join(parts),
+                doi=doi or None,
+                pmcid=ids.get("pmc") or None,
+                nct_ids=[n for n in nct_ids if n],
+            )
+        )
+    return records
+
+
+_DISPERSION = {
+    "STANDARD_DEVIATION": "SD",
+    "STANDARD_ERROR": "SE",
+    "INTER_QUARTILE_RANGE": "IQR",
+    "FULL_RANGE": "range",
+    "GEOMETRIC_COEFFICIENT_OF_VARIATION": "geometric CV",
+}
+
+
+class ClinicalTrials:
+    BASE = "https://clinicaltrials.gov/api/v2/studies"
+
+    def __init__(self, http: Http):
+        self.http = http
+
+    def search(self, term: str, limit: int, with_results: bool = True) -> tuple[int, list[dict]]:
+        params: dict[str, Any] = {"query.term": term, "pageSize": min(limit, 100), "countTotal": "true", "format": "json"}
+        if with_results:
+            params["aggFilters"] = "results:with"
+        studies: list[dict] = []
+        total = 0
+        while len(studies) < limit:
+            response = self.http.request("GET", self.BASE, params=params)
+            if response.status_code != 200:
+                raise SourceError(f"ClinicalTrials.gov returned HTTP {response.status_code}: {response.text[:200]}")
+            payload = response.json()
+            total = payload.get("totalCount", total)
+            studies.extend(payload.get("studies", []))
+            token = payload.get("nextPageToken")
+            if not token:
+                break
+            params["pageToken"] = token
+        return total, studies[:limit]
+
+    def study(self, nct_id: str) -> dict | None:
+        response = self.http.request("GET", f"{self.BASE}/{nct_id}", params={"format": "json"})
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise SourceError(f"ClinicalTrials.gov returned HTTP {response.status_code} for {nct_id}")
+        return response.json()
+
+
+def trial_record(study: dict) -> Record:
+    protocol = study.get("protocolSection", {})
+    ident = protocol.get("identificationModule", {})
+    status = protocol.get("statusModule", {})
+    design = protocol.get("designModule", {})
+    nct_id = ident.get("nctId", "")
+    conditions = protocol.get("conditionsModule", {}).get("conditions", [])
+    interventions = [i.get("name", "") for i in protocol.get("armsInterventionsModule", {}).get("interventions", [])]
+    outcomes = protocol.get("outcomesModule", {})
+    lines = [
+        f"Status: {status.get('overallStatus', 'unknown')}; results posted: {'yes' if study.get('hasResults') else 'no'}",
+        f"Study type: {design.get('studyType', '')}; allocation: {design.get('designInfo', {}).get('allocation', '')}; "
+        f"enrollment: {design.get('enrollmentInfo', {}).get('count', '')}",
+        f"Conditions: {', '.join(conditions)}",
+        f"Interventions: {', '.join(interventions)}",
+    ]
+    for kind in ("primaryOutcomes", "secondaryOutcomes"):
+        for outcome in outcomes.get(kind, [])[:10]:
+            label = "Primary" if kind == "primaryOutcomes" else "Secondary"
+            lines.append(f"{label} outcome: {outcome.get('measure', '')} ({outcome.get('timeFrame', '')})")
+    summary = protocol.get("descriptionModule", {}).get("briefSummary", "")
+    if summary:
+        lines.append("Summary: " + " ".join(summary.split()))
+    pmids = [
+        ref.get("pmid")
+        for ref in protocol.get("referencesModule", {}).get("references", [])
+        if ref.get("pmid") and ref.get("type") == "RESULT"
+    ]
+    if pmids:
+        lines.append("Result publications (PMID): " + ", ".join(pmids))
+    return Record(
+        source="clinicaltrials",
+        ext_id=nct_id,
+        title=ident.get("officialTitle") or ident.get("briefTitle", ""),
+        year=_year(status.get("startDateStruct", {}).get("date")),
+        journal="ClinicalTrials.gov",
+        pubtypes=[design.get("studyType", "")] if design.get("studyType") else [],
+        abstract="\n".join(lines),
+        nct_ids=[nct_id],
+    )
+
+
+def trial_results_text(study: dict) -> str:
+    """The posted results of a registry record, written out so each number sits with its labels."""
+    record = trial_record(study)
+    out = [f"# {record.ext_id}: {record.title}", "", record.abstract, ""]
+    results = study.get("resultsSection", {})
+    measures = results.get("outcomeMeasuresModule", {}).get("outcomeMeasures", [])
+    if not measures:
+        out.append("No outcome results are posted for this study.")
+    for om in measures:
+        groups = {g.get("id"): g.get("title", g.get("id")) for g in om.get("groups", [])}
+        out.append(f"## Outcome measure ({om.get('type', '').lower()}): {om.get('title', '')}")
+        if om.get("description"):
+            out.append("Description: " + " ".join(om["description"].split()))
+        out.append(f"Time frame: {om.get('timeFrame', '')}")
+        dispersion = om.get("dispersionType", "")
+        out.append(
+            f"Parameter: {om.get('paramType', '')}; dispersion: {_DISPERSION.get(dispersion, dispersion)}; "
+            f"unit: {om.get('unitOfMeasure', '')}"
+        )
+        for denom in om.get("denoms", []):
+            counts = " | ".join(f"{groups.get(c.get('groupId'), c.get('groupId'))}: {c.get('value')}" for c in denom.get("counts", []))
+            out.append(f"Analyzed ({denom.get('units', 'participants').lower()}): {counts}")
+        for cls in om.get("classes", []):
+            for category in cls.get("categories", []):
+                label = " / ".join(x for x in (cls.get("title"), category.get("title")) if x)
+                cells = []
+                for m in category.get("measurements", []):
+                    cell = f"{groups.get(m.get('groupId'), m.get('groupId'))}: {m.get('value', '')}"
+                    if m.get("spread"):
+                        cell += f" ({_DISPERSION.get(dispersion, 'spread')} {m['spread']})"
+                    elif m.get("lowerLimit") or m.get("upperLimit"):
+                        name = _DISPERSION.get(dispersion, dispersion.replace("_", " ").lower())
+                        cell += f" ({name} {m.get('lowerLimit', '')} to {m.get('upperLimit', '')})"
+                    cells.append(cell)
+                prefix = f"{label}: " if label else "Values: "
+                out.append(prefix + " | ".join(cells))
+        for analysis in om.get("analyses", []):
+            compared = " vs ".join(groups.get(g, g) for g in analysis.get("groupIds", []))
+            parts = [f"Analysis ({compared})"]
+            if analysis.get("paramType"):
+                parts.append(f"{analysis['paramType']} {analysis.get('paramValue', '')}")
+            if analysis.get("ciLowerLimit") or analysis.get("ciUpperLimit"):
+                parts.append(
+                    f"{analysis.get('ciPctValue', '')}% CI {analysis.get('ciLowerLimit', '')} to {analysis.get('ciUpperLimit', '')}"
+                )
+            if analysis.get("pValue"):
+                parts.append(f"p = {analysis['pValue']}")
+            if analysis.get("statisticalMethod"):
+                parts.append(f"method: {analysis['statisticalMethod']}")
+            out.append("; ".join(parts))
+        out.append("")
+    return "\n".join(out).strip() + "\n"
+
+
+class EuropePMC:
+    BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/"
+
+    def __init__(self, http: Http):
+        self.http = http
+
+    def fulltext_xml(self, pmcid: str) -> str | None:
+        pmcid = pmcid if pmcid.upper().startswith("PMC") else f"PMC{pmcid}"
+        response = self.http.request("GET", f"{self.BASE}{pmcid}/fullTextXML")
+        if response.status_code == 200 and response.text.lstrip().startswith("<"):
+            return response.text
+        return None
+
+
+class Unpaywall:
+    BASE = "https://api.unpaywall.org/v2/"
+
+    def __init__(self, http: Http, email: str | None):
+        self.http = http
+        self.email = email
+
+    def pdf_url(self, doi: str) -> str | None:
+        if not self.email:
+            return None
+        response = self.http.request("GET", self.BASE + quote(doi, safe="/"), params={"email": self.email})
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+        locations = [payload.get("best_oa_location") or {}] + list(payload.get("oa_locations") or [])
+        for location in locations:
+            if location and location.get("url_for_pdf"):
+                return location["url_for_pdf"]
+        return None
+
+    def download_pdf(self, url: str) -> bytes | None:
+        try:
+            with self.http.client.stream("GET", url) as response:
+                if response.status_code != 200:
+                    return None
+                chunks, size = [], 0
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > MAX_PDF_BYTES:
+                        return None
+                    chunks.append(chunk)
+        except httpx.HTTPError:
+            return None
+        data = b"".join(chunks)
+        return data if data.startswith(b"%PDF") else None
+
+
+class Sources:
+    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+        self.http = Http(settings, client)
+        self.pubmed = PubMed(self.http, settings)
+        self.trials = ClinicalTrials(self.http)
+        self.europepmc = EuropePMC(self.http)
+        self.unpaywall = Unpaywall(self.http, settings.contact_email)
