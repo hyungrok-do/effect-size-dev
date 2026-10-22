@@ -1,0 +1,31 @@
+/* The review navigator, the overlap notes and the conclusion (review-view.js). Uses the page's color tokens. */
+
+/* Review, one paper at a time. */
+.review-nav { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.review-progress { margin: 0; font-size: 14px; color: var(--ink-2); }
+.queue { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 5px; }
+.queue button { min-width: 30px; height: 28px; padding: 0 6px; border-radius: 7px; border: 1px solid var(--field-line); background: var(--surface);
+  color: var(--ink-2); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.queue button[data-state="included"] { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
+.queue button[data-state="excluded"] { background: var(--error-soft); border-color: var(--error); color: var(--error); }
+.queue button[data-state="mixed"], .queue button[data-state="partial"] { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+.queue button[aria-current="true"] { outline: 2px solid var(--accent); outline-offset: 1px; font-weight: 700; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 10px; }
+.pager #review-position { font-weight: 600; font-variant-numeric: tabular-nums; }
+.pager #review-next-open { margin-left: auto; }
+.pager button.ready { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+/* Overlap. */
+.overlap-note { margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); font-size: 14px; color: var(--ink); }
+.overlap-note strong { color: var(--warn); }
+.overlap-note ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* The conclusion. */
+.conclusion-summary { margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: var(--accent-soft); font-size: 15.5px; line-height: 1.5; }
+.cand { display: inline-block; padding: 0 6px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); font-weight: 600; font-variant-numeric: tabular-nums; cursor: help; }
+.conclusion-block { margin-top: 18px; }
+.conclusion-block h3 { font-size: 15.5px; margin-bottom: 8px; }
+.conclusion-block ul { margin: 0; padding-left: 20px; font-size: 14px; }
+.answers td .value { font-weight: 600; }
+.answers td .label, .answers td .alt { display: block; color: var(--ink-2); font-size: 12.5px; }
+.stale { margin-top: 12px; }

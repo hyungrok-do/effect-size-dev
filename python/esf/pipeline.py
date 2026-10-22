@@ -17,6 +17,7 @@ from typing import Any
 
 from . import prompts
 from .config import Settings
+from .evidence import build_evidence, decisions_basis, overlap_records
 from .fulltext import FullText, get_fulltext
 from .llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
@@ -153,6 +154,12 @@ class Pipeline:
 
             self.store.update_project(project_id, status="extracting")
             self._extract_all(project_id, spec)
+            try:
+                self._progress(project_id, "checking for overlap")
+                self.check_overlap(project_id)
+            except Exception as exc:  # the extractions stand without it; the conclusion tries again
+                log.exception("the overlap check failed")
+                self.store.update_project(project_id, overlap={"error": describe_error(exc)})
         except Exception as exc:
             log.exception("pipeline failed")
             self.store.update_project(project_id, status="error", error=describe_error(exc))
@@ -260,8 +267,10 @@ class Pipeline:
             and (p.get("screen") or {}).get("study_type") == "systematic_review_or_meta_analysis"
         ][: self.settings.max_reviews_followed]
         entry: dict[str, Any] = {"level": "cited", "source": "pubmed", "reviews": len(reviews), "cited": 0, "already": 0}
-        known = {p["pmid"] for p in papers if p.get("pmid")}
+        known = {p["pmid"]: p for p in papers if p.get("pmid")}
         cited: dict[str, list[str]] = {}
+        # Which reviews cite each record, new or already found: the overlap check needs to know.
+        citing: dict[str, list[str]] = {}
         failed: list[str] = []
         for number, review in enumerate(reviews, start=1):
             self._progress(project_id, "reading the reviews' references", number - 1, len(reviews))
@@ -273,10 +282,15 @@ class Pipeline:
             entry["cited"] += len(refs)
             label = f"{LEVEL_NAMES['cited']}: {review['title']} (PMID {review['pmid']})"
             for pmid in refs:
+                citing.setdefault(pmid, []).append(review["pmid"])
                 if pmid in known:
                     entry["already"] += 1
                 else:
                     cited.setdefault(pmid, []).append(label)
+        for pmid, reviews_citing in citing.items():
+            if pmid in known:
+                paper = known[pmid]
+                self.store.update_paper(paper["id"], cited_by=sorted({*(paper.get("cited_by") or []), *reviews_citing}))
         # Fetch more than the cap: reference lists are full of reviews, guidelines and methods papers.
         ids = list(cited)[: self.settings.max_cited * 3]
         try:
@@ -289,7 +303,7 @@ class Pipeline:
         for record in records:
             if added >= self.settings.max_cited:
                 break
-            if self._add(project_id, record, cited[record.pmid], ["cited"]):
+            if self._add(project_id, record, cited[record.pmid], ["cited"], citing[record.pmid]):
                 added += 1
         entry.update(added=added, not_studies=len(fetched) - len(records))
         if failed:
@@ -300,7 +314,9 @@ class Pipeline:
         self.store.update_project(project_id, search_log=[*log_entries, entry])
         self._progress(project_id, "reading the reviews' references", len(reviews), len(reviews))
 
-    def _add(self, project_id: str, record: Record, found_by: list[str], found_in: list[str]) -> bool:
+    def _add(
+        self, project_id: str, record: Record, found_by: list[str], found_in: list[str], cited_by: list[str] | None = None
+    ) -> bool:
         return (
             self.store.add_paper(
                 project_id,
@@ -311,12 +327,14 @@ class Pipeline:
                 doi=record.doi,
                 nct_ids=record.nct_ids,
                 title=record.title,
+                authors=record.authors,
                 year=record.year,
                 journal=record.journal,
                 pubtypes=record.pubtypes,
                 abstract=record.abstract,
                 found_by=found_by,
                 found_in=found_in,
+                cited_by=cited_by or [],
                 status="candidate",
             )
             is not None
@@ -358,6 +376,45 @@ class Pipeline:
             for _ in pool.map(lambda p: self.extract_paper(project_id, spec, p["id"]), queue):
                 done += 1
                 self._progress(project_id, "extracting", done, len(queue))
+
+    # -- across papers: overlap and the conclusion ------------------------------
+
+    def check_overlap(self, project_id: str) -> None:
+        """Opus looks across the extracted records for reports that would be counted twice."""
+        project = self.store.project(project_id)
+        assert project is not None
+        spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
+        records = overlap_records(self.store.papers(project_id))
+        report: dict = {"groups": [], "notes": ""}
+        if len(records) > 1:
+            report = self.llm.check_overlap(spec, records, self._sink(project_id)).model_dump()
+        self.store.update_project(project_id, overlap={"report": report, "records": [r["key"] for r in records]})
+
+    def conclude(self, project_id: str) -> None:
+        """Opus recommends, for each number the plan needs, one of the candidate values computed from
+        the results the investigator kept."""
+        self.store.update_project(project_id, conclusion={"status": "running"})
+        try:
+            project = self.store.project(project_id)
+            assert project is not None
+            spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
+            papers = self.store.papers(project_id)
+            overlap = project.get("overlap") or {}
+            if "report" not in overlap or overlap.get("records") != [r["key"] for r in overlap_records(papers)]:
+                self.check_overlap(project_id)
+                overlap = (self.store.project(project_id) or {})["overlap"]
+            decisions = self.store.decisions(project_id)
+            evidence = build_evidence(papers, decisions, overlap["report"])
+            if not evidence["values"]:
+                raise ValueError("There is nothing to conclude from: no extracted result is kept.")
+            result = self.llm.conclude(spec, overlap["report"], evidence, self._sink(project_id))
+            self.store.update_project(project_id, conclusion={
+                "status": "done", "result": result.model_dump(), "evidence": evidence,
+                "basis": decisions_basis(papers, decisions),
+            })
+        except Exception as exc:
+            log.exception("the conclusion failed")
+            self.store.update_project(project_id, conclusion={"status": "error", "error": describe_error(exc)})
 
     # -- one paper ------------------------------------------------------------
 

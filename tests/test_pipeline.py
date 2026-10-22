@@ -79,6 +79,9 @@ def test_the_search_runs_from_the_top_down(tmp_path):
     cited = next(p for p in papers if p["ext_id"] == CITED_TRIAL)
     assert cited["found_by"] == [f"Cited by the included reviews: {next(p for p in papers if p['ext_id'] == REVIEW)['title']} (PMID {REVIEW})"]
     assert NOT_A_STUDY not in found_in
+    # Every record a review cites knows it, the ones found before the review too: the overlap check uses this.
+    cited_by = {p["ext_id"]: p["cited_by"] for p in papers}
+    assert cited_by[CITED_TRIAL] == [REVIEW] and cited_by["11111111"] == [REVIEW] and cited_by["22222222"] == []
 
     log = store.project(project_id)["search_log"]
     assert [(e["level"], e["source"], e.get("hits"), e.get("taken"), e["added"]) for e in log] == [
@@ -215,3 +218,46 @@ def test_papers_only_in_europe_pmc(tmp_path):
     # the outcome is not held against them.
     marked = [t for t in llm.screened if prompts.FOUND_BY_FULL_TEXT in t]
     assert len(marked) == 3 and all(("Brief mindfulness" in t) or ("nursing" in t) or ("smartphone" in t) for t in marked)
+
+
+def test_overlap_is_checked_and_the_conclusion_uses_what_was_kept(tmp_path):
+    import math
+
+    import pytest
+
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    keys = {p["ext_id"]: f"R{p['id']}" for p in store.papers(project_id)}
+    report = store.project(project_id)["overlap"]["report"]
+    groups = {g["relation"]: g for g in report["groups"]}
+    # A trial and its registry record are one study; the meta-analysis cites trials also in the set.
+    assert groups["same_study"]["records"] == [keys["NCT01234567"], keys["11111111"]]
+    assert groups["same_study"]["use"] == keys["11111111"]
+    assert groups["review_includes_study"]["records"] == [keys[REVIEW], keys["11111111"], keys[CITED_TRIAL]]
+    sent = {r["key"]: r for r in llm.overlap_records}
+    assert sent[keys["11111111"]]["authors"] == "Kim J, Lee S, Park H, et al."
+    assert sent[keys["11111111"]]["cited_by"] == [keys[REVIEW]] and sent[keys["11111111"]]["nct_ids"] == ["NCT01234567"]
+
+    pilot = next(p for p in store.papers(project_id) if p["ext_id"] == "44444444")
+    store.set_decision(pilot["id"], 0, "exclude")
+    pipeline.conclude(project_id)
+    conclusion = store.project(project_id)["conclusion"]
+    assert conclusion["status"] == "done", conclusion
+    evidence = conclusion["evidence"]
+    assert not any(v["record"] == keys["44444444"] for v in evidence["values"])  # excluded by the investigator
+    assert all(v["dropped_for_overlap"] for v in evidence["values"] if v["record"] == keys["NCT01234567"])
+    pooled = next(s for s in evidence["summaries"] if s["method"] == "pooled_sd")
+    arms = [(4.2, 100), (4.5, 100), (4.1, 40), (3.9, 30), (4.2, 30), (4.0, 75), (4.3, 74)]
+    expected = math.sqrt(math.fsum((n - 1) * sd * sd for sd, n in arms) / math.fsum(n - 1 for _, n in arms))
+    assert pooled["value"] == pytest.approx(expected) and pooled["n"] == 449 and pooled["count"] == 7
+    assert conclusion["result"]["answers"][0]["candidate"] == pooled["key"]
+    assert conclusion["basis"][0][0] == min(p["id"] for p in store.papers(project_id) if p["status"] == "extracted")
+
+
+def test_nothing_kept_means_no_conclusion(tmp_path):
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    for paper in store.papers(project_id):
+        store.set_decision(paper["id"], -1, "exclude")
+    pipeline.conclude(project_id)
+    conclusion = store.project(project_id)["conclusion"]
+    assert conclusion["status"] == "error" and "nothing to conclude" in conclusion["error"]
+    assert "conclude" not in llm.calls

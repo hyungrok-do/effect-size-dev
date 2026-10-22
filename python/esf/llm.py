@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from . import prompts
 from .config import Settings
-from .schemas import PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec
+from .schemas import Conclusion, OverlapReport, PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec
 
 # Opus only: when a safety classifier declines a benign request, the API retries it on the
 # model Anthropic recommends for that refusal category. Haiku has no server-side fallback.
@@ -211,6 +211,29 @@ class ClaudeLLM:
         if "plan" not in submitted:
             raise RuntimeError("The search agent stopped without submitting a search plan.")
         return submitted["plan"]
+
+    def check_overlap(self, spec: SearchSpec, records: list[dict], sink: UsageSink | None = None) -> OverlapReport:
+        return self._parse(
+            step="overlap",
+            manager=True,
+            system=prompts.OVERLAP + "\n\nSpecification:\n" + spec.model_dump_json(indent=2),
+            content=[{"type": "text", "text": "Records:\n" + json.dumps(records, indent=1, ensure_ascii=False)}],
+            output_format=OverlapReport,
+            effort="high",
+            sink=sink,
+        )
+
+    def conclude(self, spec: SearchSpec, overlap: dict, evidence: dict, sink: UsageSink | None = None) -> Conclusion:
+        data = {"overlap": overlap, "values": evidence["values"], "summaries": evidence["summaries"]}
+        return self._parse(
+            step="conclude",
+            manager=True,
+            system=prompts.CONCLUDE + "\n\nSpecification:\n" + spec.model_dump_json(indent=2),
+            content=[{"type": "text", "text": "Candidates and the overlap check:\n" + json.dumps(data, indent=1, ensure_ascii=False)}],
+            output_format=Conclusion,
+            effort="high",
+            sink=sink,
+        )
 
     def adjudicate(
         self,

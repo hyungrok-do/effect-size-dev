@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS projects (
     progress TEXT,
     error TEXT,
     search_plan TEXT,
-    search_log TEXT
+    search_log TEXT,
+    overlap TEXT,
+    conclusion TEXT
 );
 CREATE TABLE IF NOT EXISTS papers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,12 +34,14 @@ CREATE TABLE IF NOT EXISTS papers (
     doi TEXT,
     nct_ids TEXT,
     title TEXT,
+    authors TEXT,
     year TEXT,
     journal TEXT,
     pubtypes TEXT,
     abstract TEXT,
     found_by TEXT,
     found_in TEXT,
+    cited_by TEXT,
     status TEXT NOT NULL,
     screen TEXT,
     fulltext_kind TEXT,
@@ -76,10 +80,13 @@ JSON_COLUMNS = {
     "progress",
     "search_plan",
     "search_log",
+    "overlap",
+    "conclusion",
     "nct_ids",
     "pubtypes",
     "found_by",
     "found_in",
+    "cited_by",
     "screen",
     "extraction",
     "verification",
@@ -121,7 +128,10 @@ class Store:
                 self._db.execute("PRAGMA journal_mode = WAL")
             self._db.executescript(SCHEMA)
             # Columns added since the first version; CREATE TABLE IF NOT EXISTS leaves old tables as they were.
-            for table, column in (("projects", "search_log"), ("papers", "found_in")):
+            for table, column in (
+                ("projects", "search_log"), ("projects", "overlap"), ("projects", "conclusion"),
+                ("papers", "found_in"), ("papers", "authors"), ("papers", "cited_by"),
+            ):
                 if column not in {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}:
                     self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
 
@@ -174,6 +184,11 @@ class Store:
             "UPDATE papers SET status = 'error', error = 'The server restarted while this was being extracted.' "
             "WHERE status IN ('fetching', 'extracting')"
         )
+        for row in self._all("SELECT id, conclusion FROM projects WHERE conclusion IS NOT NULL"):
+            if row["conclusion"].get("status") == "running":
+                self.update_project(row["id"], conclusion={
+                    "status": "error", "error": "The server restarted while the conclusion was being written.",
+                })
 
     # -- papers ---------------------------------------------------------------
 

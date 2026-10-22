@@ -160,6 +160,22 @@ export class Claude {
     return plan;
   }
 
+  checkOverlap(spec, records, { sink } = {}) {
+    return this.parse({
+      step: 'overlap', manager: true, system: withSpec(PROMPTS.OVERLAP, spec),
+      content: [{ type: 'text', text: `Records:\n${JSON.stringify(records, null, 1)}` }], schema: SCHEMAS.OverlapReport, effort: 'high', sink,
+    });
+  }
+
+  conclude(spec, overlap, evidence, { sink } = {}) {
+    const data = { overlap, values: evidence.values, summaries: evidence.summaries };
+    return this.parse({
+      step: 'conclude', manager: true, system: withSpec(PROMPTS.CONCLUDE, spec),
+      content: [{ type: 'text', text: `Candidates and the overlap check:\n${JSON.stringify(data, null, 1)}` }],
+      schema: SCHEMAS.Conclusion, effort: 'high', sink,
+    });
+  }
+
   adjudicate(spec, document, worker, flags, { sink } = {}) {
     const junior = worker ? JSON.stringify(worker, null, 1) : 'None: the junior reviewer could not complete it.';
     const text = `Junior reviewer's extraction:\n${junior}\n\nFlags from the automatic checks:\n${flags.map((f) => `- ${f}`).join('\n')}`;

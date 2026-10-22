@@ -1,5 +1,6 @@
 // Effect Size Finder: the page. Talks to the JSON API in python/esf/server.py.
 
+import { conclusionView, overlapNote, reviewKeys, reviewNav } from '/lib/review-view.js';
 import { SpecPanel, STATISTICS } from '/lib/spec-panel.js';
 
 const RUNNING = new Set(['reading', 'searching', 'screening', 'extracting']);
@@ -29,6 +30,7 @@ const TABS = [
 const $ = (selector) => document.querySelector(selector);
 const state = {
   id: null, project: null, papers: [], tab: 'extracted', timer: null, specKey: '', papersKey: '', config: {},
+  reviewAt: {}, // tab -> the paper id shown there
 };
 const KEY_STORAGE = 'esf-anthropic-api-key';
 
@@ -178,7 +180,7 @@ function newSearch() {
 
 async function openProject(id) {
   clearTimeout(state.timer);
-  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '' });
+  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '', reviewAt: {} });
   history.replaceState(null, '', `#${id}`);
   try {
     await refresh();
@@ -204,8 +206,9 @@ async function refresh() {
   } else {
     $('#review').hidden = true;
   }
+  renderConclusion(project);
   const extracting = state.papers.some((p) => p.status === 'fetching' || p.status === 'extracting');
-  if (RUNNING.has(project.status) || extracting) {
+  if (RUNNING.has(project.status) || extracting || project.conclusion?.status === 'running') {
     clearTimeout(state.timer);
     state.timer = setTimeout(() => refresh().catch(() => {}), 2500);
   } else if (wasRunning) {
@@ -375,8 +378,10 @@ function groupOf(paper) {
   return 'attention';
 }
 
+// The review shows one paper at a time: a progress line, a chip per paper to jump to, and the paper.
 function renderReview() {
-  const key = JSON.stringify(state.papers.map((p) => [p.id, p.status, p.decisions, p.extracted_by])) + state.tab + state.project.status;
+  const key = JSON.stringify([state.papers.map((p) => [p.id, p.status, p.decisions, p.extracted_by]), state.tab, state.project.status,
+    state.reviewAt, state.project.overlap]);
   if (key === state.papersKey) return;
   state.papersKey = key;
   $('#review').hidden = false;
@@ -397,10 +402,17 @@ function renderReview() {
   for (const paper of state.papers) {
     for (const nct of paper.nct_ids || []) trials.set(nct, (trials.get(nct) || 0) + 1);
   }
-  const shown = groups[state.tab];
-  $('#papers').replaceChildren(...(shown.length
-    ? shown.map((p) => paperCard(p, trials))
-    : [h('p', { class: 'muted' }, 'Nothing here.')]));
+  const current = reviewNav({
+    papers: groups[state.tab], current: state.reviewAt[state.tab], decisionsOf: (p) => p.decisions || {},
+    show: showPaper, counting: state.tab === 'extracted',
+  });
+  $('#papers').replaceChildren(current ? paperCard(current, trials) : h('p', { class: 'muted' }, 'Nothing here.'));
+}
+
+function showPaper(paperId) {
+  state.reviewAt[state.tab] = paperId;
+  renderReview();
+  $('#papers .paper h3')?.scrollIntoView({ block: 'nearest' });
 }
 
 function badge(text, kind = '') {
@@ -414,6 +426,8 @@ function paperCard(paper, trials) {
   const running = RUNNING.has(state.project.status);
 
   const meta = h('div', { class: 'meta' },
+    badge(`R${paper.id}`, 'accent'),
+    paper.authors && h('span', {}, paper.authors),
     paper.year && h('span', {}, paper.year),
     paper.journal && h('span', {}, paper.journal),
     badge({ clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed' }[paper.source]
@@ -430,6 +444,7 @@ function paperCard(paper, trials) {
   const children = [
     h('h3', {}, paper.title || paper.ext_id),
     meta,
+    overlapNote(paper, state.project.overlap?.report, state.papers),
     screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
     paper.error && h('p', { class: 'reason' }, badge('Note', 'warn'), ' ', paper.error),
   ];
@@ -539,6 +554,7 @@ async function decide(paper, resultIndex, decision, reason) {
     else delete paper.decisions[key];
     state.papersKey = '';
     renderReview();
+    renderConclusion(state.project);
   } catch (error) {
     alert(`Could not save the decision: ${error.message}`);
   }
@@ -604,6 +620,37 @@ async function showSource(paper) {
   pre.querySelector('mark')?.scrollIntoView({ block: 'center' });
 }
 
+// -- step 5: the conclusion ---------------------------------------------------------
+
+function renderConclusion(project) {
+  const c = project.conclusion;
+  const running = c?.status === 'running';
+  const searching = RUNNING.has(project.status);
+  $('#conclusion').hidden = !state.papers.some((p) => p.status === 'extracted') && !c;
+  $('#conclude').disabled = running || searching;
+  $('#conclude').textContent = c?.status === 'done' ? 'Write the conclusion again' : 'Write the conclusion';
+  $('#conclude-status').textContent = running ? 'Opus is checking for overlap and writing the conclusion…'
+    : searching ? 'Wait until the search finishes.' : '';
+  showError($('#conclusion-error'), c?.status === 'error' ? c.error : '');
+  const decisions = Object.fromEntries(state.papers.map((p) => [p.id, p.decisions || {}]));
+  $('#conclusion-body').replaceChildren(...(c?.status === 'done'
+    ? conclusionView({ conclusion: c, overlap: project.overlap?.report, papers: state.papers, decisions })
+    : running ? [] : [h('p', { class: 'muted' },
+      'Review the papers first: the conclusion uses every result you included or left undecided, and none you excluded.')]));
+}
+
+async function writeConclusion() {
+  if (!haveKey() || !state.id) return;
+  showError($('#conclusion-error'), '');
+  $('#conclude').disabled = true;
+  try {
+    await api(`/api/projects/${state.id}/conclusion`, { method: 'POST', withKey: true });
+  } catch (error) {
+    showError($('#conclusion-error'), error.message);
+  }
+  await refresh();
+}
+
 // -- start -------------------------------------------------------------------------
 
 async function start() {
@@ -614,6 +661,8 @@ async function start() {
   $('#api-key').addEventListener('input', saveKey);
   $('#remember-key').addEventListener('change', saveKey);
   $('#forget-key').addEventListener('click', forgetKey);
+  $('#conclude').addEventListener('click', writeConclusion);
+  document.addEventListener('keydown', reviewKeys);
   loadKey();
   try {
     const config = await api('/api/config');

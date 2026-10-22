@@ -251,3 +251,38 @@ class PaperExtraction(BaseModel):
     mismatch_reasons: list[str]
     results: list[OutcomeResult]
     notes: str
+
+
+class OverlapGroup(BaseModel):
+    records: list[str] = Field(description="The records involved, by key (R12, R40).")
+    relation: Literal["same_study", "review_includes_study", "reviews_share_studies", "possible_overlap"] = Field(
+        description="same_study: reports of one study (a registry record and its paper, duplicate or secondary "
+        "publications); review_includes_study: a review whose pooled estimate includes a study also in the set; "
+        "reviews_share_studies: reviews that pool some of the same studies; possible_overlap: suspected, unconfirmed."
+    )
+    evidence: str = Field(description="What shows the overlap: shared registration number, citation, authors, sample sizes.")
+    use: str = Field(
+        description="The key of the record whose numbers to use for this group, or empty when they can be used "
+        "together or it can't be decided from the evidence."
+    )
+
+
+class OverlapReport(BaseModel):
+    groups: list[OverlapGroup]
+    notes: str = Field(description="Anything else about double counting; empty if nothing.")
+
+
+class Answer(BaseModel):
+    need: str = Field(description="The row of numbers to find this answers, as the specification describes it.")
+    candidate: str = Field(description="The key of the recommended candidate (S… or V…), or empty if none fits.")
+    alternatives: list[str] = Field(description="Keys of other candidates worth considering, e.g. a more cautious one.")
+    reasoning: str = Field(description="Why: how closely it matches, how good the sources are, how overlap was handled.")
+    confidence: Literal["high", "medium", "low"]
+
+
+class Conclusion(BaseModel):
+    summary: str = Field(description="Two to four sentences on what the literature supports for the planned calculation.")
+    answers: list[Answer] = Field(description="One per row of numbers to find, in the specification's order.")
+    overlap_handling: str = Field(description="How double counting was avoided; empty if there was none.")
+    caveats: list[str]
+    gaps: list[str] = Field(description="Numbers the plan needs that the sources don't supply, and where to look next.")

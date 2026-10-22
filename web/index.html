@@ -4,9 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Effect Size Finder</title>
-<meta name="description" content="Describe a planned study; Claude searches PubMed and ClinicalTrials.gov and extracts the statistics papers report, each with its quote, for you to include or exclude.">
+<meta name="description" content="Describe a planned study; Claude searches PubMed, Europe PMC and ClinicalTrials.gov, extracts the statistics papers report, each with its quote, for you to include or exclude, and concludes which values to use.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232457c5' stroke-width='2.5' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/lib/spec-panel.css">
+<link rel="stylesheet" href="/lib/review.css">
 <style>
   :root {
     --bg: #f6f6f3;
@@ -195,6 +196,7 @@
   .tabs button { border-radius: 999px; font-weight: 500; }
   .tabs button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .exports { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .exports-box { margin-top: 18px; }
 
   .paper { border-top: 1px solid var(--line); padding: 18px 0 6px; }
   .paper:first-child { border-top: 0; }
@@ -260,11 +262,11 @@
 
 <section class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published numbers a study plan needs</h2>
-  <p class="lede">Describe the study you are planning. Claude searches PubMed and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include.</p>
+  <p class="lede">Describe the study you are planning. Claude searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and Opus concludes which values to use.</p>
   <ul class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
-      <p>PubMed, open-access full text from PubMed Central and Unpaywall, and results posted on ClinicalTrials.gov.</p>
+      <p>PubMed and Europe PMC, open-access full text from PubMed Central and Unpaywall, and results posted on ClinicalTrials.gov.</p>
     </li>
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7h10M7 12h10M7 17h6"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>Every number is quoted</h3>
@@ -272,7 +274,7 @@
     </li>
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>You decide</h3>
-      <p>Include or exclude each result, then export what you kept as CSV or JSON.</p>
+      <p>Review the papers one at a time, including or excluding each result. Opus checks for studies counted twice and recommends values from what you kept.</p>
     </li>
   </ul>
   <p class="notice">Your paragraph and the text of the papers are sent to Anthropic's API to be read. Don't paste anything you can't share with it.</p>
@@ -342,14 +344,39 @@
     <section id="review" class="card" aria-labelledby="review-title" hidden>
       <p class="eyebrow">Step 4</p>
       <h2 id="review-title">Review what was found</h2>
-      <p class="summary">Include or exclude each result. A result's decision overrides one made for its whole paper.</p>
+      <p class="summary">One paper at a time: include or exclude each result, then go on to the next. A result's decision overrides one made for its whole paper.</p>
       <div id="tabs" class="tabs" role="group" aria-label="Show papers"></div>
-      <div class="exports">
-        <a id="export-included" class="button small" href="#">CSV: included results</a>
-        <a id="export-all" class="button small" href="#">CSV: everything extracted</a>
-        <a id="export-json" class="button small" href="#">JSON</a>
+      <div id="review-nav" class="review-nav" hidden>
+        <p id="review-progress-text" class="review-progress"></p>
+        <ol id="queue" class="queue" aria-label="Papers to review"></ol>
+        <div class="pager">
+          <button id="review-prev" type="button" class="secondary small">← Previous</button>
+          <span id="review-position" aria-live="polite"></span>
+          <button id="review-next" type="button" class="secondary small">Next →</button>
+          <button id="review-next-open" type="button" class="secondary small">Next not yet reviewed</button>
+        </div>
       </div>
       <div id="papers"></div>
+      <details class="exports-box">
+        <summary>Export</summary>
+        <div class="exports">
+          <a id="export-included" class="button small" href="#">CSV: included results</a>
+          <a id="export-all" class="button small" href="#">CSV: everything extracted</a>
+          <a id="export-json" class="button small" href="#">JSON</a>
+        </div>
+      </details>
+    </section>
+
+    <section id="conclusion" class="card" aria-labelledby="conclusion-title" hidden>
+      <p class="eyebrow">Step 5</p>
+      <h2 id="conclusion-title">Conclusion</h2>
+      <p class="summary">Opus weighs the results you kept, avoids counting a study twice, and recommends a value for each number the plan needs. Every number here is computed from the papers by code; Opus only chooses among them.</p>
+      <div class="actions">
+        <button id="conclude" type="button" class="primary">Write the conclusion</button>
+        <span id="conclude-status" class="muted small" aria-live="polite"></span>
+      </div>
+      <div id="conclusion-error" class="error" role="alert" hidden></div>
+      <div id="conclusion-body"></div>
     </section>
   </main>
 </div>

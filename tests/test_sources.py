@@ -25,6 +25,9 @@ def test_parse_pubmed_xml():
         "BACKGROUND: Depression is common among students.",
         "RESULTS: At 12 weeks PHQ-9 was lower with the app (8.1 vs 10.3).",
     ]
+    assert first.authors == "Kim J, Lee S, Park H, et al."
+    assert records["22222222"].authors == "Mindful Students Trial Group"
+    assert records["33333333"].authors == ""
     assert records["22222222"].year == "2019"  # from <MedlineDate>
     assert records["22222222"].pmcid is None
 
@@ -112,6 +115,7 @@ def test_europe_pmc_search_keeps_papers_and_preprints():
     record = europepmc_record(results[1])
     assert (record.source, record.ext_id, record.pmcid, record.journal) == ("europepmc", PMC_ONLY, PMC_ONLY, "Nursing Education Trials")
     assert record.title == "Mindfulness app use and depressive symptoms in nursing students: a randomised trial"
+    assert record.authors == "Ahmed N, Brown T, Clark R, et al."
     assert europepmc_record(results[2]).pubtypes == ["Preprint"]
     assert europepmc_url(PREPRINT) == f"https://europepmc.org/article/PPR/{PREPRINT}"
     assert EUROPEPMC["resultList"]["result"][3]["source"] == "PAT"

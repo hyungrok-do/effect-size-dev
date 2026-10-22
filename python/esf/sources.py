@@ -25,6 +25,7 @@ class Record:
     source: Literal["pubmed", "clinicaltrials", "europepmc"]
     ext_id: str
     title: str
+    authors: str = ""  # the first three, then "et al."
     year: str = ""
     journal: str = ""
     pubtypes: list[str] = field(default_factory=list)
@@ -161,6 +162,12 @@ def _text(el: Any) -> str:
     return " ".join("".join(el.itertext()).split()) if el is not None else ""
 
 
+def short_authors(names: list[str]) -> str:
+    """The first three authors, then "et al."; how the overlap check tells reports of one study apart."""
+    names = [n for n in names if n]
+    return ", ".join(names[:3]) + (", et al." if len(names) > 3 else "")
+
+
 def parse_pubmed_xml(xml: bytes | str) -> list[Record]:
     root = fromstring(xml)
     records: list[Record] = []
@@ -193,6 +200,10 @@ def parse_pubmed_xml(xml: bytes | str) -> list[Record]:
             for loc in art.findall("ELocationID"):
                 if loc.get("EIdType") == "doi":
                     doi = (loc.text or "").strip()
+        names = []
+        for author in art.findall("AuthorList/Author"):
+            last = (author.findtext("LastName") or "").strip()
+            names.append(f"{last} {(author.findtext('Initials') or '').strip()}".strip() if last else _text(author.find("CollectiveName")))
         nct_ids = []
         for bank in art.findall("DataBankList/DataBank"):
             if (bank.findtext("DataBankName") or "").strip() == "ClinicalTrials.gov":
@@ -203,6 +214,7 @@ def parse_pubmed_xml(xml: bytes | str) -> list[Record]:
                 ext_id=pmid,
                 pmid=pmid,
                 title=_text(art.find("ArticleTitle")),
+                authors=short_authors(names),
                 year=year,
                 journal=art.findtext("Journal/Title") or art.findtext("Journal/ISOAbbreviation") or "",
                 pubtypes=[(p.text or "").strip() for p in art.findall("PublicationTypeList/PublicationType")],
@@ -414,6 +426,7 @@ def europepmc_record(result: dict) -> Record:
         source="europepmc",
         ext_id=str(result["id"]),
         title=_plain(result.get("title")),
+        authors=short_authors([n.strip().rstrip(".") for n in (result.get("authorString") or "").split(",")]),
         year=_year(str(result.get("pubYear") or "")),
         journal=journal,
         pubtypes=[pubtypes] if isinstance(pubtypes, str) else list(pubtypes),

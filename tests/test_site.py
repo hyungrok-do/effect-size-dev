@@ -10,6 +10,7 @@ import functools
 import glob
 import io
 import json
+import math
 import os
 import re
 import threading
@@ -25,6 +26,7 @@ from esf import prompts
 from esf.config import REPO_ROOT
 from esf.jats import jats_to_text
 from esf.sources import europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_results_text
+from esf.evidence import build_evidence, decisions_basis, overlap_records
 from esf.schemas import upgrade_spec
 from esf.verify import in_audit_sample, numbers_in, verify
 from fixtures import (
@@ -38,6 +40,39 @@ if not (SITE / "vendor" / "anthropic-sdk.mjs").exists():
     pytest.skip("build the site first: cd site && npm ci && npm run build", allow_module_level=True)
 
 KEY = "sk-ant-test-site"
+
+def _paper(pid, values, status="extracted", **fields):
+    """A paper as the stores hold it, with one result per list in `values` (group, statistic, value)."""
+    results = [{"outcome_measure": outcome, "timepoint": timepoint, "analysis_population": "itt", "adjusted": "unadjusted",
+                "relevance": "direct", "confidence": "high", "concerns": [],
+                "values": [{"group": g, "statistic": st, "value": v, "describes": f"{st} of {outcome}", "quote": "q", "location": "Table 1"}
+                           for g, st, v in rows]}
+               for outcome, timepoint, rows in values]
+    checks = [[{"quote": "exact" if k % 2 == 0 else "missing", "number_in_quote": True, "number_in_source": True}
+               for k, _ in enumerate(rows)] for _, _, rows in values]
+    return {"id": pid, "status": status, "source": "pubmed", "pmid": str(1000 + pid), "nct_ids": [], "doi": None, "title": f"Trial {pid}",
+            "authors": "Kim J, et al.", "year": "2020", "journal": "J", "pubtypes": ["Randomized Controlled Trial"], "cited_by": [],
+            "extraction": {"study_design": "RCT", "population": "students", "groups": ["App (n = 50)", "Waitlist (n = 50)"],
+                           "matches_spec": True, "mismatch_reasons": [], "results": results, "notes": ""},
+            "verification": {"values": checks, "flags": []}, **fields}
+
+
+EVIDENCE_PAPERS = [
+    _paper(1, [("PHQ-9", "12 weeks", [("App", "n", 50), ("App", "mean", 8.1), ("App", "sd", 4.2), ("Waitlist", "n", 48),
+                                     ("Waitlist", "mean", 10.3), ("Waitlist", "sd", 4.5)]),
+               ("GAD-7", "", [("App", "mean", 6.0)])]),
+    _paper(2, [("PHQ-9 ", "12 Weeks", [("Mindfulness", "n", 30), ("Mindfulness", "sd", 3.9), ("Control", "sd", 4.4)])],
+           nct_ids=["NCT00000001"]),
+    _paper(3, [("PHQ-9", "12 weeks", [("App", "mean", 9.0), ("App", "sd", 4.0), ("App", "n", 75)])], cited_by=["1004"]),
+    _paper(4, [("Depression", "post", [("App vs control", "standardized_mean_difference", 0.35)])],
+           pubtypes=["Meta-Analysis"], cited_by=["9999"]),
+    _paper(5, [("PHQ-9", "12 weeks", [("App", "sd", 9.9), ("App", "n", 10)])], nct_ids=["NCT00000001"]),
+    _paper(6, [("PHQ-9", "12 weeks", [("App", "sd", 1.0), ("App", "n", 5)])]),
+    _paper(7, [("PHQ-9", "12 weeks", [("App", "sd", 2.0), ("App", "n", 5)])], status="screened_out"),
+]
+EVIDENCE_DECISIONS = {"1": {"1": {"decision": "exclude"}, "0": {"decision": "include"}}, "6": {"-1": {"decision": "exclude"}}}
+EVIDENCE_OVERLAP = {"groups": [{"records": ["R2", "R5"], "relation": "same_study", "evidence": "NCT00000001", "use": "R2"}], "notes": ""}
+
 # A specification saved before the structured fields.
 OLD_SPEC = {
     "question": "Q?", "population": "Students", "intervention": "App", "comparator": "Waitlist", "outcomes": ["PHQ-9", "GAD-7"],
@@ -137,6 +172,11 @@ class Network:
         content = body["messages"][0]["content"]
         if system.startswith(prompts.SPEC):
             return SPEC.model_dump()
+        if system.startswith(prompts.OVERLAP):
+            return self.llm.check_overlap(None, json.loads(content[0]["text"].split("\n", 1)[1])).model_dump()
+        if system.startswith(prompts.CONCLUDE):
+            data = json.loads(content[0]["text"].split("\n", 1)[1])
+            return self.llm.conclude(SPEC, data["overlap"], data).model_dump()
         if system.startswith(prompts.SCREEN):
             return self.llm.screen(None, content).model_dump()
         if system.startswith(prompts.EXTRACT):
@@ -182,6 +222,13 @@ class Network:
         ], "end_turn", server_tool_use={"web_fetch_requests": 1})
 
 
+def open_paper(page, title):
+    """The review shows one paper at a time: open the one whose title starts with `title`."""
+    page.click(f"#queue button[title^='{title}']")
+    page.wait_for_selector(f"#papers .paper h3:has-text('{title}')")
+    return page.locator("#papers .paper")
+
+
 def test_browser_ports_match_python(browser, site_url):
     page = browser.new_page()
     page.goto(site_url + "vendor/LICENSES.txt")  # any page on the site's origin, to import its modules
@@ -203,6 +250,7 @@ def test_browser_ports_match_python(browser, site_url):
     data = {
         "jats": JATS, "trial": TRIAL, "pubmed": PUBMED_XML, "numbers": numbers, "keys": keys, "g": g_cases,
         "europepmc": EUROPEPMC["resultList"]["result"][:3], "old_spec": OLD_SPEC,
+        "evidence": [EVIDENCE_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP],
         "verify": [[e.model_dump(), t, r] for e, t, r in cases],
     }
     result = page.evaluate("""async (data) => {
@@ -210,6 +258,7 @@ def test_browser_ports_match_python(browser, site_url):
         const sources = await import('/lib/sources.js');
         const v = await import('/lib/verify.js');
         const panel = await import('/lib/spec-panel.js');
+        const ev = await import('/lib/evidence.js');
         return {
             jats: jats.jatsToText(data.jats),
             trial: sources.trialResultsText(data.trial),
@@ -219,6 +268,9 @@ def test_browser_ports_match_python(browser, site_url):
             audit: await Promise.all(data.keys.map((k) => v.inAuditSample(k, 0.1))),
             g: data.g.map(v.g),
             upgraded: panel.upgradeSpec(data.old_spec),
+            overlapRecords: ev.overlapRecords(data.evidence[0]),
+            evidence: ev.buildEvidence(...data.evidence),
+            basis: ev.decisionsBasis(data.evidence[0], data.evidence[1]),
             europepmc: data.europepmc.map((r) => [sources.europepmcPmid(r), sources.europepmcPmid(r) ? null : sources.europepmcRecord(r),
                                                     sources.europepmcUrl(String(r.id))]),
         };
@@ -231,6 +283,19 @@ def test_browser_ports_match_python(browser, site_url):
     assert result["audit"] == [in_audit_sample(k, 0.1) for k in keys]
     assert result["g"] == [format(x, "g") for x in g_cases]
     assert result["upgraded"] == upgrade_spec(OLD_SPEC)
+    assert result["overlapRecords"] == overlap_records(EVIDENCE_PAPERS)
+    assert result["evidence"] == build_evidence(EVIDENCE_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP)
+    assert result["basis"] == decisions_basis(EVIDENCE_PAPERS, EVIDENCE_DECISIONS)
+    # What the evidence holds: the excluded result and paper are gone, the overlapping record is kept
+    # but left out of the summaries, and the PHQ-9 SDs pool across arms with their sizes.
+    evidence = result["evidence"]
+    assert not any(v["outcome"] == "GAD-7" for v in evidence["values"]) and not any(v["record"] == "R6" for v in evidence["values"])
+    assert all(v["dropped_for_overlap"] for v in evidence["values"] if v["record"] == "R5")
+    pooled = [x for x in evidence["summaries"] if x["method"] == "pooled_sd"]
+    assert pooled == [] or pooled[0]["records"] == ["R1", "R2", "R3"]
+    sd_median = next(x for x in evidence["summaries"] if x["statistic"] == "sd" and x["method"] == "median")
+    assert (sd_median["count"], sd_median["min"], sd_median["max"], sd_median["value"]) == (5, 3.9, 4.5, 4.2)
+    assert result["overlapRecords"][2]["cited_by"] == ["R4"] and result["overlapRecords"][3]["cited_by"] == []
     assert result["europepmc"] == [
         [europepmc_pmid(r), None if europepmc_pmid(r) else asdict(europepmc_record(r)), europepmc_url(str(r["id"]))]
         for r in data["europepmc"]
@@ -337,17 +402,30 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert sources == ["Papers · 7 extracted of 8", "ClinicalTrials.gov · 1 extracted of 1"], sources
     tabs = page.locator("#tabs button").all_inner_texts()
     assert tabs[0] == "Extracted (7)" and tabs[3] == "Screened out (1)", tabs
+    # One paper at a time: where you are, how far the review has got, and a chip per paper.
+    assert page.inner_text("#review-position") == "Paper 1 of 7"
+    assert page.inner_text("#review-progress-text") == "Reviewed 0 of 7 papers"
+    assert page.locator("#queue button").count() == 7 and page.locator("#papers .paper").count() == 1
+    page.keyboard.press("ArrowRight")
+    assert page.inner_text("#review-position") == "Paper 2 of 7"
     # Papers only Europe PMC has: one from PubMed Central, and a preprint marked as one.
-    pmc = page.locator(".paper", has_text="Mindfulness app use and depressive symptoms")
+    pmc = open_paper(page, "Mindfulness app use and depressive symptoms")
     assert pmc.locator(".badge", has_text="Europe PMC").count() == 1 and pmc.locator(".badge", has_text="Full-text search").count() == 1
     assert pmc.locator("a", has_text="Europe PMC").get_attribute("href") == f"https://europepmc.org/article/PMC/{PMC_ONLY}"
-    preprint = page.locator(".paper", has_text="A smartphone mindfulness programme")
+    assert pmc.locator(".meta").first.inner_text().startswith("R") and "Ahmed N, Brown T, Clark R, et al." in pmc.inner_text()
+    preprint = open_paper(page, "A smartphone mindfulness programme")
     assert preprint.locator(".badge", has_text="Preprint, not peer reviewed").count() == 1
-    # Each paper says how the search found it.
-    assert page.locator(".paper", has_text="Smartphone mindfulness").locator(".badge", has_text="Cited by a review").count() == 1
-    assert page.locator(".paper", has_text="systematic review and meta-analysis").locator(".badge", has_text="Reviews search").count() == 1
+    # Each paper says how the search found it, and what the overlap check found about it.
+    assert open_paper(page, "Smartphone mindfulness").locator(".badge", has_text="Cited by a review").count() == 1
+    review = open_paper(page, "Mindfulness apps for depressive symptoms: a systematic review")
+    assert review.locator(".badge", has_text="Reviews search").count() == 1
+    assert "A review and the studies it pools" in review.locator(".overlap-note").inner_text()
+    trial = open_paper(page, "A mindfulness app for depressive")
+    assert "Same study as" in trial.locator(".overlap-note").inner_text() and "Use this record." in trial.locator(".overlap-note").inner_text()
     page.click("#source-switch button:has-text('ClinicalTrials.gov')")
-    assert page.locator("#papers .paper").all_inner_texts()[0].startswith("A Randomized Trial of a Mindfulness App")
+    registry = page.locator("#papers .paper")
+    assert registry.inner_text().startswith("A Randomized Trial of a Mindfulness App")
+    assert "this record is left out of the conclusion" in registry.locator(".overlap-note").inner_text()
     page.click("#source-switch button:has-text('Papers')")
 
     # The search, level by level from the top down: found, kept after screening, extracted.
@@ -372,7 +450,8 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert names == ["Opus 5.5 manager", "Sonnet 5.5 fetcher", "Haiku 5.5 workers", "Code search and checks"], names
     assert "calls" in agents[0] and "Idle" in agents[0]
     # An idle agent says what it did last; the timeline gives each job's tokens and its full outcome.
-    assert "Last job · " in agents[0] and "Reviewing “" in agents[0] and "Extracting “" in agents[2]
+    assert "Last job · " in agents[0] and "Checking 8 records for overlap" in agents[0] and "2 overlaps" in agents[0]
+    assert "Extracting “" in agents[2]
     timeline_text = page.evaluate("document.querySelector('#timeline').textContent")
     assert "1k in · 50 out" in timeline_text
     assert "A mindfulness app for depressive symptoms in university students" in timeline_text
@@ -393,14 +472,19 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.click("#activity-filter button:has-text('All')")
 
     assert network.refused == [PDF_URL]  # tried once directly, then fetched through Claude
-    pdf_paper = page.locator(".paper", has_text="Brief mindfulness training")
+    pdf_paper = open_paper(page, "Brief mindfulness training")
     assert pdf_paper.locator(".badge", has_text="Fetched by Sonnet").count() == 1
     assert pdf_paper.locator(".badge", has_text="Open-access PDF").count() == 1
     assert pdf_paper.locator(".badge", has_text="quote found").count() == 4
-    assert page.locator(".paper", has_text="pilot randomized trial").locator(".badge", has_text="Reviewed by Opus").count() == 1
+    assert open_paper(page, "Mindfulness groups and depressive").locator(".badge", has_text="Reviewed by Opus").count() == 1
 
-    page.locator(".paper", has_text="A mindfulness app for depressive").locator(".result").first.locator("button.include").click()
+    open_paper(page, "A mindfulness app for depressive").locator(".result").first.locator("button.include").click()
     page.wait_for_selector(".result[data-decision='include']")
+    # Every result of this paper is decided: it counts as reviewed, and Next is the button to press.
+    page.wait_for_function("document.querySelector('#review-progress-text').textContent === 'Reviewed 1 of 7 papers'")
+    assert page.get_attribute("#queue button[aria-current='true']", "data-state") == "included"
+    assert "ready" in page.get_attribute("#review-next", "class") and page.is_visible("#review-next-open")
+    page.click(".exports-box summary")
     with page.expect_download() as download:
         page.click("#export-included")
     rows = list(csv.DictReader(io.StringIO(open(download.value.path(), encoding="utf-8").read())))
@@ -409,16 +493,38 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     # Everything is in this browser's storage: a reload brings the search and the decision back.
     page.reload()
     page.wait_for_selector("#review:not([hidden]) .paper")
-    assert page.locator(".result[data-decision='include']").count() == 1
+    assert open_paper(page, "A mindfulness app for depressive").locator(".result[data-decision='include']").count() == 1
     assert page.input_value("#api-key") == KEY
     assert page.evaluate("""async () => {
         const { Store } = await import('/lib/store.js');
         return (await new Store().project(location.hash.slice(1))).spec.statistics_needed[0].statistics;
     }""") == ["mean", "sd", "n", "mean_difference"]
 
-    page.locator(".paper", has_text="A mindfulness app for depressive").locator("button", has_text="Show source text").click()
+    page.locator("#papers .paper").locator("button", has_text="Show source text").click()
     page.wait_for_selector("#source-text mark")
     page.click("#source-close")
+
+    # The conclusion: Opus picks among values code computed; the pooled SD leaves out the registry
+    # record (the same study as a paper) and is the number shown.
+    page.click("#tab-conclusion")
+    page.click("#conclude")
+    page.wait_for_selector("#conclusion-body .conclusion-summary", timeout=15000)
+    arms = [(4.2, 100), (4.5, 100), (3.8, 20), (4.1, 21), (4.1, 40), (3.9, 30), (4.2, 30), (4.0, 75), (4.3, 74)]
+    expected = math.sqrt(math.fsum((n - 1) * sd * sd for sd, n in arms) / math.fsum(n - 1 for _, n in arms))
+    shown = float(page.inner_text(".conclusion-summary .cand"))
+    assert abs(shown - expected) < 0.001, (shown, expected)
+    answer = page.locator(".answers tbody tr").first.locator("td").all_inner_texts()
+    assert answer[0] == "The difference and its SD" and "Pooled SD of PHQ-9 at 12 weeks, 9 arms in 5 studies (n = 490)" in answer[1]
+    assert "Also: 8.1 Mean of PHQ-9 at 12 weeks, Mindfulness App (n = 98)" in answer[1]
+    assert "one study reported more than once" in page.inner_text("#conclusion-body") and "No dropout rates." in page.inner_text("#conclusion-body")
+    # The agent panel shows the same number, not the bare key.
+    assert f"Similar trials give an SD of {float(f'{expected:.4g}')} [S" in page.inner_text("#activity")
+    # A decision made after the conclusion marks it out of date.
+    page.click("#tab-review")
+    open_paper(page, "Brief mindfulness training").locator(".result").first.locator("button.exclude").click()
+    page.click("#tab-conclusion")
+    page.wait_for_selector("#conclusion-body .stale")
+    page.click("#tab-review")
 
     # Requests to Anthropic: each model with its settings, straight from the page with the user's key.
     calls = network.claude
@@ -427,10 +533,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     steps = {}
     for headers, body in calls:
         system = (body.get("system") or [{"text": ""}])[0]["text"]
-        step = next((s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE") if system.startswith(getattr(prompts, s))), "FETCH")
+        step = next((s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "CONCLUDE")
+                     if system.startswith(getattr(prompts, s))), "FETCH")
         steps.setdefault(step, (headers, body))
-    assert set(steps) == {"SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "FETCH"}
-    expected = {"SPEC": (OPUS, "high"), "SEARCH": (OPUS, "high"), "ADJUDICATE": (OPUS, "xhigh"),
+    assert set(steps) == {"SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "CONCLUDE", "FETCH"}
+    expected = {"SPEC": (OPUS, "high"), "SEARCH": (OPUS, "high"), "ADJUDICATE": (OPUS, "xhigh"), "OVERLAP": (OPUS, "high"), "CONCLUDE": (OPUS, "high"),
                 "FETCH": (SONNET, "low"), "SCREEN": (HAIKU, "low"), "EXTRACT": (HAIKU, "medium")}
     for step, (model, effort) in expected.items():
         headers, body = steps[step]

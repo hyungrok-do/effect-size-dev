@@ -92,9 +92,15 @@ export class Http {
 
 const yearOf = (text) => (String(text || '').match(/[12]\d{3}/) || [''])[0];
 
+// The first three authors, then "et al."; how the overlap check tells reports of one study apart.
+export function shortAuthors(names) {
+  const kept = names.filter(Boolean);
+  return kept.slice(0, 3).join(', ') + (kept.length > 3 ? ', et al.' : '');
+}
+
 export function makeRecord(fields) {
   return {
-    title: '', year: '', journal: '', pubtypes: [], abstract: '', doi: null, pmid: null, pmcid: null, nct_ids: [],
+    title: '', authors: '', year: '', journal: '', pubtypes: [], abstract: '', doi: null, pmid: null, pmcid: null, nct_ids: [],
     ...fields,
   };
 }
@@ -204,12 +210,16 @@ export function parsePubmedXml(xml) {
     const ids = Object.fromEntries(kids(at(article, 'PubmedData', 'ArticleIdList'), 'ArticleId').map((a) => [a.getAttribute('IdType'), text(a)]));
     let doi = ids.doi;
     if (!doi) doi = kids(art, 'ELocationID').filter((e) => e.getAttribute('EIdType') === 'doi').map(text)[0];
+    const names = kids(kid(art, 'AuthorList'), 'Author').map((author) => {
+      const last = text(kid(author, 'LastName'));
+      return last ? `${last} ${text(kid(author, 'Initials'))}`.trim() : text(kid(author, 'CollectiveName'));
+    });
     const nctIds = kids(kid(art, 'DataBankList'), 'DataBank')
       .filter((bank) => text(kid(bank, 'DataBankName')) === 'ClinicalTrials.gov')
       .flatMap((bank) => kids(kid(bank, 'AccessionNumberList'), 'AccessionNumber').map(text))
       .filter(Boolean);
     records.push(makeRecord({
-      source: 'pubmed', ext_id: pmid, pmid, title: text(kid(art, 'ArticleTitle')), year,
+      source: 'pubmed', ext_id: pmid, pmid, title: text(kid(art, 'ArticleTitle')), authors: shortAuthors(names), year,
       journal: text(at(art, 'Journal', 'Title')) || text(at(art, 'Journal', 'ISOAbbreviation')),
       pubtypes: kids(kid(art, 'PublicationTypeList'), 'PublicationType').map(text),
       abstract: parts.join('\n'), doi: doi || null, pmcid: ids.pmc || null, nct_ids: nctIds,
@@ -335,7 +345,9 @@ export const europepmcPmid = (result) => String(result.pmid || (result.source ==
 export function europepmcRecord(result) {
   const types = result.pubTypeList?.pubType || [];
   return makeRecord({
-    source: 'europepmc', ext_id: String(result.id), title: plain(result.title), year: yearOf(String(result.pubYear ?? '')),
+    source: 'europepmc', ext_id: String(result.id), title: plain(result.title),
+    authors: shortAuthors(String(result.authorString || '').split(',').map((n) => n.trim().replace(/\.$/, ''))),
+    year: yearOf(String(result.pubYear ?? '')),
     journal: result.journalInfo?.journal?.title || result.bookOrReportDetails?.publisher || '',
     pubtypes: typeof types === 'string' ? [types] : [...types], abstract: plain(result.abstractText),
     doi: result.doi ?? null, pmcid: result.pmcid ?? null,

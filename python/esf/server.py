@@ -221,6 +221,18 @@ def create_app(
         submit(project_id, lambda: job.run(project_id))
         return {"ok": True}
 
+    @app.post("/api/projects/{project_id}/conclusion", status_code=202)
+    def conclude(project_id: str, x_anthropic_api_key: str | None = key_header()) -> dict:
+        project = get_project(project_id)
+        if project["status"] in RUNNING:
+            raise HTTPException(409, "Wait until the search finishes.")
+        if (project.get("conclusion") or {}).get("status") == "running":
+            raise HTTPException(409, "The conclusion is already being written.")
+        job = pipeline_for(x_anthropic_api_key)
+        store.update_project(project_id, conclusion={"status": "running"})
+        submit(f"conclusion-{project_id}", lambda: job.conclude(project_id))
+        return {"ok": True}
+
     @app.get("/api/projects/{project_id}/papers")
     def papers(project_id: str) -> list[dict]:
         get_project(project_id)
@@ -280,7 +292,7 @@ def create_app(
     def export_json(project_id: str) -> JSONResponse:
         project = get_project(project_id)
         body = {
-            "project": {k: project[k] for k in ("id", "created_at", "paragraph", "spec", "search_plan", "search_log")},
+            "project": {k: project[k] for k in ("id", "created_at", "paragraph", "spec", "search_plan", "search_log", "overlap", "conclusion")},
             "papers": papers(project_id),
             "usage": store.usage(project_id),
         }

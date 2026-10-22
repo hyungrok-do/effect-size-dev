@@ -17,7 +17,7 @@ from pydantic import TypeAdapter
 
 from esf import prompts
 from esf.llm import MAX_COUNTED, SEARCH_PLAN_RECORDED, search_tools
-from esf.schemas import LEVEL_NAMES, LEVELS, PaperExtraction, ScreenDecision, SearchSpec
+from esf.schemas import LEVEL_NAMES, LEVELS, Conclusion, OverlapReport, PaperExtraction, ScreenDecision, SearchSpec
 
 TARGET = Path(__file__).resolve().parents[1] / "site" / "lib" / "generated.js"
 
@@ -34,12 +34,14 @@ def render() -> str:
     data = {
         "PROMPTS": {
             name: getattr(prompts, name)
-            for name in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "FOUND_BY_FULL_TEXT")
+            for name in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "CONCLUDE", "FOUND_BY_FULL_TEXT")
         },
         "SCHEMAS": {
             "SearchSpec": schema(SearchSpec),
             "ScreenDecision": schema(ScreenDecision),
             "PaperExtraction": schema(PaperExtraction),
+            "OverlapReport": schema(OverlapReport),
+            "Conclusion": schema(Conclusion),
         },
         "SEARCH_TOOLS": tools(),
         "SEARCH_PLAN_RECORDED": SEARCH_PLAN_RECORDED,

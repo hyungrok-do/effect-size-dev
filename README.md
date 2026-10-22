@@ -3,10 +3,11 @@
 Describe a study you are planning in a short paragraph. Effect Size Finder searches PubMed, Europe
 PMC and ClinicalTrials.gov, reads the papers it can open, and extracts the statistics they report (group
 sizes, means, SDs, event counts, CIs, hazard ratios, and so on), each with the sentence or table
-row it came from. You review the results, include or exclude each one, and export what you keep.
+row it came from. You review the papers one at a time, including or excluding each result; Opus
+checks the studies for overlap and concludes which value to use for each number your plan needs.
 
-This first version does two things: **search for relevant papers** and **extract the reported
-numbers**. It does not pool them or compute a sample size yet.
+It **searches for relevant papers**, **extracts the reported numbers** and **recommends values**
+from them. It does not compute a sample size yet.
 
 This project was largely generated with Claude Code and is under validation.
 
@@ -40,11 +41,15 @@ SONNET  (browser edition) Download what the browser may not: PDFs, and any site 
 HAIKU   Extract every reported number with its verbatim quote and location
 CODE    Check each quote is in the source and each number is in its quote; plausibility checks
 OPUS    Re-extract anything that failed a check, was flagged, or fell in the random audit sample
-YOU     Include or exclude each result; export CSV or JSON
+OPUS    Check the extracted records for overlap: one study reported twice, reviews pooling studies in the set
+YOU     Review one paper at a time: include or exclude each result; export CSV or JSON
+CODE    Compute the candidates from what you kept: every value, and pooled SDs, medians and ranges
+OPUS    Conclude: recommend a candidate for each number the plan needs, with alternatives, caveats, gaps
 ```
 
 Claude reads and quotes; it never computes or converts a number. Every value is checked by code
-against the text it was read from.
+against the text it was read from, and in the conclusion Opus chooses among values code computed,
+naming them by key.
 
 ### The search, from the top down
 
@@ -195,7 +200,7 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 ## The browser edition's page
 
 Each step has its own tab: **Setup** (your Anthropic API key, a contact email and an optional NCBI
-key), **Describe**, **What to look for**, **Search** and **Review**. The page opens at Setup until
+key), **Describe**, **What to look for**, **Search**, **Review** and **Conclusion**. The page opens at Setup until
 it has a key. **What to look for** shows how Opus read your paragraph, as a structured specification: the
 question in one sentence, anything worth deciding before the search, then one table per part: the
 comparison (population with its condition, age and setting; intervention with its delivery, dose
@@ -221,15 +226,50 @@ narrower ones it opens over the page from **Agent activity** at the top.
 
 ## Reviewing
 
-Each paper shows where its text came from (registry results, PMC full text, open-access PDF, or
-abstract only), which model produced the extraction, why Opus reviewed it if it did, and a warning
-when another record shares its trial registration number. Each result lists its values with their
-quotes and the outcome of the checks; **Show source text** opens the text with the quotes
-highlighted.
+The review shows one paper at a time. Above it, a progress line (reviewed 3 of 12 papers) and a
+numbered chip per paper, colored once its results are decided, let you jump to any paper;
+**Previous** and **Next** (or the arrow keys) step through them, and **Next not yet reviewed** skips
+to the first paper still open. Next is highlighted once every result of the paper is decided.
+
+Each paper has a key (R12) that the overlap check and the conclusion refer to, its authors, where
+its text came from (registry results, PMC full text, open-access PDF, or abstract only), which
+model produced the extraction, why Opus reviewed it if it did, and a warning when another record
+shares its trial registration number. Each result lists its values with their quotes and the
+outcome of the checks; **Show source text** opens the text with the quotes highlighted.
 
 A decision on a result overrides one made for its whole paper. **CSV: included results** exports
 one row per value of the results you included, with its quote, location, check outcome, concerns,
 flags, and your decision.
+
+### Overlap
+
+After extraction Opus looks across the records for participants that would be counted twice: a
+registry record and its paper, a main paper and a secondary analysis (`same_study`); a systematic
+review or meta-analysis whose pooled estimate includes a primary study also in the set
+(`review_includes_study`); two reviews pooling some of the same studies (`reviews_share_studies`);
+and overlaps it suspects but cannot confirm (`possible_overlap`). It is given what tells them
+apart: registration numbers, authors, arms and their sizes, populations, dates, and which reviews
+in the set cite which records (from the reference lists read during the search). A citation alone
+is not taken as proof that a review pools a study. For each group Opus says whose numbers to use;
+the paper shows the note, and the other records of the group are left out of the conclusion's
+summaries.
+
+### The conclusion
+
+**Write the conclusion** gives Opus the specification, the overlap check, and the candidates code
+computed from the results you included or left undecided (none you excluded):
+
+- every reported value (V1, V2, ...), with its group size, how relevant and well checked it is;
+- across studies, for each outcome, timepoint and statistic reported more than once (S1, S2, ...):
+  a pooled SD, √(Σ(nᵢ − 1)·SDᵢ² / Σ(nᵢ − 1)), when every arm reports its size, and the median and
+  range.
+
+For each number the plan needs, Opus recommends a candidate, lists alternatives worth considering
+(such as a more cautious SD), says why and how confident it is, and adds caveats and gaps (numbers
+the sources don't give, and where to look next). It writes candidates' keys rather than numbers
+(the SD is [S2]), and the page shows their values, so every number in the conclusion comes from
+the papers through code. If you change a decision afterwards, the page says the conclusion is out
+of date until you write it again.
 
 ## Privacy
 
@@ -246,8 +286,9 @@ that server for others, serve it over HTTPS.
 
 ## Not yet
 
-- Pooling the extracted values or converting them to a common effect size, and handing the result to
-  [Sample Size Calculator](https://github.com/hyungrok-do/sample-size-calc).
+- Converting values to a common effect size (a standardized mean difference from means and SDs, a
+  risk ratio from event counts) and a meta-analytic pooled effect; the conclusion pools only SDs.
+- Handing the recommended values to [Sample Size Calculator](https://github.com/hyungrok-do/sample-size-calc).
 - Paywalled full text: only open-access text, abstracts, and registry results are read.
 - Numbers shown only in figures: figure captions are kept, figure images are not read.
 - The Message Batches API (half price, slower) for screening large searches; screening uses direct

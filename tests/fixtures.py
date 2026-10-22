@@ -10,11 +10,15 @@ from urllib.parse import parse_qs
 import httpx
 
 from esf.schemas import (
+    Answer,
     Comparator,
+    Conclusion,
     Criterion,
     Intervention,
     NeededStatistic,
     Outcome,
+    OverlapGroup,
+    OverlapReport,
     OutcomeResult,
     PaperExtraction,
     Population,
@@ -36,6 +40,8 @@ PUBMED_XML = """<?xml version="1.0" ?>
       <Journal><JournalIssue CitedMedium="Internet"><PubDate><Year>2021</Year><Month>Mar</Month></PubDate></JournalIssue>
         <Title>Journal of Student Mental Health</Title><ISOAbbreviation>J Stud Ment Health</ISOAbbreviation></Journal>
       <ArticleTitle>A mindfulness app for depressive symptoms in university students: a randomized controlled trial.</ArticleTitle>
+      <AuthorList CompleteYN="Y"><Author><LastName>Kim</LastName><Initials>J</Initials></Author><Author><LastName>Lee</LastName><Initials>S</Initials></Author>
+        <Author><LastName>Park</LastName><Initials>H</Initials></Author><Author><LastName>Choi</LastName><Initials>Y</Initials></Author></AuthorList>
       <ELocationID EIdType="doi" ValidYN="Y">10.1000/rct1</ELocationID>
       <Abstract>
         <AbstractText Label="BACKGROUND" NlmCategory="BACKGROUND">Depression is common among students.</AbstractText>
@@ -57,6 +63,7 @@ PUBMED_XML = """<?xml version="1.0" ?>
       <Journal><JournalIssue CitedMedium="Print"><PubDate><MedlineDate>2019 Nov-Dec</MedlineDate></PubDate></JournalIssue>
         <Title>Trials in Psychiatry</Title></Journal>
       <ArticleTitle>Brief mindfulness training versus waitlist: a randomised trial.</ArticleTitle>
+      <AuthorList><Author><CollectiveName>Mindful Students Trial Group</CollectiveName></Author></AuthorList>
       <Abstract><AbstractText>We randomized 120 students to mindfulness or waitlist.</AbstractText></Abstract>
       <PublicationTypeList><PublicationType UI="D016449">Randomized Controlled Trial</PublicationType></PublicationTypeList>
     </Article>
@@ -93,6 +100,7 @@ PUBMED_XML = """<?xml version="1.0" ?>
     <Article PubModel="Print">
       <Journal><JournalIssue><PubDate><Year>2022</Year></PubDate></JournalIssue><Title>Digital Mental Health Reviews</Title></Journal>
       <ArticleTitle>Mindfulness apps for depressive symptoms: a systematic review and meta-analysis.</ArticleTitle>
+      <AuthorList><Author><LastName>Garcia</LastName><Initials>M</Initials></Author><Author><LastName>Chen</LastName><Initials>L</Initials></Author></AuthorList>
       <Abstract><AbstractText Label="RESULTS">Twelve trials were included. Apps reduced depressive symptoms (pooled SMD 0.35, 95% CI 0.20 to 0.50).</AbstractText></Abstract>
       <PublicationTypeList><PublicationType UI="D000078182">Systematic Review</PublicationType>
         <PublicationType UI="D017418">Meta-Analysis</PublicationType></PublicationTypeList>
@@ -146,6 +154,7 @@ EUROPEPMC = {
          "pubYear": "2019", "pubType": "research-article; journal article"},
         {"id": PMC_ONLY, "source": "PMC", "pmcid": PMC_ONLY,
          "title": "Mindfulness app use and depressive symptoms in <i>nursing</i> students: a randomised trial",
+         "authorString": "Ahmed N, Brown T, Clark R, Davis P.",
          "pubYear": "2023", "journalInfo": {"journal": {"title": "Nursing Education Trials"}},
          "pubTypeList": {"pubType": ["research-article", "Journal Article"]}, "pubType": "research-article; journal article",
          "abstractText": f"<h4>Results</h4><p>{PMC_ONLY_LINE}</p>"},
@@ -488,6 +497,43 @@ class FakeLLM:
             _value("Mindfulness", "mean", 7.7, ABSTRACT_LINE, "Abstract"),
             _value("Mindfulness", "n", 20, ABSTRACT_LINE, "Abstract"),
         ], concerns=["pilot study"])])
+
+    def check_overlap(self, spec, records, sink=None):
+        """Finds what the fixtures hold: a trial and its registry record share a registration number,
+        and the meta-analysis cites trials that are also in the set."""
+        self.calls.append("overlap")
+        self.overlap_records = records
+        groups = []
+        by_nct: dict[str, list[dict]] = {}
+        for r in records:
+            for nct in r["nct_ids"]:
+                by_nct.setdefault(nct, []).append(r)
+        for nct, same in by_nct.items():
+            if len(same) > 1:
+                paper = next((r for r in same if r["source"] == "pubmed"), same[0])
+                groups.append(OverlapGroup(records=[r["key"] for r in same], relation="same_study",
+                                           evidence=f"Both registered as {nct}.", use=paper["key"]))
+        for review in (r for r in records if "Meta-Analysis" in r["publication_types"]):
+            cited = [r["key"] for r in records if review["key"] in r["cited_by"]]
+            if cited:
+                groups.append(OverlapGroup(records=[review["key"], *cited], relation="review_includes_study",
+                                           evidence="The review cites these trials.", use=""))
+        return OverlapReport(groups=groups, notes="")
+
+    def conclude(self, spec, overlap, evidence, sink=None):
+        self.calls.append("conclude")
+        self.evidence = evidence
+        pooled = next((s for s in evidence["summaries"] if s["method"] == "pooled_sd"), None)
+        mean = next((v for v in evidence["values"] if v["statistic"] == "mean"), None)
+        return Conclusion(
+            summary=f"Similar trials give an SD of [{pooled['key']}]." if pooled else "Too little to pool.",
+            answers=[Answer(need=need.purpose, candidate=pooled["key"] if pooled else (mean["key"] if mean else ""),
+                            alternatives=[mean["key"]] if mean else [], reasoning="Same outcome and timepoint.", confidence="medium")
+                     for need in spec.statistics_needed],
+            overlap_handling="The registry record was not counted again.",
+            caveats=["Check whether the SDs are of change scores."],
+            gaps=["No dropout rates."],
+        )
 
     def adjudicate(self, spec, document, worker, flags, sink=None):
         self.calls.append("adjudicate")
