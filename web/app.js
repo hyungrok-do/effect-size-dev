@@ -258,7 +258,8 @@ function renderSpec(project) {
   const key = JSON.stringify(project.spec);
   if (key !== state.specKey) {
     state.specKey = key;
-    specPanel.show(project.spec);
+    specPanel.show(project.spec, { replace: state.specShownFor !== project.id });
+    state.specShownFor = project.id;
   }
   const running = RUNNING.has(project.status);
   // A new search replaces the papers a summary being written is about: it waits for the summary.

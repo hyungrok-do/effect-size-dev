@@ -252,11 +252,16 @@ export class SpecPanel {
     this.openers = new Map(); // id -> opens that value's field (rebuilt on every draw)
     this.folded = new Map(); // part -> open or not, for the parts that fold
     this.isDisabled = false;
+    this.saving = 0; // saves under way
   }
 
-  show(spec) {
+  // Show a specification. While a field is open or a save is under way, the panel's own draft is the
+  // newest version, and a copy read back from storage meanwhile may be older: it is shown only when
+  // `replace` says it belongs to another search.
+  show(spec, { replace = false } = {}) {
     const next = upgradeSpec(spec);
     if (this.draft && JSON.stringify(next) === JSON.stringify(this.draft)) return; // already shown
+    if (this.draft && !replace && (this.active || this.saving)) return;
     this.active = null;
     this.draft = structuredClone(next);
     this.render();
@@ -292,7 +297,12 @@ export class SpecPanel {
   changed() {
     this.tidy();
     this.render();
-    this.onSave(structuredClone(this.draft));
+    this.save();
+  }
+
+  save() {
+    this.saving += 1;
+    Promise.resolve(this.onSave(structuredClone(this.draft))).finally(() => { this.saving -= 1; });
   }
 
   // Focus a value (by its id) or one of the panel's buttons (by its key) after a redraw.
@@ -354,7 +364,7 @@ export class SpecPanel {
       const changed = JSON.stringify(updated) !== JSON.stringify(value);
       if (changed) set(updated);
       close(next, how);
-      if (changed) this.onSave(structuredClone(this.draft));
+      if (changed) this.save();
       return true;
     };
     const cancel = () => {
