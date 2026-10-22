@@ -105,7 +105,8 @@ PUBMED_XML = """<?xml version="1.0" ?>
     <Article PubModel="Print">
       <Journal><JournalIssue><PubDate><Year>2022</Year></PubDate></JournalIssue><Title>Digital Mental Health Reviews</Title></Journal>
       <ArticleTitle>Mindfulness apps for depressive symptoms: a systematic review and meta-analysis.</ArticleTitle>
-      <AuthorList><Author><LastName>Garcia</LastName><Initials>M</Initials></Author><Author><LastName>Chen</LastName><Initials>L</Initials></Author></AuthorList>
+      <AuthorList><Author ValidYN="N"><LastName>Garsia</LastName><Initials>M</Initials></Author>
+        <Author><LastName>Garcia</LastName><Initials>M</Initials></Author><Author><LastName>Chen</LastName><Initials>L</Initials></Author></AuthorList>
       <Abstract><AbstractText Label="RESULTS">Twelve trials were included. Apps reduced depressive symptoms (pooled SMD 0.35, 95% CI 0.20 to 0.50).</AbstractText></Abstract>
       <PublicationTypeList><PublicationType UI="D000078182">Systematic Review</PublicationType>
         <PublicationType UI="D017418">Meta-Analysis</PublicationType></PublicationTypeList>

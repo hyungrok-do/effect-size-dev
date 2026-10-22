@@ -154,7 +154,7 @@ async function loadProjects() {
 
 function newSearch() {
   clearTimeout(state.timer);
-  Object.assign(state, { id: null, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', reviewAt: {} });
+  Object.assign(state, { id: null, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', cardKey: '', reviewAt: {} });
   history.replaceState(null, '', location.pathname);
   const paragraph = $('#paragraph');
   paragraph.value = '';
@@ -169,7 +169,7 @@ function newSearch() {
 
 async function openProject(id) {
   clearTimeout(state.timer);
-  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', reviewAt: {} });
+  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', cardKey: '', reviewAt: {} });
   history.replaceState(null, '', `#${id}`);
   try {
     await refresh();
@@ -261,17 +261,20 @@ function renderSpec(project) {
     specPanel.show(project.spec);
   }
   const running = RUNNING.has(project.status);
+  // A new search replaces the papers a summary being written is about: it waits for the summary.
+  const summarizing = project.summary?.status === 'running';
   specPanel.disabled = running;
-  $('#run').disabled = running;
+  $('#run').disabled = running || summarizing;
   const hasPapers = Object.keys(project.counts || {}).length > 0;
   $('#run').textContent = hasPapers ? 'Search again' : 'Search and extract';
-  $('#run-status').textContent = hasPapers && !running ? 'Searching again replaces the papers and decisions below.' : '';
+  $('#run-status').textContent = summarizing ? 'Wait until the summary is written.'
+    : hasPapers && !running ? 'Searching again replaces the papers and decisions below.' : '';
 }
 
 async function runSearch(event) {
   event.preventDefault();
   const hasPapers = Object.keys(state.project.counts || {}).length > 0;
-  if (!haveKey()) return;
+  if (!haveKey() || state.project.summary?.status === 'running') return;
   const spec = specPanel.collect();
   if (!spec) return; // an open edit has a value to fix; the panel says which
   if (hasPapers && !confirm('Search again? This replaces the papers and your decisions for this search.')) return;
@@ -391,8 +394,21 @@ function renderReview() {
     papers: groups[state.tab], current: state.reviewAt[state.tab], decisionsOf: (p) => p.decisions || {},
     show: showPaper, counting: state.tab === 'extracted',
   });
-  if (current) state.reviewAt[state.tab] = current.id; // stays shown when others join the list
-  $('#papers').replaceChildren(current ? paperCard(current, trials) : h('p', { class: 'muted' }, 'Nothing here.'));
+  if (!current) {
+    state.cardKey = '';
+    $('#papers').replaceChildren(h('p', { class: 'muted' }, 'Nothing here.'));
+    return;
+  }
+  // The paper shown stays shown when others join the list, and its card is redrawn only when it
+  // changes, so what the reader has open (an author table, quotes) stays open while the search runs.
+  state.reviewAt[state.tab] = current.id;
+  const cardKey = JSON.stringify([current.id, current.status, current.extracted_by, current.error, current.fulltext_kind,
+    current.decisions, state.project.overlap?.report, RUNNING.has(state.project.status),
+    (current.nct_ids || []).map((nct) => trials.get(nct))]);
+  if (cardKey !== state.cardKey) {
+    state.cardKey = cardKey;
+    $('#papers').replaceChildren(paperCard(current, trials));
+  }
 }
 
 function showPaper(paperId) {

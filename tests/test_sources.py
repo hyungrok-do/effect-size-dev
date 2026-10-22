@@ -36,6 +36,9 @@ def test_parse_pubmed_xml():
     ]
     assert records["22222222"].author_list == [{"name": "Mindful Students Trial Group", "affiliation": ""}]
     assert records["33333333"].author_list == []
+    # A name published in error (ValidYN="N") is left out.
+    assert records["55555555"].author_list == [{"name": "M Garcia", "affiliation": ""}, {"name": "L Chen", "affiliation": ""}]
+    assert records["55555555"].authors == "Garcia M, Chen L"
     assert records["22222222"].year == "2019"  # from <MedlineDate>
     assert records["22222222"].pmcid is None
 
@@ -129,7 +132,7 @@ def test_europe_pmc_search_keeps_papers_and_preprints():
     assert record.author_list == [
         {"name": "Nadia Ahmed", "affiliation": "School of Nursing, Example University, Leeds, UK."},
         {"name": "Tom Brown", "affiliation": "Leeds Teaching Hospitals, Leeds, UK."},
-        {"name": "Clark", "affiliation": ""}, {"name": "Pat Davis", "affiliation": ""},
+        {"name": "R Clark", "affiliation": ""}, {"name": "Pat Davis", "affiliation": ""},
     ]
     # A result without an author list (a "lite" one) still gives the names.
     assert europepmc_record({"id": "PPR1", "source": "PPR", "authorString": "Ng A, Ode B."}).author_list == [

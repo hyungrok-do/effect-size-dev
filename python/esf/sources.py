@@ -210,6 +210,8 @@ def parse_pubmed_xml(xml: bytes | str) -> list[Record]:
         names = []
         author_list = []
         for author in art.findall("AuthorList/Author"):
+            if author.get("ValidYN") == "N":  # a name published in error; the corrected one is listed too
+                continue
             last = (author.findtext("LastName") or "").strip()
             collective = _text(author.find("CollectiveName"))
             names.append(f"{last} {(author.findtext('Initials') or '').strip()}".strip() if last else collective)
@@ -444,7 +446,9 @@ def europepmc_authors(result: dict) -> list[dict]:
     has no author list (a "lite" result)."""
     out = []
     for a in (result.get("authorList") or {}).get("author") or []:
-        name = _clean(f"{a.get('firstName') or ''} {a.get('lastName') or ''}") or _clean(a.get("fullName")) or _clean(a.get("collectiveName"))
+        first = _clean(a.get("firstName")) or _clean(a.get("initials"))  # as PubMed's: the initials when there is no first name
+        last = _clean(a.get("lastName"))
+        name = _clean(f"{first} {last}") if last else _clean(a.get("fullName")) or _clean(a.get("collectiveName"))
         details = (a.get("authorAffiliationDetailsList") or {}).get("authorAffiliation") or []
         affiliations = [_clean(d.get("affiliation")) for d in details if _clean(d.get("affiliation"))]
         if not affiliations and _clean(a.get("affiliation")):

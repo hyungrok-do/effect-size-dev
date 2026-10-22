@@ -215,7 +215,8 @@ export function parsePubmedXml(xml) {
     const ids = Object.fromEntries(kids(at(article, 'PubmedData', 'ArticleIdList'), 'ArticleId').map((a) => [a.getAttribute('IdType'), text(a)]));
     let doi = ids.doi;
     if (!doi) doi = kids(art, 'ELocationID').filter((e) => e.getAttribute('EIdType') === 'doi').map(text)[0];
-    const authorEls = kids(kid(art, 'AuthorList'), 'Author');
+    // A name published in error (ValidYN="N") is left out; the corrected one is listed too.
+    const authorEls = kids(kid(art, 'AuthorList'), 'Author').filter((author) => author.getAttribute('ValidYN') !== 'N');
     const names = authorEls.map((author) => {
       const last = text(kid(author, 'LastName'));
       return last ? `${last} ${text(kid(author, 'Initials'))}`.trim() : text(kid(author, 'CollectiveName'));
@@ -364,7 +365,9 @@ const europepmcNames = (result) => String(result.authorString || '').split(',').
 export function europepmcAuthors(result) {
   const out = [];
   for (const a of result.authorList?.author || []) {
-    const name = clean(`${a.firstName || ''} ${a.lastName || ''}`) || clean(a.fullName) || clean(a.collectiveName);
+    const first = clean(a.firstName) || clean(a.initials); // as PubMed's: the initials when there is no first name
+    const last = clean(a.lastName);
+    const name = last ? clean(`${first} ${last}`) : clean(a.fullName) || clean(a.collectiveName);
     let affiliations = (a.authorAffiliationDetailsList?.authorAffiliation || []).map((d) => clean(d.affiliation)).filter(Boolean);
     if (!affiliations.length && clean(a.affiliation)) affiliations = [clean(a.affiliation)];
     if (name) out.push({ name, affiliation: affiliations.join('; ') });
