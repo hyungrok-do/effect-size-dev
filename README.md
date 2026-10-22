@@ -208,9 +208,14 @@ was structured are converted when they are opened. It moves to the next tab when
 meantime. Papers from PubMed and ClinicalTrials.gov records are counted and reviewed separately,
 and each paper says how it was found (as a review, in the target population, cited by a review…).
 
-The **Agent activity** panel shows what each agent is doing right now (Opus 5.5 managing, Sonnet
-5.5 fetching, Haiku 5.5 screening and reading, and the page's own code searching and checking),
-with its calls and tokens, and a timeline of every step it took, which you can filter by agent.
+The **Agent activity** panel lists every job each agent is doing right now (Opus 5.5 managing,
+Sonnet 5.5 fetching, Haiku 5.5 screening and reading, and the page's own code searching and
+checking): which paper or query, how long it has run and the tokens it has used so far, with the
+searches Opus runs while planning shown under the planning job, and how far the current batch has
+got (screening 14 of 60). An idle agent shows its last job and how it ended. Below is a timeline of
+every finished job with its tokens and its outcome: the screening decision and reason, the numbers
+an extraction found, the queries of the search plan. It is filtered by agent. This costs nothing
+extra: it comes from the calls the search makes anyway.
 The timeline is saved with the search. On wide screens the panel sits beside the steps; on
 narrower ones it opens over the page from **Agent activity** at the top.
 

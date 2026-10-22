@@ -31,6 +31,16 @@ const NOT_STUDIES = new Set([
 ]);
 const TEXT_KIND = { registry: 'registry results', pmc_xml: 'PMC full text', oa_pdf: 'open-access PDF', abstract: 'abstract only', upload: 'your PDF' };
 const countValues = (extraction) => extraction.results.reduce((n, r) => n + r.values.length, 0);
+const STUDY_TYPES = {
+  rct: 'trial', systematic_review_or_meta_analysis: 'review', observational: 'observational', pilot_or_feasibility: 'pilot',
+  protocol_without_results: 'protocol', other: 'other',
+};
+// What an extraction found, numbers included: "2 results, 8 values. PHQ-9 at 12 weeks: App mean 8.1, …".
+const found = (x) => [
+  `${plural(x.results.length, 'result')}, ${plural(countValues(x), 'value')}.`,
+  ...x.results.map((r) => `${r.outcome_measure}${r.timepoint ? ` at ${r.timepoint}` : ''}: `
+    + `${r.values.map((v) => `${v.group} ${v.statistic.replaceAll('_', ' ')} ${v.value}`).join(', ')}`),
+].join('\n');
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const PROCESSED = new Set(['extracted', 'needs_manual', 'no_fulltext', 'error']);
 
@@ -88,8 +98,9 @@ export class Pipeline {
     try {
       const spec = await this.activity.track(
         { agent: 'opus', step: 'spec', text: 'Reading the problem' },
-        () => this.claude.readSpec(project.paragraph, { sink: this.sink(projectId) }),
-        (s) => `${s.design.replaceAll('_', ' ')}; outcomes: ${s.outcomes.map((o) => o.measure || o.name).join(', ')}`,
+        (step) => this.claude.readSpec(project.paragraph, { sink: step.meter(this.sink(projectId)) }),
+        (s) => `${s.design.replaceAll('_', ' ')}; outcomes: ${s.outcomes.map((o) => o.measure || o.name).join(', ')}; `
+          + `${plural(s.statistics_needed.length, 'number')} to find; ${plural(s.open_questions.length, 'question')} worth deciding`,
       );
       await this.store.updateProject(projectId, { status: 'spec_ready', spec });
     } catch (error) {
@@ -117,11 +128,16 @@ export class Pipeline {
         await this.progress(projectId, 'planning the search');
         plan = await this.activity.track(
           { agent: 'opus', step: 'search', text: 'Planning the search' },
-          () => this.claude.planSearch(spec, new Toolbox(this.sources, this.activity), {
-            sink: this.sink(projectId), maxIterations: this.settings.searchMaxIterations,
+          // Opus's searches while it plans show as part of this step.
+          (step) => this.claude.planSearch(spec, new Toolbox(this.sources, step.activity), {
+            sink: step.meter(this.sink(projectId)), maxIterations: this.settings.searchMaxIterations,
           }),
-          (p) => `Final plan: ${p.levels.map((l) => l.level).join(' → ') || 'no PubMed levels'}; `
-            + `${plural(p.clinicaltrials_queries.length, 'ClinicalTrials.gov query', 'ClinicalTrials.gov queries')}`,
+          (p) => [
+            `Final plan: ${p.levels.map((l) => l.level).join(' → ') || 'no PubMed levels'}; `
+              + `${plural(p.clinicaltrials_queries.length, 'ClinicalTrials.gov query', 'ClinicalTrials.gov queries')}`,
+            ...p.levels.map((l) => `${LEVEL_NAMES[l.level]}: ${l.query}`),
+            ...p.clinicaltrials_queries.map((q) => `${LEVEL_NAMES.registry}: ${q}`),
+          ].join('\n'),
         );
         await this.store.updateProject(projectId, { search_plan: plan });
       }
@@ -320,8 +336,8 @@ export class Pipeline {
       try {
         const decision = await this.activity.track(
           { agent: 'haiku', step: 'screen', text: `Screening “${short(paper.title)}”`, paperId: paper.id },
-          () => this.claude.screen(spec, recordText(paper), { sink }),
-          (d) => `${d.decision}: ${d.reason}`,
+          (step) => this.claude.screen(spec, recordText(paper), { sink: step.meter(sink) }),
+          (d) => `${d.decision} (${STUDY_TYPES[d.study_type] || d.study_type}): ${d.reason}`,
         );
         const status = { include: 'screened_in', exclude: 'screened_out', unsure: 'unsure' }[decision.decision];
         await this.store.updatePaper(paper.id, { status, screen: decision });
@@ -406,7 +422,8 @@ export class Pipeline {
         doc = await this.activity.track(
           { agent: 'code', step: 'fetch', text: `Getting the text of “${title}”`, paperId },
           () => this.fullText(paper),
-          (d) => (d ? `${TEXT_KIND[d.kind]}${d.fetched_by === 'sonnet' ? ', fetched by Sonnet' : ''}` : 'no open text found'),
+          (d) => (d ? `${TEXT_KIND[d.kind]}${d.fetched_by === 'sonnet' ? ', fetched by Sonnet' : ''}, `
+            + `${Math.max(1, Math.round(d.text.length / 1000))}k characters` : 'no open text found'),
         );
       } catch (error) {
         await this.store.updatePaper(paperId, { status: 'no_fulltext', error: `Could not get the text: ${describeError(error)}` });
@@ -430,8 +447,8 @@ export class Pipeline {
     try {
       worker = await this.activity.track(
         { agent: 'haiku', step: 'extract', text: `Extracting “${title}”`, paperId },
-        () => this.claude.extract(spec, document, { sink }),
-        (x) => `${plural(x.results.length, 'result')}, ${plural(countValues(x), 'value')}`,
+        (step) => this.claude.extract(spec, document, { sink: step.meter(sink) }),
+        found,
       );
       report = verify(worker, doc.text, quotesReliable);
     } catch (error) {
@@ -459,8 +476,8 @@ export class Pipeline {
       try {
         final = await this.activity.track(
           { agent: 'opus', step: 'adjudicate', text: `Reviewing “${title}”`, paperId },
-          () => this.claude.adjudicate(spec, document, worker, reasons, { sink }),
-          (x) => `${plural(x.results.length, 'result')}, ${plural(countValues(x), 'value')}`,
+          (step) => this.claude.adjudicate(spec, document, worker, reasons, { sink: step.meter(sink) }),
+          found,
         );
         finalReport = verify(final, doc.text, quotesReliable);
         extractedBy = 'manager';

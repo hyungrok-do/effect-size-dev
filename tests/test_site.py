@@ -13,6 +13,7 @@ import json
 import os
 import re
 import threading
+import time
 from dataclasses import asdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -85,8 +86,10 @@ class Network:
     cross-site request does in a browser (a failed fetch); mocked responses bypass the browser's CORS
     check, so leaving out the header would not refuse anything."""
 
-    def __init__(self, refuse_web_pages=("example.org",)):
+    def __init__(self, refuse_web_pages=("example.org",), count_delay=0.0):
         self.literature = LiteratureAPIs()
+        # Seconds to hold PubMed count requests, so the page can be seen while an agent is at work.
+        self.count_delay = count_delay
         self.refuse = set(refuse_web_pages)
         self.llm = FakeLLM()
         self.claude: list[tuple[dict, dict]] = []
@@ -103,6 +106,8 @@ class Network:
         if host in self.refuse:
             self.refused.append(request.url)
             return route.abort("failed")
+        if self.count_delay and "esearch.fcgi" in request.url and "retmax=0" in request.url:
+            time.sleep(self.count_delay)
         response = self.literature(httpx.Request(request.method, request.url, content=request.post_data_buffer or b""))
         headers = {**CORS, "content-type": response.headers.get("content-type", "application/octet-stream")}
         route.fulfill(status=response.status_code, headers=headers, body=response.content)
@@ -255,7 +260,7 @@ def test_a_blocked_api_is_fetched_through_claude(browser, site_url):
 
 
 def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
-    network = Network()
+    network = Network(count_delay=0.6)
     context = browser.new_context(viewport={"width": 1280, "height": 900}, accept_downloads=True)
     context.route("**/*", network)
     page = context.new_page()
@@ -316,6 +321,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert "Animal studies" in page.inner_text("[data-part='screening']")
     assert "1 to include · 1 to exclude" in page.inner_text("[data-part='screening'] summary")
     page.click("#run")
+    # While Opus plans, the searches it runs show as its jobs, under the planning job, as they happen.
+    page.wait_for_selector("#agents [data-agent='opus'] .job[data-depth='1']", timeout=15000)
+    opus_jobs = page.locator("#agents [data-agent='opus'] .job .what").all_inner_texts()
+    assert opus_jobs[0] == "Planning the search" and opus_jobs[1].startswith("Counts 2 PubMed queries"), opus_jobs
+    assert "at work" in page.inner_text("#agents [data-agent='opus'] .state")
     # The page shows the search while it runs and moves on to the review when it finishes (it only
     # does that when the search tab is the one open, so this also shows the search tab was followed).
     page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
@@ -361,6 +371,12 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     names = [" ".join(x.split()) for x in page.locator("#agents .agent h3").all_inner_texts()]
     assert names == ["Opus 5.5 manager", "Sonnet 5.5 fetcher", "Haiku 5.5 workers", "Code search and checks"], names
     assert "calls" in agents[0] and "Idle" in agents[0]
+    # An idle agent says what it did last; the timeline gives each job's tokens and its full outcome.
+    assert "Last job · " in agents[0] and "Reviewing “" in agents[0] and "Extracting “" in agents[2]
+    timeline_text = page.evaluate("document.querySelector('#timeline').textContent")
+    assert "1k in · 50 out" in timeline_text
+    assert "A mindfulness app for depressive symptoms in university students" in timeline_text
+    assert "PHQ-9 at 12 weeks: App n 100, Waitlist n 100, App mean 8.1, App sd 4.2" in timeline_text
     timeline = "\n".join(page.locator("#timeline li").all_inner_texts())
     for expected in ("Reading the problem", "Counts 2 PubMed queries", "#1 4, #2 1", "Tries PubMed: mindfulness", "Planning the search",
                      "Final plan: primary → reviews → full_text", "Reviews and meta-analyses: mindfulness", "Collected 8 records to screen",
@@ -368,8 +384,8 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
                      "Tries Europe PMC: mindfulness", "Outcome reported in the full text (Europe PMC): mindfulness",
                      "Following the references of 1 included review", "References of “Mindfulness apps for depressive",
                      "Added 1 study cited by the reviews", "Screening “Smartphone mindfulness",
-                     "Screening “Stress responses in a mouse model", "exclude: Animal study.",
-                     "Fetching example.org, which the browser may not read", "PDF, 1 KB",
+                     "Screening “Stress responses in a mouse model", "exclude (other): Animal study.", "include (review): Relevant review.",
+                     "Fetching example.org/rct2.pdf for the browser", "PDF, 1 KB",
                      "Extracting “Brief mindfulness training", "Reviewing “Mindfulness groups", "Search finished"):
         assert expected in timeline, expected
     page.click("#activity-filter button:has-text('Sonnet')")

@@ -199,8 +199,8 @@ function pipeline(projectId) {
     email: $('#contact-email').value.trim(),
     ncbiApiKey: $('#ncbi-key').value.trim(),
     proxy: (url) => activity.track(
-      { agent: 'sonnet', step: 'fetch', text: `Fetching ${new URL(url).host}, which the browser may not read` },
-      () => claude.fetchUrl(url, { sink: (step, model, usage) => store.addUsage(projectId, step, model, usage) }),
+      { agent: 'sonnet', step: 'fetch', text: `Fetching ${short(url.replace(/^https?:\/\//, ''), 70)} for the browser` },
+      (step) => claude.fetchUrl(url, { sink: step.meter((callStep, model, usage) => store.addUsage(projectId, callStep, model, usage)) }),
       (doc) => (doc.kind === 'pdf' ? `PDF, ${Math.round((doc.base64.length * 3) / 4 / 1024)} KB` : `text, ${Math.round(doc.text.length / 1024)} KB`),
     ),
   });
@@ -427,6 +427,24 @@ function setActivityOpen(open, remember = true) {
   renderActivity();
 }
 
+// Which agent the page's progress stage belongs to, for the progress line on its card.
+const STAGE_AGENT = {
+  'planning the search': 'opus', 'running the search': 'code', "reading the reviews' references": 'code',
+  screening: 'haiku', extracting: 'haiku',
+};
+const MAX_JOBS = 8; // jobs listed per agent; the rest are counted
+
+function jobRow(task, depth, children) {
+  const u = task.usage;
+  return [
+    h('li', { class: 'job', 'data-depth': String(depth) },
+      h('span', { class: 'what' }, task.text),
+      h('span', { class: 'meta' }, seconds(task.started), u && ` · ${tokens(u.input)} in · ${tokens(u.output)} out`)),
+    ...children.flatMap((child) => jobRow(child, depth + 1, [])),
+  ];
+}
+
+// The agents' cards: what each is doing now, job by job, or the last job it finished.
 function renderAgents() {
   const busy = state.id ? liveTasks(state.id) : [];
   $('#activity-toggle .pulse').hidden = busy.length === 0;
@@ -441,20 +459,34 @@ function renderAgents() {
     t.output += u.output_tokens;
   }
   const codeSteps = state.events.filter((e) => e.agent === 'code').length;
+  const progress = state.project?.progress;
+  const running = jobs.has(state.id);
+  const liveIds = new Set(busy.map((task) => task.id));
   $('#agents').replaceChildren(...(state.id ? AGENTS : []).map(([key, name, role, does]) => {
     const mine = busy.filter((task) => task.agent === key);
-    const latest = mine[mine.length - 1];
-    let now = 'Idle';
-    if (mine.length === 1) now = `${latest.text} · ${seconds(latest.started)}`;
-    if (mine.length > 1) now = `${mine.length} at work · latest: ${short(latest.text, 60)}`;
+    // Jobs that are part of another live job are listed under it.
+    const top = mine.filter((task) => !liveIds.has(task.parent));
+    const childrenOf = (task) => busy.filter((child) => child.parent === task.id);
     const t = totals[key];
     const stats = key === 'code' ? `${codeSteps} steps logged`
-      : t ? `${t.calls} calls · ${tokens(t.input)} tokens in · ${tokens(t.output)} out` : 'No calls yet';
+      : t ? `${t.calls} calls · ${tokens(t.input)} in · ${tokens(t.output)} out` : 'No calls yet';
+    const stage = running && progress && STAGE_AGENT[progress.stage] === key
+      ? `${progress.stage[0].toUpperCase()}${progress.stage.slice(1)}${progress.total ? `: ${progress.done} of ${progress.total}` : '…'}` : null;
+    const last = !mine.length && state.events.find((e) => e.agent === key && e.ms != null);
+    const lastDetail = last && (last.phase === 'error' ? `Failed: ${last.detail}` : (last.detail || '').split('\n')[0]);
     return h('section', { class: 'agent', 'data-agent': key, 'data-busy': String(mine.length > 0), title: does },
-      h('h3', {}, h('span', { class: 'pulse', 'aria-hidden': 'true', hidden: !mine.length || null }), name, ' ',
-        h('span', { class: 'role' }, role)),
-      h('p', { class: 'now', title: mine.length ? now : null }, now),
-      h('p', { class: 'stats' }, stats));
+      h('div', { class: 'agent-head' },
+        h('h3', {}, h('span', { class: 'pulse', 'aria-hidden': 'true', hidden: !mine.length || null }), name, ' ',
+          h('span', { class: 'role' }, role)),
+        h('span', { class: 'state' }, mine.length ? `${mine.length} at work` : 'Idle')),
+      h('p', { class: 'stats' }, stats, stage && h('span', { class: 'stage' }, ` · ${stage}`)),
+      top.length > 0 && h('ol', { class: 'jobs' },
+        top.slice(0, MAX_JOBS).flatMap((task) => jobRow(task, 0, childrenOf(task))),
+        top.length > MAX_JOBS && h('li', { class: 'job more' }, `and ${top.length - MAX_JOBS} more`)),
+      last && h('div', { class: 'last' },
+        h('p', { class: 'last-head' }, `Last job · ${duration(last.ms)}`),
+        h('p', { class: 'last-what' }, last.text),
+        lastDetail && h('p', { class: 'last-detail' }, lastDetail)));
   }));
   return busy;
 }
@@ -476,13 +508,22 @@ function renderActivity() {
       onclick: () => { state.filter = key; renderActivity(); },
     }, `${label} ${counts[key] || 0}`)));
   const shown = state.events.filter((e) => state.filter === 'all' || e.agent === state.filter).slice(0, 250);
-  $('#timeline').replaceChildren(...(shown.length ? shown.map((e) => h('li', { 'data-agent': e.agent, 'data-phase': e.phase },
+  $('#timeline').replaceChildren(...(shown.length ? shown.map(timelineItem) : state.id ? [h('li', { class: 'muted' }, 'Nothing has happened yet.')] : []));
+}
+
+// One finished step: when, who, how long and how many tokens, what it was, and what came of it.
+// A long outcome (an extraction's numbers, the search plan's queries) shows its first line and folds the rest.
+function timelineItem(e) {
+  const [first, ...rest] = (e.phase === 'error' ? `Failed: ${e.detail}` : e.detail || '').split('\n');
+  return h('li', { 'data-agent': e.agent, 'data-phase': e.phase },
     h('span', { class: 'when' }, new Date(e.at).toLocaleTimeString()),
     h('span', { class: 'who' }, AGENT_NAMES[e.agent] || e.agent),
     e.ms != null && h('span', { class: 'when' }, ` · ${duration(e.ms)}`),
+    e.usage && h('span', { class: 'when' }, ` · ${tokens(e.usage.input)} in · ${tokens(e.usage.output)} out`),
     h('span', { class: 'what' }, e.text),
-    e.detail && h('span', { class: 'detail' }, e.phase === 'error' ? `Failed: ${e.detail}` : e.detail),
-  )) : state.id ? [h('li', { class: 'muted' }, 'Nothing has happened yet.')] : []));
+    first && h('span', { class: 'detail' }, first),
+    rest.length > 0 && h('details', { class: 'more' }, h('summary', {}, `${rest.length} more ${rest.length === 1 ? 'line' : 'lines'}`),
+      h('span', { class: 'detail' }, rest.join('\n'))));
 }
 
 // -- step 1 ----------------------------------------------------------------------
