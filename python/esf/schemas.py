@@ -29,26 +29,140 @@ class StatedValue(BaseModel):
     quote: str = Field(description="The sentence from the paragraph that states it, verbatim.")
 
 
+Statistic = Literal[
+    "n",
+    "mean",
+    "sd",
+    "se",
+    "ci_lower",
+    "ci_upper",
+    "median",
+    "q1",
+    "q3",
+    "min",
+    "max",
+    "events",
+    "percent",
+    "mean_change",
+    "sd_change",
+    "mean_difference",
+    "standardized_mean_difference",
+    "odds_ratio",
+    "risk_ratio",
+    "hazard_ratio",
+    "risk_difference",
+    "p_value",
+    "t_statistic",
+    "icc",
+    "correlation",
+    "other",
+]
+
+
+ComparatorKind = Literal["placebo", "waitlist", "usual_care", "no_intervention", "active", "other"]
+# What a screening rule is about, and which concept a group of search terms describes.
+Element = Literal["population", "intervention", "comparator", "outcome", "design", "other"]
+Concept = Literal["population", "condition", "intervention", "comparator", "outcome", "design", "other"]
+
+
+class Population(BaseModel):
+    description: str = Field(description="Who is studied, in a short phrase.")
+    condition: str = Field(description="The condition or severity that defines them; empty if none.")
+    age: str = Field(description="Age range or group; empty if not stated.")
+    setting: str = Field(description="Where, e.g. universities or primary care; empty if not stated.")
+
+
+class Intervention(BaseModel):
+    name: str = Field(description="What is tested (or the exposure), in a short phrase.")
+    delivery: str = Field(description="How it is delivered, e.g. smartphone app or group sessions; empty if not stated.")
+    dose: str = Field(description="How much and how often, e.g. 10 minutes a day; empty if not stated.")
+    duration: str = Field(description="For how long, e.g. 12 weeks; empty if not stated.")
+
+
+class Comparator(BaseModel):
+    name: str = Field(description="What it is compared with, in a short phrase; empty for a single-arm study.")
+    kind: ComparatorKind
+
+
+class Outcome(BaseModel):
+    name: str = Field(description="What is measured, e.g. depressive symptoms.")
+    measure: str = Field(description="The instrument or definition, e.g. PHQ-9 total score (0-27); empty if not stated.")
+    role: Literal["primary", "secondary"]
+    type: OutcomeType
+    timepoint: str = Field(description="When it is measured, e.g. 12 weeks after randomization; empty if not stated.")
+
+
+class NeededStatistic(BaseModel):
+    outcome: str = Field(description="Which outcome, by its name in outcomes.")
+    statistics: list[Statistic] = Field(description="What to find, e.g. ['mean', 'sd', 'n'].")
+    per: Literal["each_arm", "between_groups", "one_group"] = Field(
+        description="each_arm: a value per arm; between_groups: a contrast such as a mean difference or hazard "
+        "ratio; one_group: a single group, e.g. the control group's event rate or a correlation."
+    )
+    timepoint: str = Field(description="When; empty if any timepoint will do.")
+    purpose: str = Field(description="What it is for in the sample-size calculation, in a few words, e.g. 'the SD'.")
+
+
+class Criterion(BaseModel):
+    about: Element
+    rule: str = Field(description="One short rule, e.g. 'randomized trials'.")
+
+
+class TermGroup(BaseModel):
+    concept: Concept
+    terms: list[str] = Field(description="Synonyms, MeSH headings and instrument names for this concept.")
+
+
 class SearchSpec(BaseModel):
     """What the planned study is and what the literature should supply."""
 
     question: str = Field(description="One-sentence restatement of the planned comparison.")
-    population: str
-    intervention: str = Field(description="Intervention or exposure.")
-    comparator: str
-    outcomes: list[str] = Field(description="Outcome measures, primary first; name instruments where given.")
-    timepoint: str = Field(description="Primary assessment time; empty if not stated.")
     design: Design
-    outcome_type: OutcomeType
-    statistics_needed: list[str] = Field(
-        description="Statistics to look for in papers, e.g. 'mean and SD of PHQ-9 at 12 weeks per arm', "
-        "'control-group event rate', 'hazard ratio with 95% CI', 'ICC'."
+    population: Population
+    intervention: Intervention
+    comparator: Comparator
+    outcomes: list[Outcome] = Field(description="Primary outcome first.")
+    statistics_needed: list[NeededStatistic] = Field(
+        description="What the literature should supply for the sample-size calculation, one row per outcome, "
+        "grouping and timepoint."
     )
     stated_values: list[StatedValue]
-    inclusion_criteria: list[str]
-    exclusion_criteria: list[str]
-    search_terms: list[str] = Field(description="Synonyms, MeSH terms and instrument names useful for searching.")
+    inclusion_criteria: list[Criterion]
+    exclusion_criteria: list[Criterion]
+    search_terms: list[TermGroup] = Field(description="One group per concept.")
     open_questions: list[str] = Field(description="Ambiguities the investigator should resolve.")
+
+
+def upgrade_spec(spec: dict) -> dict:
+    """A specification saved before the structured fields, in the current shape. Mirrors upgradeSpec
+    in site/lib/spec-panel.js."""
+    if isinstance(spec.get("population"), dict):
+        return spec
+    timepoint = spec.get("timepoint") or ""
+    outcomes = [
+        {"name": name, "measure": "", "role": "secondary" if i else "primary",
+         "type": spec.get("outcome_type") or "unclear", "timepoint": timepoint}
+        for i, name in enumerate(spec.get("outcomes") or [])
+    ]
+    first = outcomes[0]["name"] if outcomes else ""
+    return {
+        "question": spec.get("question") or "",
+        "design": spec.get("design") or "other",
+        "population": {"description": spec.get("population") or "", "condition": "", "age": "", "setting": ""},
+        "intervention": {"name": spec.get("intervention") or "", "delivery": "", "dose": "", "duration": ""},
+        "comparator": {"name": spec.get("comparator") or "", "kind": "other"},
+        "outcomes": outcomes,
+        # The old free-text rows keep their wording as the purpose.
+        "statistics_needed": [
+            {"outcome": first, "statistics": [], "per": "each_arm", "timepoint": timepoint, "purpose": text}
+            for text in spec.get("statistics_needed") or []
+        ],
+        "stated_values": spec.get("stated_values") or [],
+        "inclusion_criteria": [{"about": "other", "rule": r} for r in spec.get("inclusion_criteria") or []],
+        "exclusion_criteria": [{"about": "other", "rule": r} for r in spec.get("exclusion_criteria") or []],
+        "search_terms": [{"concept": "other", "terms": list(spec["search_terms"])}] if spec.get("search_terms") else [],
+        "open_questions": spec.get("open_questions") or [],
+    }
 
 
 # The search runs from the top down: reviews first, then primary studies in the target population,
@@ -99,36 +213,6 @@ class ScreenDecision(BaseModel):
         "other",
     ]
     reports_relevant_outcome: Literal["yes", "no", "unclear"]
-
-
-Statistic = Literal[
-    "n",
-    "mean",
-    "sd",
-    "se",
-    "ci_lower",
-    "ci_upper",
-    "median",
-    "q1",
-    "q3",
-    "min",
-    "max",
-    "events",
-    "percent",
-    "mean_change",
-    "sd_change",
-    "mean_difference",
-    "standardized_mean_difference",
-    "odds_ratio",
-    "risk_ratio",
-    "hazard_ratio",
-    "risk_difference",
-    "p_value",
-    "t_statistic",
-    "icc",
-    "correlation",
-    "other",
-]
 
 
 class ReportedValue(BaseModel):

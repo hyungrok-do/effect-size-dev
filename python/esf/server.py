@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from .config import Settings
 from .llm import ClaudeLLM
 from .pipeline import Pipeline
-from .schemas import LEVEL_NAMES, SearchSpec
+from .schemas import LEVEL_NAMES, SearchSpec, upgrade_spec
 from .sources import Sources, europepmc_url
 from .store import RUNNING, Store
 
@@ -238,7 +238,7 @@ def create_app(
         get_paper(project_id, paper_id)
         if project["status"] in RUNNING:
             raise HTTPException(409, "Wait until the current run finishes.")
-        spec = SearchSpec.model_validate(project["spec"])
+        spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
         job = pipeline_for(x_anthropic_api_key)
         store.clear_decisions(paper_id)
         store.update_paper(paper_id, status="fetching", error=None)
@@ -287,5 +287,9 @@ def create_app(
         return JSONResponse(body, headers={"Content-Disposition": f'attachment; filename="effect-sizes-{project_id}.json"'})
 
     if settings.web_dir.is_dir():
+        # The page shares the browser edition's specification panel (site/lib/spec-panel.js).
+        site_lib = settings.web_dir.parent / "site" / "lib"
+        if site_lib.is_dir():
+            app.mount("/lib", StaticFiles(directory=site_lib), name="site-lib")
         app.mount("/", StaticFiles(directory=settings.web_dir, html=True), name="web")
     return app

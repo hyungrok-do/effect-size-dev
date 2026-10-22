@@ -41,14 +41,15 @@ def test_full_flow_over_http(tmp_path):
     assert client.post("/api/projects", json={"paragraph": "too short"}).status_code == 422
     project_id = client.post("/api/projects", json={"paragraph": "A randomized trial of a mindfulness app for PHQ-9."}).json()["id"]
     project = wait_for(client, project_id, {"spec_ready"})
-    assert project["spec"]["outcomes"] == ["PHQ-9"]
+    assert project["spec"]["outcomes"][0]["measure"] == "PHQ-9"
 
-    edited = {**SPEC.model_dump(), "timepoint": "8 to 12 weeks"}
+    edited = SPEC.model_dump()
+    edited["outcomes"][0]["timepoint"] = "8 to 12 weeks"
     assert client.put(f"/api/projects/{project_id}/spec", json=edited).status_code == 200
     assert client.post(f"/api/projects/{project_id}/run").status_code == 202
     project = wait_for(client, project_id, {"done", "error"})
     assert project["status"] == "done", project["error"]
-    assert project["spec"]["timepoint"] == "8 to 12 weeks"
+    assert project["spec"]["outcomes"][0]["timepoint"] == "8 to 12 weeks"
     assert project["counts"] == {"extracted": 8, "screened_out": 1}
     assert [e["level"] for e in project["search_log"]] == ["reviews", "primary", "full_text", "registry", "cited"]
     assert project["level_names"]["cited"] == "Cited by the included reviews"

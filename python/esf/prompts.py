@@ -7,6 +7,13 @@ and which statistics the published literature would need to supply for a sample-
 (for example per-arm means and SDs of the outcome at the primary timepoint, a control-group event \
 rate, a hazard ratio, an ICC for a cluster design, or a dropout rate).
 
+Fill each part separately and keep every field short: a phrase, not a sentence. Leave a field empty \
+when the paragraph says nothing about it rather than guessing. List one row in statistics_needed for \
+each outcome, grouping (each arm, between groups, one group) and timepoint the calculation needs, \
+naming the outcome exactly as in outcomes. Tag each screening rule with what it is about, and group \
+the search terms by concept (population, condition, intervention, outcome, and the design if useful), \
+with MeSH headings and instrument names in the group they belong to.
+
 Record only values the paragraph actually states, each with the sentence that states it. Do not \
 invent numbers. Where the paragraph is ambiguous (outcome instrument, timepoint, design, population), \
 make the most reasonable reading for the search and list the ambiguity under open_questions."""
@@ -18,7 +25,8 @@ start with the broadest evidence on the comparison and narrow step by step, chec
 you go, the way a librarian builds a PubMed search history.
 
 1. Concept blocks. Write one PubMed block for each concept: the intervention (or exposure), the \
-condition or outcome domain, and the population. A block ORs together the MeSH heading ([mh]) and \
+condition or outcome domain, and the population, starting from the specification's search terms, \
+which are grouped by concept. A block ORs together the MeSH heading ([mh]) and \
 free-text synonyms in the title and abstract ([tiab], truncated where useful, e.g. depress*[tiab]). \
 Check each block alone with count_pubmed; a block should match thousands of records, and one that \
 matches few has a syntax error or is too narrow. Never make a PubMed block from the comparator or \

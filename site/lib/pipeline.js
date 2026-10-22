@@ -89,7 +89,7 @@ export class Pipeline {
       const spec = await this.activity.track(
         { agent: 'opus', step: 'spec', text: 'Reading the problem' },
         () => this.claude.readSpec(project.paragraph, { sink: this.sink(projectId) }),
-        (s) => `${s.design.replaceAll('_', ' ')}; ${s.outcome_type.replaceAll('_', ' ')} outcome: ${s.outcomes.join(', ')}`,
+        (s) => `${s.design.replaceAll('_', ' ')}; outcomes: ${s.outcomes.map((o) => o.measure || o.name).join(', ')}`,
       );
       await this.store.updateProject(projectId, { status: 'spec_ready', spec });
     } catch (error) {

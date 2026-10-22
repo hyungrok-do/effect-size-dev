@@ -19,7 +19,7 @@ from . import prompts
 from .config import Settings
 from .fulltext import FullText, get_fulltext
 from .llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
-from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec
+from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
 from .sources import Record, SourceError, Sources, europepmc_pmid, europepmc_record, trial_record
 from .store import Store
 from .verify import Verification, escalation_reasons, in_audit_sample, verify
@@ -136,7 +136,7 @@ class Pipeline:
     def run(self, project_id: str) -> None:
         project = self.store.project(project_id)
         assert project is not None and project["spec"]
-        spec = SearchSpec.model_validate(project["spec"])
+        spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
         self.store.clear_papers(project_id)
         self.store.update_project(project_id, error=None, search_plan=None, search_log=None)
         try:

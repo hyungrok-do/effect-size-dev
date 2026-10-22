@@ -6,6 +6,7 @@
 <title>Effect Size Finder</title>
 <meta name="description" content="Describe a planned study; Claude searches PubMed and ClinicalTrials.gov and extracts the statistics papers report, each with its quote, for you to include or exclude.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232457c5' stroke-width='2.5' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/lib/spec-panel.css">
 <style>
   :root {
     --bg: #f6f6f3;
@@ -310,31 +311,9 @@
     <section id="spec" class="card" aria-labelledby="spec-title" hidden>
       <p class="eyebrow">Step 2</p>
       <h2 id="spec-title">Check what to look for</h2>
-      <p id="spec-question" class="summary"></p>
+      <p class="summary">How Opus read your paragraph. Edit anything it got wrong, then search.</p>
       <form id="spec-form" novalidate>
-        <fieldset>
-          <legend>The comparison</legend>
-          <div class="grid">
-            <div class="field"><label for="f-population">Population</label><input id="f-population" type="text"></div>
-            <div class="field"><label for="f-intervention">Intervention or exposure</label><input id="f-intervention" type="text"></div>
-            <div class="field"><label for="f-comparator">Comparator</label><input id="f-comparator" type="text"></div>
-            <div class="field"><label for="f-timepoint">Primary timepoint</label><input id="f-timepoint" type="text"></div>
-            <div class="field"><label for="f-design">Design</label><select id="f-design"></select></div>
-            <div class="field"><label for="f-outcome_type">Outcome type</label><select id="f-outcome_type"></select></div>
-            <div class="field wide"><label for="f-outcomes">Outcomes <span class="hint">One per line, primary first.</span></label><textarea id="f-outcomes" rows="2"></textarea></div>
-          </div>
-        </fieldset>
-        <fieldset>
-          <legend>What the papers should report</legend>
-          <div class="grid">
-            <div class="field wide"><label for="f-statistics_needed">Statistics to extract <span class="hint">One per line.</span></label><textarea id="f-statistics_needed" rows="3"></textarea></div>
-            <div class="field"><label for="f-inclusion_criteria">Include papers that… <span class="hint">One per line.</span></label><textarea id="f-inclusion_criteria" rows="3"></textarea></div>
-            <div class="field"><label for="f-exclusion_criteria">Exclude papers that… <span class="hint">One per line.</span></label><textarea id="f-exclusion_criteria" rows="3"></textarea></div>
-            <div class="field wide"><label for="f-search_terms">Search terms <span class="hint">Synonyms, MeSH terms, instrument names; one per line.</span></label><textarea id="f-search_terms" rows="3"></textarea></div>
-          </div>
-        </fieldset>
-        <div id="stated-wrap" hidden><h3 class="small">Values your paragraph states</h3><ul id="stated" class="stated"></ul></div>
-        <div id="questions-wrap" hidden><h3 class="small">Worth deciding</h3><ul id="questions" class="questions"></ul></div>
+        <div id="spec-panel"></div>
         <div class="actions">
           <button id="run" type="submit" class="primary">Search and extract</button>
           <span id="run-status" class="muted small" aria-live="polite"></span>

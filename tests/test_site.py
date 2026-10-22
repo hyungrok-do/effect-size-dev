@@ -24,6 +24,7 @@ from esf import prompts
 from esf.config import REPO_ROOT
 from esf.jats import jats_to_text
 from esf.sources import europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_results_text
+from esf.schemas import upgrade_spec
 from esf.verify import in_audit_sample, numbers_in, verify
 from fixtures import (
     ABSTRACT_LINE, EUROPEPMC, EUROPEPMC_QUERY, JATS, PDF_LINE, PLAN, PMC_ONLY, PREPRINT, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL,
@@ -36,6 +37,12 @@ if not (SITE / "vendor" / "anthropic-sdk.mjs").exists():
     pytest.skip("build the site first: cd site && npm ci && npm run build", allow_module_level=True)
 
 KEY = "sk-ant-test-site"
+# A specification saved before the structured fields.
+OLD_SPEC = {
+    "question": "Q?", "population": "Students", "intervention": "App", "comparator": "Waitlist", "outcomes": ["PHQ-9", "GAD-7"],
+    "timepoint": "12 weeks", "design": "parallel_rct", "outcome_type": "continuous", "statistics_needed": ["Mean and SD per arm"],
+    "stated_values": [], "inclusion_criteria": ["RCTs"], "exclusion_criteria": [], "search_terms": ["mindfulness"], "open_questions": [],
+}
 PDF_URL = "https://example.org/rct2.pdf"
 CORS = {"access-control-allow-origin": "*"}
 PREFLIGHT = {**CORS, "access-control-allow-headers": "*", "access-control-allow-methods": "GET, POST, OPTIONS"}
@@ -190,13 +197,14 @@ def test_browser_ports_match_python(browser, site_url):
     g_cases = [0, 1.5, 100.0, 1234567, 0.00001, 0.0001, -2.2, 12.345678, 1e21]
     data = {
         "jats": JATS, "trial": TRIAL, "pubmed": PUBMED_XML, "numbers": numbers, "keys": keys, "g": g_cases,
-        "europepmc": EUROPEPMC["resultList"]["result"][:3],
+        "europepmc": EUROPEPMC["resultList"]["result"][:3], "old_spec": OLD_SPEC,
         "verify": [[e.model_dump(), t, r] for e, t, r in cases],
     }
     result = page.evaluate("""async (data) => {
         const jats = await import('/lib/jats.js');
         const sources = await import('/lib/sources.js');
         const v = await import('/lib/verify.js');
+        const panel = await import('/lib/spec-panel.js');
         return {
             jats: jats.jatsToText(data.jats),
             trial: sources.trialResultsText(data.trial),
@@ -205,6 +213,7 @@ def test_browser_ports_match_python(browser, site_url):
             verify: data.verify.map(([e, t, r]) => v.verify(e, t, r)),
             audit: await Promise.all(data.keys.map((k) => v.inAuditSample(k, 0.1))),
             g: data.g.map(v.g),
+            upgraded: panel.upgradeSpec(data.old_spec),
             europepmc: data.europepmc.map((r) => [sources.europepmcPmid(r), sources.europepmcPmid(r) ? null : sources.europepmcRecord(r),
                                                     sources.europepmcUrl(String(r.id))]),
         };
@@ -216,6 +225,7 @@ def test_browser_ports_match_python(browser, site_url):
     assert result["verify"] == [verify(e, t, r).to_dict() for e, t, r in cases]
     assert result["audit"] == [in_audit_sample(k, 0.1) for k in keys]
     assert result["g"] == [format(x, "g") for x in g_cases]
+    assert result["upgraded"] == upgrade_spec(OLD_SPEC)
     assert result["europepmc"] == [
         [europepmc_pmid(r), None if europepmc_pmid(r) else asdict(europepmc_record(r)), europepmc_url(str(r["id"]))]
         for r in data["europepmc"]
@@ -277,22 +287,34 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert page.get_attribute("#tab-problem", "aria-selected") == "true"
     page.click("#read")
     page.wait_for_selector("#spec:not([hidden])")
-    # What to look for reads as a summary; each box is edited in place, and Done keeps the edit.
+    # What to look for: the specification as structured tables, each part edited in place.
     assert page.inner_text("#spec-question") == SPEC.question
-    assert "University students" in page.inner_text("#pico") and page.is_hidden("#f-population")
-    page.click("#box-comparison .edit-box")
-    assert page.input_value("#f-population") == "University students"
-    page.fill("#f-population", "Undergraduate students")
-    page.press("#f-population", "Enter")  # finishes the edit; doesn't start the search
-    assert page.is_hidden("#f-population") and "Undergraduate students" in page.inner_text("#pico")
+    comparison = page.locator("[data-part='comparison']")
+    assert "University students" in comparison.inner_text() and "Setting Universities" in " ".join(comparison.inner_text().split())
+    numbers = page.locator("[data-part='numbers'] tbody tr").first.locator("td").all_inner_texts()
+    assert numbers == ["Depressive symptoms", "Mean · SD · n", "Each arm", "12 weeks", "The difference and its SD"], numbers
+    comparison.locator(".edit-box").click()
+    assert page.input_value("#spec-population-description") == "University students"
+    page.fill("#spec-population-description", "Undergraduate students")
+    page.press("#spec-population-description", "Enter")  # finishes the edit; doesn't start the search
+    assert page.locator("#spec-population-description").count() == 0 and "Undergraduate students" in comparison.inner_text()
     assert page.is_visible("#spec") and page.get_attribute("#tab-spec", "aria-selected") == "true"
     page.wait_for_function("""async () => {
         const { Store } = await import('/lib/store.js');
-        return (await new Store().project(location.hash.slice(1))).spec.population === 'Undergraduate students';
+        return (await new Store().project(location.hash.slice(1))).spec.population.description === 'Undergraduate students';
     }""")
-    page.click("#box-screening summary")
-    assert "Animal studies" in page.inner_text("#exclude-view")
-    assert page.inner_text("#screening-count") == "1 to include · 1 to exclude"
+    # A statistic the tool doesn't know keeps the editor open until it is fixed.
+    page.locator("[data-part='numbers'] .edit-box").click()
+    find = page.locator("[data-part='numbers'] input[aria-label='Find']").first
+    find.fill("Mean, SD, n, wobble")
+    page.locator("[data-part='numbers'] .edit-box").click()
+    assert page.get_attribute("[data-part='numbers']", "data-editing") == "true"
+    find.fill("Mean, SD, n, Mean difference")
+    page.locator("[data-part='numbers'] .edit-box").click()
+    assert "Mean · SD · n · Mean difference" in page.inner_text("[data-part='numbers']")
+    page.click("[data-part='screening'] summary")
+    assert "Animal studies" in page.inner_text("[data-part='screening']")
+    assert "1 to include · 1 to exclude" in page.inner_text("[data-part='screening'] summary")
     page.click("#run")
     # The page shows the search while it runs and moves on to the review when it finishes (it only
     # does that when the search tab is the one open, so this also shows the search tab was followed).
@@ -373,7 +395,10 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.wait_for_selector("#review:not([hidden]) .paper")
     assert page.locator(".result[data-decision='include']").count() == 1
     assert page.input_value("#api-key") == KEY
-    assert page.input_value("#f-population") == "Undergraduate students"
+    assert page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().project(location.hash.slice(1))).spec.statistics_needed[0].statistics;
+    }""") == ["mean", "sd", "n", "mean_difference"]
 
     page.locator(".paper", has_text="A mindfulness app for depressive").locator("button", has_text="Show source text").click()
     page.wait_for_selector("#source-text mark")
@@ -398,7 +423,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
             assert "fallbacks" not in body, step
         else:
             assert body["fallbacks"] == "default" and "server-side-fallback-2026-07-01" in headers.get("anthropic-beta", ""), step
-    assert '"population": "Undergraduate students"' in steps["SEARCH"][1]["messages"][0]["content"]  # the edit was searched
+    assert '"description": "Undergraduate students"' in steps["SEARCH"][1]["messages"][0]["content"]  # the edit was searched
     fetch = steps["FETCH"][1]
     assert fetch["tools"] == [{"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 1}]
     assert PDF_URL in fetch["messages"][0]["content"]

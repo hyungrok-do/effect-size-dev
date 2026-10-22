@@ -10,13 +10,20 @@ from urllib.parse import parse_qs
 import httpx
 
 from esf.schemas import (
+    Comparator,
+    Criterion,
+    Intervention,
+    NeededStatistic,
+    Outcome,
     OutcomeResult,
     PaperExtraction,
+    Population,
     ReportedValue,
     ScreenDecision,
     SearchLevel,
     SearchPlan,
     SearchSpec,
+    TermGroup,
 )
 
 PUBMED_XML = """<?xml version="1.0" ?>
@@ -333,18 +340,17 @@ def mock_client(handler: LiteratureAPIs) -> httpx.Client:
 
 SPEC = SearchSpec(
     question="Does a mindfulness app reduce PHQ-9 at 12 weeks versus waitlist in students?",
-    population="University students",
-    intervention="Mindfulness app",
-    comparator="Waitlist",
-    outcomes=["PHQ-9"],
-    timepoint="12 weeks",
     design="parallel_rct",
-    outcome_type="continuous",
-    statistics_needed=["Mean and SD of PHQ-9 at 12 weeks per arm"],
+    population=Population(description="University students", condition="", age="", setting="Universities"),
+    intervention=Intervention(name="Mindfulness app", delivery="Smartphone app", dose="", duration="12 weeks"),
+    comparator=Comparator(name="Waitlist", kind="waitlist"),
+    outcomes=[Outcome(name="Depressive symptoms", measure="PHQ-9", role="primary", type="continuous", timepoint="12 weeks")],
+    statistics_needed=[NeededStatistic(outcome="Depressive symptoms", statistics=["mean", "sd", "n"], per="each_arm",
+                                       timepoint="12 weeks", purpose="The difference and its SD")],
     stated_values=[],
-    inclusion_criteria=["Randomized trials in students"],
-    exclusion_criteria=["Animal studies"],
-    search_terms=["mindfulness", "PHQ-9"],
+    inclusion_criteria=[Criterion(about="design", rule="Randomized trials in students")],
+    exclusion_criteria=[Criterion(about="population", rule="Animal studies")],
+    search_terms=[TermGroup(concept="intervention", terms=["mindfulness"]), TermGroup(concept="outcome", terms=["PHQ-9"])],
     open_questions=[],
 )
 

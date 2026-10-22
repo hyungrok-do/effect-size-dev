@@ -1,31 +1,10 @@
 // Effect Size Finder: the page. Talks to the JSON API in python/esf/server.py.
 
+import { SpecPanel, STATISTICS } from '/lib/spec-panel.js';
+
 const RUNNING = new Set(['reading', 'searching', 'screening', 'extracting']);
-const DESIGNS = {
-  parallel_rct: 'Parallel-group randomized trial',
-  cluster_rct: 'Cluster randomized trial',
-  crossover_rct: 'Crossover trial',
-  single_arm: 'Single-arm study',
-  cohort: 'Cohort study',
-  case_control: 'Case–control study',
-  cross_sectional: 'Cross-sectional study',
-  other: 'Other',
-};
-const OUTCOME_TYPES = {
-  continuous: 'Continuous', binary: 'Binary', count: 'Count',
-  time_to_event: 'Time to event', ordinal: 'Ordinal', unclear: 'Unclear',
-};
-const TEXT_FIELDS = ['population', 'intervention', 'comparator', 'timepoint'];
-const LIST_FIELDS = ['outcomes', 'statistics_needed', 'inclusion_criteria', 'exclusion_criteria', 'search_terms'];
 const TEXT_KIND = {
   registry: 'Registry results', pmc_xml: 'PMC full text', oa_pdf: 'Open-access PDF', abstract: 'Abstract only',
-};
-const STATISTICS = {
-  n: 'n', mean: 'Mean', sd: 'SD', se: 'SE', ci_lower: 'CI lower', ci_upper: 'CI upper', median: 'Median',
-  q1: 'Q1', q3: 'Q3', min: 'Min', max: 'Max', events: 'Events', percent: '%', mean_change: 'Mean change',
-  sd_change: 'SD of change', mean_difference: 'Mean difference', standardized_mean_difference: 'SMD',
-  odds_ratio: 'Odds ratio', risk_ratio: 'Risk ratio', hazard_ratio: 'Hazard ratio', risk_difference: 'Risk difference',
-  p_value: 'p', t_statistic: 't', icc: 'ICC', correlation: 'Correlation', other: 'Other',
 };
 const POPULATIONS = {
   itt: 'ITT', modified_itt: 'Modified ITT', per_protocol: 'Per protocol', completers: 'Completers', unclear: 'Population unclear',
@@ -153,7 +132,6 @@ function showError(el, message) {
   el.hidden = !message;
 }
 
-const lines = (text) => text.split('\n').map((s) => s.trim()).filter(Boolean);
 const statusLabel = (status) => ({
   new: 'new', reading: 'reading the problem', spec_ready: 'ready to search', searching: 'searching',
   screening: 'screening', extracting: 'extracting', done: 'done', error: 'stopped with an error',
@@ -266,10 +244,18 @@ async function readProblem() {
 
 // -- step 2 ----------------------------------------------------------------------
 
-function fillSelect(select, options) {
-  if (select.options.length) return;
-  for (const [value, label] of Object.entries(options)) select.append(h('option', { value }, label));
-}
+// The specification, as structured tables edited one part at a time (shared with the browser
+// edition); an edit is saved with the search.
+const specPanel = new SpecPanel($('#spec-panel'), {
+  onSave: async (spec) => {
+    state.specKey = JSON.stringify(spec); // already shown: the redraw after saving leaves the panel as it is
+    try {
+      await api(`/api/projects/${state.id}/spec`, { method: 'PUT', body: spec });
+    } catch (error) {
+      $('#run-status').textContent = error.message;
+    }
+  },
+});
 
 function renderSpec(project) {
   const card = $('#spec');
@@ -278,46 +264,29 @@ function renderSpec(project) {
     return;
   }
   card.hidden = false;
-  const spec = project.spec;
-  const key = JSON.stringify(spec);
+  const key = JSON.stringify(project.spec);
   if (key !== state.specKey) {
     state.specKey = key;
-    fillSelect($('#f-design'), DESIGNS);
-    fillSelect($('#f-outcome_type'), OUTCOME_TYPES);
-    $('#spec-question').textContent = spec.question;
-    for (const f of TEXT_FIELDS) $(`#f-${f}`).value = spec[f] || '';
-    for (const f of LIST_FIELDS) $(`#f-${f}`).value = (spec[f] || []).join('\n');
-    $('#f-design').value = spec.design;
-    $('#f-outcome_type').value = spec.outcome_type;
-    $('#stated-wrap').hidden = !spec.stated_values.length;
-    $('#stated').replaceChildren(...spec.stated_values.map((v) => h('li', {}, `${v.parameter}: ${v.value} — “${v.quote}”`)));
-    $('#questions-wrap').hidden = !spec.open_questions.length;
-    $('#questions').replaceChildren(...spec.open_questions.map((q) => h('li', {}, q)));
+    specPanel.show(project.spec);
   }
   const running = RUNNING.has(project.status);
-  for (const el of $('#spec-form').elements) el.disabled = running;
+  specPanel.disabled = running;
+  $('#run').disabled = running;
   const hasPapers = Object.keys(project.counts || {}).length > 0;
   $('#run').textContent = hasPapers ? 'Search again' : 'Search and extract';
   $('#run-status').textContent = hasPapers && !running ? 'Searching again replaces the papers and decisions below.' : '';
-}
-
-function collectSpec() {
-  const spec = { ...state.project.spec };
-  for (const f of TEXT_FIELDS) spec[f] = $(`#f-${f}`).value.trim();
-  for (const f of LIST_FIELDS) spec[f] = lines($(`#f-${f}`).value);
-  spec.design = $('#f-design').value;
-  spec.outcome_type = $('#f-outcome_type').value;
-  return spec;
 }
 
 async function runSearch(event) {
   event.preventDefault();
   const hasPapers = Object.keys(state.project.counts || {}).length > 0;
   if (!haveKey()) return;
+  const spec = specPanel.collect();
+  if (!spec) return; // an open edit has a value to fix; the panel says which
   if (hasPapers && !confirm('Search again? This replaces the papers and your decisions for this search.')) return;
   $('#run').disabled = true;
   try {
-    await api(`/api/projects/${state.id}/spec`, { method: 'PUT', body: collectSpec() });
+    await api(`/api/projects/${state.id}/spec`, { method: 'PUT', body: spec });
     await api(`/api/projects/${state.id}/run`, { method: 'POST', withKey: true });
     state.papersKey = '';
     await refresh();

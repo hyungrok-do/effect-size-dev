@@ -76,7 +76,7 @@ def test_manager_steps_run_on_opus_with_fallbacks():
         ("sse", streamed("claude-opus-5-5", SPEC.model_dump())),
         ("sse", streamed("claude-opus-5-5", EXTRACTION)),
     ])
-    assert llm.read_spec("A paragraph.").outcomes == ["PHQ-9"]
+    assert llm.read_spec("A paragraph.").outcomes[0].measure == "PHQ-9"
     llm.adjudicate(SPEC, DOC, None, ["the worker could not complete the extraction"])
     (spec_req, spec), (_, adjudicate) = api.requests
     assert spec["model"] == adjudicate["model"] == "claude-opus-5-5"

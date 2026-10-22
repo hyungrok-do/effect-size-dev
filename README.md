@@ -29,7 +29,7 @@ reader and registry formatting are ports of the Python ones, and the tests requi
 ```
 paragraph
   ▼
-OPUS    Read the problem → search specification (PICO, design, outcome type, statistics needed)
+OPUS    Read the problem → structured specification (PICO parts, outcomes, numbers to find, rules, terms)
 YOU     Check and edit the specification
 OPUS    Plan the search from the top down: concept blocks, hit counts, then one query per level
 CODE    Run the levels in order (reviews → target population → full text → wider), then ClinicalTrials.gov
@@ -196,10 +196,15 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 
 Each step has its own tab: **Setup** (your Anthropic API key, a contact email and an optional NCBI
 key), **Describe**, **What to look for**, **Search** and **Review**. The page opens at Setup until
-it has a key. **What to look for** shows how Opus read your paragraph: the question in one sentence,
-anything worth deciding before the search, the comparison and the numbers to find, with the
-screening rules and search terms folded away. Each box has its own **Edit**, and an edit is kept
-with the search. It moves to the next tab when a step finishes, unless you have switched tabs in the
+it has a key. **What to look for** shows how Opus read your paragraph, as a structured specification: the
+question in one sentence, anything worth deciding before the search, then one table per part: the
+comparison (population with its condition, age and setting; intervention with its delivery, dose
+and duration; the comparator and its kind; the design), the outcomes (role, measure, type, when),
+the numbers to find (outcome, statistics, per arm or between groups, when, and what each is for),
+the values your paragraph states, the screening rules (include or exclude, and what each is about)
+and the search terms grouped by concept, which Opus starts its concept blocks from. Each part has
+its own **Edit**, and an edit is kept with the search. Searches saved before the specification
+was structured are converted when they are opened. It moves to the next tab when a step finishes, unless you have switched tabs in the
 meantime. Papers from PubMed and ClinicalTrials.gov records are counted and reviewed separately,
 and each paper says how it was found (as a review, in the target population, cited by a review…).
 

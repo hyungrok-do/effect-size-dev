@@ -26,3 +26,22 @@ def test_an_older_database_gains_the_new_columns(tmp_path):
     assert store.project("p1")["search_log"] == [{"level": "primary", "hits": 4}]
     assert store.papers("p1")[0]["found_in"] == ["primary"]
     Store(path)  # opening it again changes nothing
+
+
+def test_an_older_specification_is_upgraded():
+    from esf.schemas import SearchSpec, upgrade_spec
+
+    old = {
+        "question": "Q?", "population": "Students", "intervention": "App", "comparator": "Waitlist",
+        "outcomes": ["PHQ-9", "GAD-7"], "timepoint": "12 weeks", "design": "parallel_rct", "outcome_type": "continuous",
+        "statistics_needed": ["Mean and SD of PHQ-9 per arm"], "stated_values": [], "inclusion_criteria": ["RCTs"],
+        "exclusion_criteria": ["Animals"], "search_terms": ["mindfulness", "PHQ-9"], "open_questions": ["Which scale?"],
+    }
+    spec = SearchSpec.model_validate(upgrade_spec(old))
+    assert spec.population.description == "Students" and spec.comparator.kind == "other"
+    assert [(o.name, o.role, o.type, o.timepoint) for o in spec.outcomes] == [
+        ("PHQ-9", "primary", "continuous", "12 weeks"), ("GAD-7", "secondary", "continuous", "12 weeks"),
+    ]
+    assert spec.statistics_needed[0].purpose == "Mean and SD of PHQ-9 per arm" and spec.statistics_needed[0].outcome == "PHQ-9"
+    assert spec.search_terms[0].terms == ["mindfulness", "PHQ-9"]
+    assert upgrade_spec(spec.model_dump()) == spec.model_dump()  # a current one is left as it is

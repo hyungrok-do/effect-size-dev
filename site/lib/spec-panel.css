@@ -1,0 +1,74 @@
+/* The specification panel (spec-panel.js): a readable summary first, then one box per part, each a
+   table that is edited in place. Uses the page's color tokens. */
+
+.spec-question { margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: var(--accent-soft); }
+.spec-question .question { margin: 0; font-size: 17px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+.spec-question .badge.accent { background: var(--surface); }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
+
+.callout { margin-top: 14px; padding: 12px 16px; border-radius: 12px; border: 1px solid var(--line); }
+.callout.warn { background: var(--warn-soft); border-color: transparent; }
+.callout h3 { font-size: 14.5px; }
+.callout.warn h3 { color: var(--warn); }
+.callout ul { margin: 6px 0 0; padding-left: 20px; font-size: 14px; color: var(--ink); }
+.callout li + li { margin-top: 4px; }
+
+.spec-box { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.spec-box[data-editing="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.box-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.box-head h3 { font-size: 15.5px; }
+.box-head p { margin: 0; }
+details.spec-box > .box-head { margin-top: 10px; }
+details.spec-box summary { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; cursor: pointer; font-weight: 600; font-size: 15.5px; list-style: none; }
+details.spec-box summary::-webkit-details-marker { display: none; }
+details.spec-box summary::before { content: '▸'; color: var(--muted); width: 12px; }
+details.spec-box[open] summary::before { content: '▾'; }
+details.spec-box summary > span:first-of-type { white-space: nowrap; }
+.spec-box .empty { margin: 10px 0 0; }
+
+/* Tables: a header row of labels, one row per item. */
+.spec-box .table-wrap { margin-top: 10px; }
+.spec-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.spec-table th { font-size: 12.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
+.spec-table th, .spec-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.spec-table tbody tr:last-child > * { border-bottom: 0; }
+.spec-table td { overflow-wrap: break-word; }
+.spec-table td[data-label="When"], .spec-table td[data-label="For"], .spec-table td[data-label="Concept"] { white-space: nowrap; }
+.spec-table .missing { color: var(--muted); font-style: italic; font-weight: 400; }
+.spec-table q.quote { color: var(--ink-2); font-size: 13px; quotes: '“' '”'; }
+/* The comparison: a label column, then what it is, with its parts in small type. */
+.spec-table.kv { margin-top: 10px; }
+.spec-table.kv th { width: 9em; padding-left: 0; text-transform: none; letter-spacing: 0; font-size: 14px; font-weight: 500; }
+.spec-table.kv td { padding-right: 0; }
+.facets { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 3px; font-size: 13px; color: var(--ink-2); }
+.facets .k { color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.chips li { padding: 1px 9px; border-radius: 999px; background: var(--surface-2); font-size: 13px; }
+
+/* Editors. */
+.fields-editor fieldset { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; }
+.fields-editor legend { padding: 0; margin-bottom: 6px; font-size: 12.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+.rows-editor { margin-top: 10px; }
+.row-cards { display: grid; gap: 8px; }
+.row-card { display: flex; gap: 10px; align-items: flex-end; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.row-fields { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 10px; }
+.row-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 12.5px; font-weight: 400; color: var(--ink-2); }
+.row-field.wide { grid-column: 1 / -1; }
+.row-field input, .row-field select { font-size: 14px; padding: 6px 8px; background: var(--bg); }
+.row-card .remove { flex: none; }
+.rows-editor .add-row { margin-top: 8px; }
+.spec-box input:invalid { border-color: var(--error); }
+
+/* On a phone each row becomes a small card of labeled lines. */
+@media (max-width: 800px) {
+  .spec-table thead { display: none; }
+  .spec-table, .spec-table tbody, .spec-table tr, .spec-table td, .spec-table th { display: block; width: auto; }
+  .spec-table tr { padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .spec-table tbody tr:last-child { border-bottom: 0; }
+  .spec-table th, .spec-table td { padding: 2px 0; border: 0; }
+  /* Label and value side by side. */
+  .spec-table td[data-label] { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 10px; align-items: baseline; white-space: normal; }
+  .spec-table td[data-label]::before { content: attr(data-label); font-size: 12px; color: var(--muted); }
+  .row-card { flex-direction: column; align-items: stretch; }
+  .row-card .remove { align-self: flex-end; }
+}
