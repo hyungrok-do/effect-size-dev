@@ -168,11 +168,6 @@
   }
   textarea { resize: vertical; line-height: 1.45; }
   #paragraph { min-height: 150px; margin-top: 14px; }
-  fieldset { border: 0; margin: 0 0 18px; padding: 0; min-width: 0; }
-  legend {
-    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
-    padding: 0; margin-bottom: 8px;
-  }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px 18px; }
   .field { min-width: 0; }
   .field.wide { grid-column: 1 / -1; }
@@ -195,6 +190,44 @@
   .notice { padding: 10px 14px; border-radius: 10px; background: var(--accent-soft); color: var(--ink-2); font-size: 14px; margin: 14px 0 0; }
   .error { border: 1px solid var(--error); background: var(--error-soft); border-radius: 10px; padding: 10px 14px; overflow-wrap: anywhere; margin: 12px 0 0; }
   .stated, .questions { margin: 6px 0 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; }
+
+  /* What to look for: a readable summary first, details in boxes that open and edit one at a time. */
+  .spec-question { margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: var(--accent-soft); }
+  .spec-question .question { margin: 0; font-size: 17px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
+  .spec-question .badge.accent { background: var(--surface); }
+  .callout { margin-top: 14px; padding: 12px 16px; border-radius: 12px; border: 1px solid var(--line); }
+  .callout.warn { background: var(--warn-soft); border-color: transparent; }
+  .callout h3 { font-size: 14.5px; }
+  .callout.warn h3 { color: var(--warn); }
+  .callout ul { margin: 6px 0 0; padding-left: 20px; font-size: 14px; color: var(--ink); }
+  .callout li + li { margin-top: 4px; }
+  .stated .quote { display: block; color: var(--muted); font-size: 12.5px; }
+  .spec-box { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; }
+  .box-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .box-head h3 { font-size: 15.5px; }
+  .box-head p { margin: 0; }
+  details.spec-box > .box-head { margin-top: 10px; }
+  details.spec-box summary { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; cursor: pointer; font-weight: 600; font-size: 15.5px; list-style: none; }
+  details.spec-box summary > span:first-of-type { white-space: nowrap; }
+  details.spec-box summary::-webkit-details-marker { display: none; }
+  details.spec-box summary::before { content: '▸'; color: var(--muted); width: 12px; }
+  details.spec-box[open] summary::before { content: '▾'; }
+  .spec-box[data-editing="false"] .edit, .spec-box[data-editing="true"] .view { display: none; }
+  .spec-box[data-editing="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .spec-box .edit { margin-top: 12px; }
+  .pico { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 20px; margin: 12px 0 0; }
+  .pico dt { color: var(--muted); font-size: 14px; }
+  .pico dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+  .pico .also { display: block; font-weight: 400; color: var(--ink-2); font-size: 13.5px; }
+  .pico .missing { font-weight: 400; color: var(--muted); font-style: italic; }
+  .numbers { margin: 10px 0 0; padding-left: 20px; }
+  .numbers li + li { margin-top: 4px; }
+  .rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 24px; margin-top: 10px; }
+  .rules h4 { font-size: 13.5px; color: var(--ink-2); }
+  .rules ul { margin: 6px 0 0; padding-left: 20px; font-size: 14px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+  .chips li { padding: 2px 10px; border-radius: 999px; background: var(--surface-2); font-size: 13.5px; }
 
   .stages { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
   .stages li {
@@ -358,6 +391,8 @@
     .steps .num { width: 24px; height: 24px; font-size: 12px; }
     .steps .count, .steps .flag, .steps .live-dot { top: 3px; right: 3px; }
     .steps .flag { position: absolute; top: 5px; right: 5px; font-size: 0; width: 9px; height: 9px; padding: 0; background: var(--warn); }
+    .pico { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+    .pico dd + dt { margin-top: 8px; }
     .funnel td, .funnel th { padding: 7px 6px; }
     .funnel td.level, .funnel thead th:first-child, .funnel caption { padding-left: 10px; }
     .funnel thead th { font-size: 12.5px; }
@@ -453,31 +488,64 @@
 
     <section id="spec" class="card" role="tabpanel" aria-labelledby="tab-spec" hidden>
       <h2 id="spec-title">Check what to look for</h2>
-      <p id="spec-question" class="summary"></p>
+      <p class="summary">How Opus read your paragraph. Edit anything it got wrong, then search.</p>
       <form id="spec-form" novalidate>
-        <fieldset>
-          <legend>The comparison</legend>
-          <div class="grid">
-            <div class="field"><label for="f-population">Population</label><input id="f-population" type="text"></div>
-            <div class="field"><label for="f-intervention">Intervention or exposure</label><input id="f-intervention" type="text"></div>
-            <div class="field"><label for="f-comparator">Comparator</label><input id="f-comparator" type="text"></div>
-            <div class="field"><label for="f-timepoint">Primary timepoint</label><input id="f-timepoint" type="text"></div>
+        <div class="spec-question">
+          <p id="spec-question" class="question"></p>
+          <p id="spec-tags" class="tags"></p>
+        </div>
+
+        <div id="questions-wrap" class="callout warn" hidden>
+          <h3 id="questions-title">Worth deciding before you search</h3>
+          <ul id="questions"></ul>
+        </div>
+
+        <section id="box-comparison" class="spec-box" data-editing="false" aria-labelledby="box-comparison-title">
+          <div class="box-head"><h3 id="box-comparison-title">The comparison</h3><button type="button" class="secondary small edit-box">Edit</button></div>
+          <dl id="pico" class="view pico"></dl>
+          <div class="edit grid">
+            <div class="field wide"><label for="f-question">In one sentence</label><input id="f-question" type="text"></div>
+            <div class="field wide"><label for="f-population">Population</label><input id="f-population" type="text"></div>
+            <div class="field wide"><label for="f-intervention">Intervention or exposure</label><input id="f-intervention" type="text"></div>
+            <div class="field"><label for="f-comparator">Compared with</label><input id="f-comparator" type="text"></div>
+            <div class="field"><label for="f-timepoint">When it is measured</label><input id="f-timepoint" type="text"></div>
             <div class="field"><label for="f-design">Design</label><select id="f-design"></select></div>
             <div class="field"><label for="f-outcome_type">Outcome type</label><select id="f-outcome_type"></select></div>
-            <div class="field wide"><label for="f-outcomes">Outcomes <span class="hint">One per line, primary first.</span></label><textarea id="f-outcomes" rows="2"></textarea></div>
+            <div class="field wide"><label for="f-outcomes">Outcomes <span class="hint">One per line, primary first.</span></label><textarea id="f-outcomes" rows="3"></textarea></div>
           </div>
-        </fieldset>
-        <fieldset>
-          <legend>What the papers should report</legend>
-          <div class="grid">
-            <div class="field wide"><label for="f-statistics_needed">Statistics to extract <span class="hint">One per line.</span></label><textarea id="f-statistics_needed" rows="3"></textarea></div>
-            <div class="field"><label for="f-inclusion_criteria">Include papers that… <span class="hint">One per line.</span></label><textarea id="f-inclusion_criteria" rows="3"></textarea></div>
-            <div class="field"><label for="f-exclusion_criteria">Exclude papers that… <span class="hint">One per line.</span></label><textarea id="f-exclusion_criteria" rows="3"></textarea></div>
-            <div class="field wide"><label for="f-search_terms">Search terms <span class="hint">Synonyms, MeSH terms, instrument names; one per line.</span></label><textarea id="f-search_terms" rows="3"></textarea></div>
+        </section>
+
+        <section id="box-numbers" class="spec-box" data-editing="false" aria-labelledby="box-numbers-title">
+          <div class="box-head"><h3 id="box-numbers-title">Numbers to find</h3><button type="button" class="secondary small edit-box">Edit</button></div>
+          <ul id="numbers" class="view numbers"></ul>
+          <div class="edit"><div class="field"><label for="f-statistics_needed">Statistics to extract <span class="hint">One per line.</span></label><textarea id="f-statistics_needed" rows="3"></textarea></div></div>
+        </section>
+
+        <div id="stated-wrap" class="callout" hidden>
+          <h3>Values your paragraph states</h3>
+          <ul id="stated" class="stated"></ul>
+        </div>
+
+        <details id="box-screening" class="spec-box" data-editing="false">
+          <summary><span>Screening rules</span><span id="screening-count" class="muted small"></span></summary>
+          <div class="box-head"><p class="muted small">How Haiku decides which titles and abstracts to keep.</p><button type="button" class="secondary small edit-box">Edit</button></div>
+          <div class="view rules">
+            <div><h4>Include papers that…</h4><ul id="include-view"></ul></div>
+            <div><h4>Exclude papers that…</h4><ul id="exclude-view"></ul></div>
           </div>
-        </fieldset>
-        <div id="stated-wrap" hidden><h3 class="small">Values your paragraph states</h3><ul id="stated" class="stated"></ul></div>
-        <div id="questions-wrap" hidden><h3 class="small">Worth deciding</h3><ul id="questions" class="questions"></ul></div>
+          <div class="edit grid">
+            <div class="field"><label for="f-inclusion_criteria">Include papers that… <span class="hint">One per line.</span></label><textarea id="f-inclusion_criteria" rows="4"></textarea></div>
+            <div class="field"><label for="f-exclusion_criteria">Exclude papers that… <span class="hint">One per line.</span></label><textarea id="f-exclusion_criteria" rows="4"></textarea></div>
+          </div>
+        </details>
+
+        <details id="box-terms" class="spec-box" data-editing="false">
+          <summary><span>Search terms</span><span id="terms-count" class="muted small"></span></summary>
+          <div class="box-head"><p class="muted small">Synonyms, MeSH terms and instrument names Opus starts the search from.</p><button type="button" class="secondary small edit-box">Edit</button></div>
+          <ul id="terms" class="view chips"></ul>
+          <div class="edit"><div class="field"><label for="f-search_terms">Search terms <span class="hint">One per line.</span></label><textarea id="f-search_terms" rows="4"></textarea></div></div>
+        </details>
+
         <div class="actions">
           <button id="run" type="submit" class="primary">Search and extract</button>
           <span id="run-status" class="muted small" aria-live="polite"></span>

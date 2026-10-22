@@ -23,7 +23,7 @@ const OUTCOME_TYPES = {
   continuous: 'Continuous', binary: 'Binary', count: 'Count',
   time_to_event: 'Time to event', ordinal: 'Ordinal', unclear: 'Unclear',
 };
-const TEXT_FIELDS = ['population', 'intervention', 'comparator', 'timepoint'];
+const TEXT_FIELDS = ['question', 'population', 'intervention', 'comparator', 'timepoint'];
 const LIST_FIELDS = ['outcomes', 'statistics_needed', 'inclusion_criteria', 'exclusion_criteria', 'search_terms'];
 const TEXT_KIND = {
   registry: 'Registry results', pmc_xml: 'PMC full text', oa_pdf: 'Open-access PDF', abstract: 'Abstract only', upload: 'Your PDF',
@@ -560,21 +560,69 @@ function renderSpec(project) {
     state.specKey = key;
     fillSelect($('#f-design'), DESIGNS);
     fillSelect($('#f-outcome_type'), OUTCOME_TYPES);
-    $('#spec-question').textContent = spec.question;
     for (const f of TEXT_FIELDS) $(`#f-${f}`).value = spec[f] || '';
     for (const f of LIST_FIELDS) $(`#f-${f}`).value = (spec[f] || []).join('\n');
     $('#f-design').value = spec.design;
     $('#f-outcome_type').value = spec.outcome_type;
     $('#stated-wrap').hidden = !spec.stated_values.length;
-    $('#stated').replaceChildren(...spec.stated_values.map((v) => h('li', {}, `${v.parameter}: ${v.value} — “${v.quote}”`)));
+    $('#stated').replaceChildren(...spec.stated_values.map((v) => h('li', {},
+      `${v.parameter}: ${v.value}`, h('span', { class: 'quote' }, `“${v.quote}”`))));
     $('#questions-wrap').hidden = !spec.open_questions.length;
     $('#questions').replaceChildren(...spec.open_questions.map((q) => h('li', {}, q)));
+    for (const box of document.querySelectorAll('#spec .spec-box')) setEditing(box, false);
+    renderSpecView();
   }
   const running = jobs.has(project.id);
   for (const el of $('#spec-form').elements) el.disabled = running;
   const hasPapers = state.papers.length > 0;
   $('#run').textContent = hasPapers ? 'Search again' : 'Search and extract';
   $('#run-status').textContent = hasPapers && !running ? 'Searching again replaces the papers and decisions below.' : '';
+}
+
+// The readable view of the specification. It is drawn from the fields, so it shows edits too.
+function renderSpecView() {
+  const spec = collectSpec();
+  const value = (text) => text || h('span', { class: 'missing' }, 'Not stated');
+  const items = (list, none) => (list.length ? list.map((x) => h('li', {}, x)) : [h('li', { class: 'muted' }, none)]);
+  const [primary, ...also] = spec.outcomes;
+  $('#spec-question').textContent = spec.question;
+  $('#spec-tags').replaceChildren(badge(DESIGNS[spec.design] || spec.design, 'accent'),
+    badge(`${OUTCOME_TYPES[spec.outcome_type] || spec.outcome_type} outcome`, 'accent'));
+  $('#pico').replaceChildren(
+    h('dt', {}, 'Population'), h('dd', {}, value(spec.population)),
+    h('dt', {}, 'Intervention'), h('dd', {}, value(spec.intervention)),
+    h('dt', {}, 'Compared with'), h('dd', {}, value(spec.comparator)),
+    h('dt', {}, 'Outcome'), h('dd', {}, value(primary), also.length > 0 && h('span', { class: 'also' }, `Also: ${also.join('; ')}`)),
+    h('dt', {}, 'When'), h('dd', {}, value(spec.timepoint)),
+  );
+  $('#numbers').replaceChildren(...items(spec.statistics_needed, 'None listed yet.'));
+  $('#include-view').replaceChildren(...items(spec.inclusion_criteria, 'No rule.'));
+  $('#exclude-view').replaceChildren(...items(spec.exclusion_criteria, 'No rule.'));
+  $('#screening-count').textContent = `${spec.inclusion_criteria.length} to include · ${spec.exclusion_criteria.length} to exclude`;
+  $('#terms').replaceChildren(...items(spec.search_terms, 'None yet.'));
+  $('#terms-count').textContent = String(spec.search_terms.length);
+}
+
+function setEditing(box, editing) {
+  box.dataset.editing = String(editing);
+  const button = box.querySelector('.edit-box');
+  button.textContent = editing ? 'Done' : 'Edit';
+  button.setAttribute('aria-expanded', String(editing));
+}
+
+// Edit opens a box's fields; Done shows the result and keeps it with the search, so a reload or a
+// later search uses it.
+async function toggleEdit(box) {
+  if (box.dataset.editing !== 'true') {
+    setEditing(box, true);
+    box.querySelector('.edit input, .edit textarea, .edit select')?.focus();
+    return;
+  }
+  setEditing(box, false);
+  renderSpecView();
+  const spec = collectSpec();
+  state.specKey = JSON.stringify(spec); // already shown: the redraw after saving leaves the boxes as they are
+  await store.updateProject(state.id, { spec });
 }
 
 function collectSpec() {
@@ -988,6 +1036,16 @@ async function exportJson() {
 async function start() {
   $('#read').addEventListener('click', readProblem);
   $('#spec-form').addEventListener('submit', runSearch);
+  for (const box of document.querySelectorAll('#spec .spec-box')) {
+    box.querySelector('.edit-box').addEventListener('click', () => toggleEdit(box));
+    // Enter in a one-line field finishes that box's edit rather than starting the search.
+    box.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && event.target.matches('input')) {
+        event.preventDefault();
+        toggleEdit(box);
+      }
+    });
+  }
   $('#new-project').addEventListener('click', newSearch);
   $('#delete-project').addEventListener('click', deleteProject);
   $('#continue').addEventListener('click', continueSearch);

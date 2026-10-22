@@ -277,7 +277,22 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert page.get_attribute("#tab-problem", "aria-selected") == "true"
     page.click("#read")
     page.wait_for_selector("#spec:not([hidden])")
+    # What to look for reads as a summary; each box is edited in place, and Done keeps the edit.
+    assert page.inner_text("#spec-question") == SPEC.question
+    assert "University students" in page.inner_text("#pico") and page.is_hidden("#f-population")
+    page.click("#box-comparison .edit-box")
     assert page.input_value("#f-population") == "University students"
+    page.fill("#f-population", "Undergraduate students")
+    page.press("#f-population", "Enter")  # finishes the edit; doesn't start the search
+    assert page.is_hidden("#f-population") and "Undergraduate students" in page.inner_text("#pico")
+    assert page.is_visible("#spec") and page.get_attribute("#tab-spec", "aria-selected") == "true"
+    page.wait_for_function("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().project(location.hash.slice(1))).spec.population === 'Undergraduate students';
+    }""")
+    page.click("#box-screening summary")
+    assert "Animal studies" in page.inner_text("#exclude-view")
+    assert page.inner_text("#screening-count") == "1 to include · 1 to exclude"
     page.click("#run")
     # The page shows the search while it runs and moves on to the review when it finishes (it only
     # does that when the search tab is the one open, so this also shows the search tab was followed).
@@ -358,6 +373,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.wait_for_selector("#review:not([hidden]) .paper")
     assert page.locator(".result[data-decision='include']").count() == 1
     assert page.input_value("#api-key") == KEY
+    assert page.input_value("#f-population") == "Undergraduate students"
 
     page.locator(".paper", has_text="A mindfulness app for depressive").locator("button", has_text="Show source text").click()
     page.wait_for_selector("#source-text mark")
@@ -382,6 +398,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
             assert "fallbacks" not in body, step
         else:
             assert body["fallbacks"] == "default" and "server-side-fallback-2026-07-01" in headers.get("anthropic-beta", ""), step
+    assert '"population": "Undergraduate students"' in steps["SEARCH"][1]["messages"][0]["content"]  # the edit was searched
     fetch = steps["FETCH"][1]
     assert fetch["tools"] == [{"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 1}]
     assert PDF_URL in fetch["messages"][0]["content"]

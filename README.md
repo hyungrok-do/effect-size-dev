@@ -196,7 +196,10 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 
 Each step has its own tab: **Setup** (your Anthropic API key, a contact email and an optional NCBI
 key), **Describe**, **What to look for**, **Search** and **Review**. The page opens at Setup until
-it has a key. It moves to the next tab when a step finishes, unless you have switched tabs in the
+it has a key. **What to look for** shows how Opus read your paragraph: the question in one sentence,
+anything worth deciding before the search, the comparison and the numbers to find, with the
+screening rules and search terms folded away. Each box has its own **Edit**, and an edit is kept
+with the search. It moves to the next tab when a step finishes, unless you have switched tabs in the
 meantime. Papers from PubMed and ClinicalTrials.gov records are counted and reviewed separately,
 and each paper says how it was found (as a review, in the target population, cited by a review…).
 
