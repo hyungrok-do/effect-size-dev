@@ -527,10 +527,49 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     # The registry record's values are listed, marked as the same participants as its paper.
     registry_rows = need.locator("tbody tr", has_text="same participants as")
     assert registry_rows.count() > 0 and all("Mindfulness App" in t for t in registry_rows.all_inner_texts())
+    # Each study links to its page: a paper to PubMed or Europe PMC, a registry record to ClinicalTrials.gov.
+    studies = need.locator("tbody tr td:first-child a")
+    assert studies.count() == arms
+    hrefs = studies.evaluate_all("links => links.map((a) => [a.textContent, a.href, a.target])")
+    assert all(target == "_blank" for _, _, target in hrefs)
+    assert all(href.startswith(("https://pubmed.ncbi.nlm.nih.gov/", "https://europepmc.org/", "https://clinicaltrials.gov/study/NCT"))
+               for _, href, _ in hrefs), hrefs
+    assert registry_rows.first.locator("a").get_attribute("href") == "https://clinicaltrials.gov/study/NCT01234567"
+    # Records the text names by key are linked too, and so are those in the overlap list.
+    named = page.locator("#summary-body .summary-overview a")
+    assert named.count() == 1 and named.inner_text().startswith("R") and named.get_attribute("href").startswith("https://")
+    assert page.locator("#summary-body .summary-block li a").count() >= 5
     assert "one study reported more than once" in body and "No dropout rates." in body
     assert page.locator("#summary-body details summary").inner_text().startswith("Every value kept (")
     # The agent panel shows the number with its key, not the bare key.
     assert "the largest SD is 4.5 [V" in page.inner_text("#activity")
+
+    # The whole agent activity log exports, oldest first: a row per step with when it ran, the models
+    # that served it, its tokens and its whole outcome; the JSON says which steps were part of which.
+    total = page.locator("#timeline li").count()
+    assert page.inner_text("#log-count") == f"Full log: {total} steps" and not page.is_visible("#timeline-all")
+    with page.expect_download() as download:
+        page.click("#export-log-csv")
+    assert download.value.suggested_filename == f"agent-log-{page.url.split('#')[1]}.csv"
+    log = list(csv.DictReader(io.StringIO(open(download.value.path(), encoding="utf-8").read())))
+    assert len(log) == total and [r["at"] for r in log] == sorted(r["at"] for r in log)
+    assert list(log[0]) == ["at", "started", "agent", "models", "step", "phase", "job", "parent", "paper_id", "paper_title",
+                            "text", "detail", "ms", "calls", "input_tokens", "output_tokens"]
+    summarized = next(r for r in log if r["step"] == "summarize")
+    assert summarized["agent"] == "opus" and summarized["models"] == OPUS and int(summarized["input_tokens"]) > 0
+    assert summarized["started"] <= summarized["at"] and summarized["phase"] == "done"
+    read = next(r for r in log if r["step"] == "extract" and "Brief mindfulness" in r["text"])
+    assert read["models"] == HAIKU and read["paper_title"].startswith("Brief mindfulness") and "PHQ-9" in read["detail"]
+    with page.expect_download() as download:
+        page.click("#export-log-json")
+    exported = json.loads(open(download.value.path(), encoding="utf-8").read())
+    events = exported["events"]
+    assert exported["search"]["id"] == page.url.split("#")[1] and exported["agents"]["opus"] == "Opus 5.5"
+    assert len(events) == total and "project_id" not in events[0]
+    jobs = {e["job"] for e in events}
+    searches = [e for e in events if e["parent"]]  # the searches Opus ran while planning
+    assert searches and all(e["parent"] in jobs for e in searches)
+    assert {next(x for x in events if x["job"] == e["parent"])["step"] for e in searches} == {"search"}
     # A decision made after the summary marks it out of date.
     page.click("#tab-review")
     open_paper(page, "Brief mindfulness training").locator(".result").first.locator("button.exclude").click()

@@ -534,7 +534,8 @@ class FakeLLM:
             comparison = f"The SDs run from [{sds[0]['key']}] to [{sds[-1]['key']}]." if sds else "No SD is reported."
             needs.append(NeedSummary(need=need.purpose, values=keys, comparison=comparison))
         return EvidenceSummary(
-            overview=f"{len(evidence['records'])} records report PHQ-9 in students; the largest SD is [{direct_sds[-1]['key']}]."
+            overview=f"{len(evidence['records'])} records report PHQ-9 in students; the largest SD is [{direct_sds[-1]['key']}], "
+            f"in {direct_sds[-1]['record']}."
             if direct_sds else f"{len(evidence['records'])} records report PHQ-9 in students.",
             needs=needs,
             overlap="The registry record reports the same participants as its paper.",

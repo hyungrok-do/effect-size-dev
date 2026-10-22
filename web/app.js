@@ -634,7 +634,7 @@ function renderSummary(project) {
   showError($('#summary-error'), summary?.status === 'error' ? summary.error : '');
   const decisions = Object.fromEntries(state.papers.map((p) => [p.id, p.decisions || {}]));
   $('#summary-body').replaceChildren(...(summary?.status === 'done'
-    ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions })
+    ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions, linksOf: (p) => p.links })
     : running ? [] : [h('p', { class: 'muted' },
       'Review the papers first: the summary uses every result you included or left undecided, and none you excluded.')]));
 }

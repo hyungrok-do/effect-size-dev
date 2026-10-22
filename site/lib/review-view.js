@@ -107,30 +107,52 @@ export function overlapNote(paper, report, papers) {
     g.use === mine ? 'Use this record’s numbers.' : g.use ? `Use the numbers of ${name(g.use)} instead.` : ''))));
 }
 
-// A record as the summary names it: key, first author and year.
-function who(record, papers) {
-  const p = papers.find((x) => `R${x.id}` === record);
-  return p ? `${record} ${(p.authors || '').split(',')[0] || short(p.title || '', 40)} ${p.year || ''}`.trim() : record;
+// Where each source's records are linked: a paper to the database it was found in, a registry
+// record to its ClinicalTrials.gov page.
+const SOURCE_LINKS = { pubmed: 'PubMed', europepmc: 'Europe PMC' };
+
+// How the summary names and links records: by key, first author and year, linked to the record's
+// page. `linksOf(paper)` gives a paper's links, {label: url}, as its card in the review shows them.
+function studies(papers, linksOf) {
+  const byKey = new Map(papers.map((p) => [`R${p.id}`, p]));
+  const name = (record) => {
+    const p = byKey.get(record);
+    return p ? `${record} ${(p.authors || '').split(',')[0] || short(p.title || '', 40)} ${p.year || ''}`.trim() : record;
+  };
+  const url = (p) => {
+    const links = linksOf(p) || {};
+    return links[p.source === 'clinicaltrials' ? p.ext_id : SOURCE_LINKS[p.source]]
+      || links.PubMed || links.PMC || links.DOI || Object.values(links)[0] || null;
+  };
+  // A record as a link to its page, showing `text` (its name by default), with its title on hover.
+  const link = (record, text = name(record)) => {
+    const p = byKey.get(record);
+    const href = p && url(p);
+    return href ? h('a', { href, target: '_blank', rel: 'noopener', title: p.title || '' }, text) : h('span', { title: p?.title || '' }, text);
+  };
+  return { has: (record) => byKey.has(record), name, link };
 }
 
 // What a value is, in words.
-function describeValue(v, papers) {
+function describeValue(v, study) {
   return `${STATISTICS[v.statistic] || v.statistic} of ${v.outcome}${v.timepoint ? ` at ${v.timepoint}` : ''}, ${v.group}`
-    + `${v.n != null ? ` (n = ${v.n})` : ''}, ${who(v.record, papers)}`;
+    + `${v.n != null ? ` (n = ${v.n})` : ''}, ${study.name(v.record)}`;
 }
 
-// Text from the model with [V3]-style keys shown as the values they name.
-function withValues(text, values, papers) {
-  return String(text || '').split(/(\[V\d+\])/).map((part) => {
+// Text from the model with [V3]-style keys shown as the values they name, and records it names by
+// key (R12) linked to their pages.
+function withValues(text, values, study) {
+  return String(text || '').split(/(\[V\d+\]|\bR\d+\b)/).map((part) => {
+    if (study.has(part)) return study.link(part, part);
     const v = /^\[V\d+\]$/.test(part) && values.get(part.slice(1, -1));
-    return v ? h('span', { class: 'cand', title: `${v.key}: ${describeValue(v, papers)}` }, String(v.value), ' ', h('span', { class: 'cand-src' }, v.record)) : part;
+    return v ? h('span', { class: 'cand', title: `${v.key}: ${describeValue(v, study)}` }, String(v.value), ' ', h('span', { class: 'cand-src' }, v.record)) : part;
   });
 }
 
 // The values for one number to find, one row per study arm (record, outcome, timepoint and group)
 // and a column per statistic, in the order the summary lists them. A value whose quote was not found
 // is marked in its cell and in the row's check.
-function armTable(list, papers) {
+function armTable(list, study) {
   const rows = new Map();
   for (const v of list) {
     const id = JSON.stringify([v.record, v.outcome, v.timepoint, v.group]);
@@ -143,10 +165,9 @@ function armTable(list, papers) {
   return h('div', { class: 'table-wrap' }, h('table', { class: 'value-table' },
     h('thead', {}, h('tr', {}, ['Study', 'Outcome', 'Group', ...statistics.map((st) => STATISTICS[st]), 'Check'].map((t) => h('th', {}, t)))),
     h('tbody', {}, [...rows.values()].map(({ first, cells }) => {
-      const paper = papers.find((x) => `R${x.id}` === first.record);
       const unchecked = statistics.filter((st) => (cells.get(st) || []).some((v) => !v.quote_found));
       return h('tr', {},
-        h('td', { title: paper?.title || '' }, who(first.record, papers)),
+        h('td', {}, study.link(first.record)),
         h('td', {}, first.outcome, first.timepoint ? h('span', { class: 'sub' }, first.timepoint) : null),
         h('td', {}, first.group),
         statistics.map((st) => h('td', { class: 'num' }, (cells.get(st) || []).flatMap((v, i) => [
@@ -160,32 +181,31 @@ function armTable(list, papers) {
 }
 
 // Every value, one row each, with its key.
-function valueTable(list, papers) {
+function valueTable(list, study) {
   return h('div', { class: 'table-wrap' }, h('table', { class: 'value-table' },
     h('thead', {}, h('tr', {}, ['Key', 'Study', 'Outcome', 'Group', 'Statistic', 'Value', 'n', 'Check'].map((t) => h('th', {}, t)))),
-    h('tbody', {}, list.map((v) => {
-      const paper = papers.find((x) => `R${x.id}` === v.record);
-      return h('tr', {},
-        h('td', {}, v.key),
-        h('td', { title: paper?.title || '' }, who(v.record, papers)),
-        h('td', {}, v.outcome, v.timepoint ? h('span', { class: 'sub' }, v.timepoint) : null),
-        h('td', {}, v.group),
-        h('td', {}, STATISTICS[v.statistic] || v.statistic),
-        h('td', { class: 'num' }, String(v.value)),
-        h('td', { class: 'num' }, v.n == null ? '' : String(v.n)),
-        h('td', {}, badge(v.quote_found ? 'quote found' : 'quote not found', v.quote_found ? 'ok' : 'warn'),
-          v.same_participants_as && [' ', badge(`same participants as ${v.same_participants_as}`, 'warn')]));
-    }))));
+    h('tbody', {}, list.map((v) => h('tr', {},
+      h('td', {}, v.key),
+      h('td', {}, study.link(v.record)),
+      h('td', {}, v.outcome, v.timepoint ? h('span', { class: 'sub' }, v.timepoint) : null),
+      h('td', {}, v.group),
+      h('td', {}, STATISTICS[v.statistic] || v.statistic),
+      h('td', { class: 'num' }, String(v.value)),
+      h('td', { class: 'num' }, v.n == null ? '' : String(v.n)),
+      h('td', {}, badge(v.quote_found ? 'quote found' : 'quote not found', v.quote_found ? 'ok' : 'warn'),
+        v.same_participants_as && [' ', badge(`same participants as ${v.same_participants_as}`, 'warn')]))))));
 }
 
 // The summary: an overview, then for each number the plan needs the values that bear on it side by
 // side with how they compare, then overlap, caveats and gaps. Nothing is combined or recommended.
-// `decisions` is {paperId: {resultIndex: {decision}}}, to tell when the summary is out of date.
-export function summaryView({ summary, overlap, papers, decisions }) {
+// Each study is linked to its page through `linksOf(paper)`, {label: url}. `decisions` is
+// {paperId: {resultIndex: {decision}}}, to tell when the summary is out of date.
+export function summaryView({ summary, overlap, papers, decisions, linksOf }) {
   const { result, evidence } = summary;
   const values = new Map(evidence.values.map((v) => [v.key, v]));
+  const study = studies(papers, linksOf);
   const stale = JSON.stringify(decisionsBasis(papers, decisions)) !== JSON.stringify(summary.basis);
-  const text = (t) => withValues(t, values, papers);
+  const text = (t) => withValues(t, values, study);
   const groups = overlap?.groups || [];
   return [
     stale && h('p', { class: 'notice stale' }, 'Your decisions have changed since this was written. Write it again to use them.'),
@@ -194,17 +214,19 @@ export function summaryView({ summary, overlap, papers, decisions }) {
       const list = need.values.map((k) => values.get(k)).filter(Boolean);
       return h('div', { class: 'summary-block need' }, h('h3', {}, need.need),
         h('p', {}, text(need.comparison)),
-        list.length ? armTable(list, papers) : h('p', { class: 'muted' }, 'No reported value bears on this.'));
+        list.length ? armTable(list, study) : h('p', { class: 'muted' }, 'No reported value bears on this.'));
     }),
     (groups.length > 0 || result.overlap) && h('div', { class: 'summary-block' }, h('h3', {}, 'Overlap'),
       result.overlap && h('p', {}, text(result.overlap)),
       groups.length > 0 && h('ul', {}, groups.map((g) => h('li', {},
-        `${g.records.join(', ')}: ${RELATIONS[g.relation]?.[1] || g.relation}. ${g.evidence}${g.use ? ` Use ${g.use}.` : ''}`)))),
+        g.records.flatMap((r, i) => [i ? ', ' : '', study.link(r, r)]),
+        `: ${RELATIONS[g.relation]?.[1] || g.relation}. ${g.evidence}`,
+        g.use && [' Use ', study.link(g.use, g.use), '.'])))),
     result.caveats.length > 0 && h('div', { class: 'summary-block' }, h('h3', {}, 'Check before using them'),
       h('ul', {}, result.caveats.map((x) => h('li', {}, text(x))))),
     result.gaps.length > 0 && h('div', { class: 'summary-block' }, h('h3', {}, 'What the sources don’t give'),
       h('ul', {}, result.gaps.map((x) => h('li', {}, text(x))))),
     h('details', { class: 'summary-block' }, h('summary', {}, `Every value kept (${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')})`),
-      valueTable(evidence.values, papers)),
+      valueTable(evidence.values, study)),
   ].filter(Boolean);
 }

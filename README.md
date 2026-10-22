@@ -219,9 +219,15 @@ checking): which paper or query, how long it has run and the tokens it has used 
 searches Opus runs while planning shown under the planning job, and how far the current batch has
 got (screening 14 of 60). An idle agent shows its last job and how it ended. Below is a timeline of
 every finished job with its tokens and its outcome: the screening decision and reason, the numbers
-an extraction found, the queries of the search plan. It is filtered by agent. This costs nothing
-extra: it comes from the calls the search makes anyway.
-The timeline is saved with the search. On wide screens the panel sits beside the steps; on
+an extraction found, the queries of the search plan. It is filtered by agent, shows the latest 250
+jobs and the rest on request. This costs nothing extra: it comes from the calls the search makes
+anyway. The timeline is saved with the search.
+
+**Export log** downloads the whole log, oldest first, as CSV (a row per job) or JSON: when each job
+started and finished, the agent and the models that served its calls, the step, the paper it was
+about, what it was, its whole outcome or error, how long it took, and its calls and tokens. Each job
+has an id, and the searches Opus runs while planning name the planning job as their parent. The
+search's JSON export includes the log too. On wide screens the panel sits beside the steps; on
 narrower ones it opens over the page from **Agent activity** at the top.
 
 ## Reviewing
@@ -266,7 +272,9 @@ each number the plan needs, the values that bear on it side by side, one row per
 column per statistic (n, mean, SD, ...), whether each quote was found and which arms share
 participants, with Opus's note on how they compare: which match the planned measure, timepoint and population, how widely they vary, and
 which come from larger or better reported studies. Overlap, what to check before using the values,
-and what the sources don't give come last, with a table of every value kept. Opus writes values'
+and what the sources don't give come last, with a table of every value kept. Each study, in the
+tables and wherever the text names it by key (R12), links to its PubMed, Europe PMC or
+ClinicalTrials.gov page. Opus writes values'
 keys rather than numbers (the SDs run from [V4] to [V9]), and the page shows the numbers as the
 papers print them. If you change a decision afterwards, the page says the summary is out of date
 until you write it again.

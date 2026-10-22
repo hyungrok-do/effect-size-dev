@@ -346,6 +346,9 @@
   .filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; }
   .filter button { font: inherit; font-size: 12.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--field-line); background: transparent; color: var(--ink-2); cursor: pointer; }
   .filter button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .log-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 8px; }
+  .log-tools #log-count { margin-right: auto; }
+  #timeline-all { margin-top: 10px; }
   .timeline { list-style: none; margin: 0; padding: 0; }
   .timeline li { position: relative; padding: 7px 0 7px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
   .timeline li::before { content: ''; position: absolute; left: 2px; top: 13px; width: 7px; height: 7px; border-radius: 50%; background: var(--agent); }
@@ -555,7 +558,13 @@
     <p class="muted small" id="activity-empty">Open a search to see what the agents are doing.</p>
     <div id="agents" class="agents"></div>
     <div id="activity-filter" class="filter" role="group" aria-label="Show steps by"></div>
+    <div id="log-tools" class="log-tools" hidden>
+      <span id="log-count" class="muted small"></span>
+      <button id="export-log-csv" type="button" class="secondary small">Export log: CSV</button>
+      <button id="export-log-json" type="button" class="secondary small">JSON</button>
+    </div>
     <ol id="timeline" class="timeline" aria-live="off"></ol>
+    <button id="timeline-all" type="button" class="secondary small" hidden></button>
   </aside>
 </div>
 

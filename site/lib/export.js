@@ -44,7 +44,26 @@ const cell = (v) => {
   return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 };
 
-export const toCsv = (rows) => [COLUMNS.join(','), ...rows.map((r) => COLUMNS.map((c) => cell(r[c])).join(','))].join('\r\n') + '\r\n';
+export const csvOf = (columns, rows) => [columns.join(','), ...rows.map((r) => columns.map((c) => cell(r[c])).join(','))].join('\r\n') + '\r\n';
+export const toCsv = (rows) => csvOf(COLUMNS, rows);
+
+// The agent activity log: one row per finished step or note, oldest first. `job` and `parent` say
+// which steps were part of which (Opus's searches while it planned); `models` are the models its
+// calls were served by; tokens count input with cache reads and writes.
+export const LOG_COLUMNS = [
+  'at', 'started', 'agent', 'models', 'step', 'phase', 'job', 'parent', 'paper_id', 'paper_title', 'text', 'detail',
+  'ms', 'calls', 'input_tokens', 'output_tokens',
+];
+
+export function logRows(events, papers) {
+  const titles = new Map(papers.map((p) => [p.id, p.title || p.ext_id]));
+  return events.map((e) => ({
+    at: e.at, started: e.started || '', agent: e.agent, models: (e.models || []).join('; '), step: e.step, phase: e.phase,
+    job: e.job || '', parent: e.parent || '', paper_id: e.paper_id ?? '', paper_title: titles.get(e.paper_id) || '',
+    text: e.text, detail: e.detail || '', ms: e.ms ?? '', calls: e.usage?.calls ?? '', input_tokens: e.usage?.input ?? '',
+    output_tokens: e.usage?.output ?? '',
+  }));
+}
 
 export function download(name, text, type) {
   const url = URL.createObjectURL(new Blob([text], { type }));

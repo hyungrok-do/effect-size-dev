@@ -3,7 +3,7 @@
 
 import { Activity, liveTasks, short } from './lib/activity.js';
 import { Claude, looksLikeAnthropicKey, MODELS } from './lib/claude.js';
-import { download, exportRows, PAPER, toCsv } from './lib/export.js';
+import { csvOf, download, exportRows, LOG_COLUMNS, logRows, PAPER, toCsv } from './lib/export.js';
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
 import { europepmcUrl, Sources } from './lib/sources.js';
@@ -62,7 +62,7 @@ const store = new Store();
 const jobs = new Set(); // projects and papers with work running in this tab
 const state = {
   id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
-  uploadFor: null, step: 'setup', stepChosen: false, source: 'papers', filter: 'all',
+  uploadFor: null, step: 'setup', stepChosen: false, source: 'papers', filter: 'all', timelineAll: false,
   available: { setup: true, problem: true, spec: false, progress: false, review: false, summary: false },
   reviewAt: {}, // `${source}:${tab}` -> the paper id shown there
 };
@@ -514,8 +514,34 @@ function renderActivity() {
       type: 'button', 'aria-pressed': String(state.filter === key), 'data-agent': key === 'all' ? null : key,
       onclick: () => { state.filter = key; renderActivity(); },
     }, `${label} ${counts[key] || 0}`)));
-  const shown = state.events.filter((e) => state.filter === 'all' || e.agent === state.filter).slice(0, 250);
+  // The latest steps; the whole log on request, and always in the export.
+  const matching = state.events.filter((e) => state.filter === 'all' || e.agent === state.filter);
+  const shown = state.timelineAll ? matching : matching.slice(0, TIMELINE_SHOWN);
   $('#timeline').replaceChildren(...(shown.length ? shown.map(timelineItem) : state.id ? [h('li', { class: 'muted' }, 'Nothing has happened yet.')] : []));
+  $('#log-tools').hidden = !state.events.length;
+  $('#log-count').textContent = `Full log: ${plural(state.events.length, 'step')}`;
+  $('#timeline-all').hidden = matching.length <= TIMELINE_SHOWN;
+  $('#timeline-all').textContent = state.timelineAll ? `Show the latest ${TIMELINE_SHOWN}` : `Show all ${matching.length}`;
+}
+const TIMELINE_SHOWN = 250;
+
+// The whole agent activity log of the open search, oldest first, as CSV (a row per step) or JSON.
+async function exportLog(format) {
+  const id = state.id;
+  const events = (await store.events(id)).reverse();
+  const name = `agent-log-${id}`;
+  if (format === 'csv') {
+    download(`${name}.csv`, csvOf(LOG_COLUMNS, logRows(events, state.papers)), 'text/csv');
+    return;
+  }
+  const titles = new Map(state.papers.map((p) => [p.id, p.title || p.ext_id]));
+  const body = {
+    search: { id, created_at: state.project.created_at, paragraph: state.project.paragraph },
+    exported_at: new Date().toISOString(),
+    agents: AGENT_NAMES,
+    events: events.map(({ project_id: _, ...e }) => ({ ...e, paper_title: titles.get(e.paper_id) ?? null })),
+  };
+  download(`${name}.json`, JSON.stringify(body, null, 2), 'application/json');
 }
 
 // One finished step: when, who, how long and how many tokens, what it was, and what came of it.
@@ -784,7 +810,7 @@ function renderSummary(project) {
     : jobs.has(project.id) ? 'Wait until the search finishes.' : '';
   showError($('#summary-error'), summary?.status === 'error' ? summary.error : '');
   $('#summary-body').replaceChildren(...(summary?.status === 'done'
-    ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions: state.decisions })
+    ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions: state.decisions, linksOf: links })
     : running ? [] : [h('p', { class: 'muted' },
       'Review the papers first: the summary uses every result you included or left undecided, and none you excluded.')]));
 }
@@ -1033,7 +1059,8 @@ function exportCsv(includedOnly) {
 async function exportJson() {
   const { id, created_at, paragraph, spec, search_plan, search_log, overlap, summary } = state.project;
   const papers = state.papers.map((p) => ({ ...p, decisions: state.decisions[p.id] || {}, links: links(p) }));
-  const body = { project: { id, created_at, paragraph, spec, search_plan, search_log, overlap, summary }, papers, usage: state.usage };
+  const activity = (await store.events(id)).reverse().map(({ project_id: _, ...e }) => e);
+  const body = { project: { id, created_at, paragraph, spec, search_plan, search_log, overlap, summary }, papers, usage: state.usage, activity };
   download(`effect-sizes-${id}.json`, JSON.stringify(body, null, 2), 'application/json');
 }
 
@@ -1057,6 +1084,9 @@ async function start() {
   $('#export-all').addEventListener('click', () => exportCsv(false));
   $('#export-json').addEventListener('click', exportJson);
   $('#summarize').addEventListener('click', writeSummary);
+  $('#export-log-csv').addEventListener('click', () => exportLog('csv'));
+  $('#export-log-json').addEventListener('click', () => exportLog('json'));
+  $('#timeline-all').addEventListener('click', () => { state.timelineAll = !state.timelineAll; renderActivity(); });
   document.addEventListener('keydown', reviewKeys);
   for (const step of STEPS) {
     $(`#tab-${step}`).addEventListener('click', () => selectStep(step));

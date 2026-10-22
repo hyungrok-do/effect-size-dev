@@ -5,9 +5,12 @@
 
 import { describeError } from './claude.js';
 
-const live = new Map(); // projectId -> Map(taskId -> {id, agent, step, text, started, parent, usage})
+const live = new Map(); // projectId -> Map(taskId -> {id, agent, step, text, started, parent, usage, models})
 let nextId = 1;
-const MAX_DETAIL = 600; // characters of a step's outcome kept in the log
+// A step's id in the log: unique across page loads, so the log can say which steps were part of which.
+const RUN = Date.now().toString(36);
+const jobId = (id) => (id == null ? null : `${RUN}-${id}`);
+const MAX_DETAIL = 20000; // characters of a step's outcome kept in the log: all of it, short of a runaway
 
 // Steps of a search that are running now, oldest first.
 export const liveTasks = (projectId) => [...(live.get(projectId)?.values() || [])];
@@ -50,7 +53,7 @@ export class Activity {
     const id = nextId++;
     if (!live.has(this.projectId)) live.set(this.projectId, new Map());
     const tasks = live.get(this.projectId);
-    const task = { id, agent, step, text, started: Date.now(), parent: this.parent, usage: null };
+    const task = { id, agent, step, text, started: Date.now(), parent: this.parent, usage: null, models: new Set() };
     tasks.set(id, task);
     this.liveChanged();
     const handle = {
@@ -60,22 +63,27 @@ export class Activity {
         u.input += (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
         u.output += usage.output_tokens || 0;
         u.calls += 1;
+        if (model) task.models.add(model);
         this.liveChanged();
         return sink?.(callStep, model, usage);
       },
     };
     const started = performance.now();
-    const ms = () => Math.round(performance.now() - started);
+    const entry = (phase, detail) => ({
+      agent, step, phase, text, detail: clip(detail), ms: Math.round(performance.now() - started), paper_id: paperId,
+      usage: task.usage, models: [...task.models], job: jobId(id), parent: jobId(this.parent),
+      started: new Date(task.started).toISOString(),
+    });
     try {
       const result = await work(handle);
       let detail = '';
       try {
         detail = summarize ? summarize(result) : '';
       } catch { /* a summary is optional */ }
-      await this.log({ agent, step, phase: 'done', text, detail: clip(detail), ms: ms(), paper_id: paperId, usage: task.usage });
+      await this.log(entry('done', detail));
       return result;
     } catch (error) {
-      await this.log({ agent, step, phase: 'error', text, detail: clip(describeError(error)), ms: ms(), paper_id: paperId, usage: task.usage });
+      await this.log(entry('error', describeError(error)));
       throw error;
     } finally {
       tasks.delete(id);
@@ -84,7 +92,7 @@ export class Activity {
   }
 
   note({ agent, step, text, detail = '', paperId = null, phase = 'note' }) {
-    return this.log({ agent, step, phase, text, detail: clip(detail), ms: null, paper_id: paperId });
+    return this.log({ agent, step, phase, text, detail: clip(detail), ms: null, paper_id: paperId, job: jobId(nextId++), parent: jobId(this.parent) });
   }
 }
 

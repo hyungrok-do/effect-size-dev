@@ -227,7 +227,7 @@ export class Store extends EventTarget {
 
   // -- agent activity ---------------------------------------------------------------
 
-  // event: {agent, step, phase: 'done' | 'error' | 'note', text, detail, ms, paper_id}
+  // event: {agent, step, phase: 'done' | 'error' | 'note', text, detail, ms, paper_id, usage, models, job, parent, started}
   async addEvent(projectId, event) {
     await this.tx('events', 'readwrite', ({ events }) => request(events.add({
       project_id: projectId, at: new Date().toISOString(), ...event,
@@ -235,19 +235,10 @@ export class Store extends EventTarget {
     this.changed(projectId);
   }
 
-  // The latest events of a search, newest first.
-  async events(projectId, limit = 400) {
-    return this.tx('events', 'readonly', ({ events }) => new Promise((resolve, reject) => {
-      const out = [];
-      const cursor = events.index('project').openCursor(IDBKeyRange.only(projectId), 'prev');
-      cursor.onsuccess = () => {
-        const c = cursor.result;
-        if (!c || out.length >= limit) return resolve(out);
-        out.push(c.value);
-        c.continue();
-      };
-      cursor.onerror = () => reject(cursor.error);
-    }));
+  // Every event of a search, newest first.
+  async events(projectId) {
+    const all = await this.tx('events', 'readonly', ({ events }) => request(events.index('project').getAll(IDBKeyRange.only(projectId))));
+    return all.reverse();
   }
 
   // -- documents ------------------------------------------------------------------
