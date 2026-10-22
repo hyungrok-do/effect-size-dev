@@ -30,14 +30,17 @@ def test_parse_pubmed_xml():
     assert records["33333333"].authors == ""
     # Every author with their affiliations, for the review's author table.
     assert first.author_list == [
-        {"name": "Jisoo Kim", "affiliation": "Department of Psychiatry, Seoul National University, Seoul, Korea."},
-        {"name": "Sun Lee", "affiliation": "College of Nursing, Yonsei University, Seoul, Korea.; Mind Health Institute, Seoul, Korea."},
-        {"name": "H Park", "affiliation": ""}, {"name": "Y Choi", "affiliation": ""},
+        {"name": "Jisoo Kim", "affiliations": ["Department of Psychiatry, Seoul National University, Seoul, Korea."]},
+        {"name": "Sun Lee", "affiliations": ["College of Nursing, Yonsei University, Seoul, Korea.", "Mind Health Institute, Seoul, Korea."]},
+        # Two institutions run together with footnote markers and an email address, then one of them again.
+        {"name": "H Park", "affiliations": ["Department of Statistics, Example University, Seoul, Korea",
+                                            "Biostatistics Unit, Example Hospital, Seoul, Korea."]},
+        {"name": "Y Choi", "affiliations": []},
     ]
-    assert records["22222222"].author_list == [{"name": "Mindful Students Trial Group", "affiliation": ""}]
+    assert records["22222222"].author_list == [{"name": "Mindful Students Trial Group", "affiliations": []}]
     assert records["33333333"].author_list == []
     # A name published in error (ValidYN="N") is left out.
-    assert records["55555555"].author_list == [{"name": "M Garcia", "affiliation": ""}, {"name": "L Chen", "affiliation": ""}]
+    assert records["55555555"].author_list == [{"name": "M Garcia", "affiliations": []}, {"name": "L Chen", "affiliations": []}]
     assert records["55555555"].authors == "Garcia M, Chen L"
     assert records["22222222"].year == "2019"  # from <MedlineDate>
     assert records["22222222"].pmcid is None
@@ -61,7 +64,7 @@ def test_trial_results_text_keeps_labels_with_numbers():
     assert record.ext_id == "NCT01234567"
     assert record.year == "2019"
     assert "Result publications (PMID): 11111111" in record.abstract
-    assert record.author_list == [{"name": "Jane Doe, MD", "affiliation": "University of Example", "role": "Principal investigator"}]
+    assert record.author_list == [{"name": "Jane Doe, MD", "affiliations": ["University of Example"], "role": "Principal investigator"}]
     assert record.authors == "Jane Doe, MD"
     text = trial_results_text(TRIAL)
     assert "## Outcome measure (primary): PHQ-9 Total Score" in text
@@ -130,13 +133,31 @@ def test_europe_pmc_search_keeps_papers_and_preprints():
     assert record.title == "Mindfulness app use and depressive symptoms in nursing students: a randomised trial"
     assert record.authors == "Ahmed N, Brown T, Clark R, et al."
     assert record.author_list == [
-        {"name": "Nadia Ahmed", "affiliation": "School of Nursing, Example University, Leeds, UK."},
-        {"name": "Tom Brown", "affiliation": "Leeds Teaching Hospitals, Leeds, UK."},
-        {"name": "R Clark", "affiliation": ""}, {"name": "Pat Davis", "affiliation": ""},
+        {"name": "Nadia Ahmed", "affiliations": ["School of Nursing, Example University, Leeds, UK."]},
+        {"name": "Tom Brown", "affiliations": ["Leeds Teaching Hospitals, Leeds, UK."]},
+        {"name": "R Clark", "affiliations": []}, {"name": "Pat Davis", "affiliations": []},
     ]
     # A result without an author list (a "lite" one) still gives the names.
     assert europepmc_record({"id": "PPR1", "source": "PPR", "authorString": "Ng A, Ode B."}).author_list == [
-        {"name": "Ng A", "affiliation": ""}, {"name": "Ode B", "affiliation": ""}]
+        {"name": "Ng A", "affiliations": []}, {"name": "Ode B", "affiliations": []}]
     assert europepmc_record(results[2]).pubtypes == ["Preprint"]
     assert europepmc_url(PREPRINT) == f"https://europepmc.org/article/PPR/{PREPRINT}"
     assert EUROPEPMC["resultList"]["result"][3]["source"] == "PAT"
+
+
+def test_affiliations_are_cleaned_to_institutions():
+    from esf.sources import clean_affiliations
+
+    # Real shapes from PubMed: an email at the end, with or without "Electronic address:".
+    assert clean_affiliations(["The Research Clinic, Aarhus University Hospital, Denmark. lonefjor@rm.dk"]) == [
+        "The Research Clinic, Aarhus University Hospital, Denmark."]
+    assert clean_affiliations(["Department of Psychiatry, Chongqing, China. Electronic address: luo@hospital.cqmu.edu.cn."]) == [
+        "Department of Psychiatry, Chongqing, China."]
+    assert clean_affiliations(["School of Nursing (e-mail: a.b@uni.edu)"]) == ["School of Nursing"]
+    # Older records run institutions together with ";" and footnote markers; each comes once.
+    assert clean_affiliations(["1 Dept A, Uni X; 2Dept B, Uni Y", "Dept A, Uni X"]) == ["Dept A, Uni X", "Dept B, Uni Y"]
+    assert clean_affiliations(["aDepartment of Medicine, Uni Z"]) == ["Department of Medicine, Uni Z"]
+    # Numbers that belong to the institution stay.
+    assert clean_affiliations(["3rd Department of Surgery", "4th Military Medical University", "3D Lab, X"]) == [
+        "3rd Department of Surgery", "4th Military Medical University", "3D Lab, X"]
+    assert clean_affiliations([None, "", " ; ."]) == []

@@ -46,7 +46,9 @@ PUBMED_XML = """<?xml version="1.0" ?>
         <Author><LastName>Lee</LastName><ForeName>Sun</ForeName><Initials>S</Initials>
         <AffiliationInfo><Affiliation>College of Nursing, Yonsei University, Seoul, Korea.</Affiliation></AffiliationInfo>
         <AffiliationInfo><Affiliation>Mind Health Institute, Seoul, Korea.</Affiliation></AffiliationInfo></Author>
-        <Author><LastName>Park</LastName><Initials>H</Initials></Author><Author><LastName>Choi</LastName><Initials>Y</Initials></Author></AuthorList>
+        <Author><LastName>Park</LastName><Initials>H</Initials><AffiliationInfo><Affiliation>1Department of Statistics,
+          Example University, Seoul, Korea; 2Biostatistics Unit, Example Hospital, Seoul, Korea. Electronic address: hpark@example.ac.kr.</Affiliation></AffiliationInfo>
+          <AffiliationInfo><Affiliation>Department of Statistics, Example University, Seoul, Korea</Affiliation></AffiliationInfo></Author><Author><LastName>Choi</LastName><Initials>Y</Initials></Author></AuthorList>
       <ELocationID EIdType="doi" ValidYN="Y">10.1000/rct1</ELocationID>
       <Abstract>
         <AbstractText Label="BACKGROUND" NlmCategory="BACKGROUND">Depression is common among students.</AbstractText>

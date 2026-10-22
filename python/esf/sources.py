@@ -34,8 +34,8 @@ class Record:
     pmid: str | None = None
     pmcid: str | None = None
     nct_ids: list[str] = field(default_factory=list)
-    # Every author with their affiliations ("; "-joined), and for a registry record the officials
-    # with their roles: {"name", "affiliation", "role"?}. Shown in the review's author table.
+    # Every author with their affiliations (see clean_affiliations), and for a registry record the
+    # officials with their roles: {"name", "affiliations", "role"?}. Shown in the review's author table.
     author_list: list[dict] = field(default_factory=list)
 
 
@@ -169,6 +169,28 @@ def _clean(text: Any) -> str:
     return " ".join(str(text or "").split())
 
 
+# What an affiliation string carries besides the institution: an email address (often after
+# "Electronic address:"), and a footnote marker before it ("1Department", "a Department").
+_EMAIL_LABEL = re.compile(r"\s*\b(?:electronic address|e-?mail(?: address)?|email)\s*:?\s*(?=\S+@)", re.I)
+_EMAIL = re.compile(r"\s*\S+@\S+")
+_MARKER = re.compile(r"^(?:\d{1,2}|[a-h])\s?(?=[A-Z][a-z])")
+
+
+def clean_affiliations(texts: list[Any]) -> list[str]:
+    """Affiliations as institutions: split where older records run several together with ";",
+    without email addresses or footnote markers, each once and in order. Mirrors cleanAffiliations
+    in site/lib/affiliations.js."""
+    out: list[str] = []
+    for text in texts:
+        for raw in re.split(r";\s*", str(text or "")):
+            part = _EMAIL.sub("", _EMAIL_LABEL.sub(" ", raw))
+            part = _MARKER.sub("", " ".join(part.split()))
+            part = re.sub(r"[\s,;:(]+$", "", part).strip()
+            if part and part != "." and part not in out:
+                out.append(part)
+    return out
+
+
 def short_authors(names: list[str]) -> str:
     """The first three authors, then "et al."; how the overlap check tells reports of one study apart."""
     names = [n for n in names if n]
@@ -217,9 +239,9 @@ def parse_pubmed_xml(xml: bytes | str) -> list[Record]:
             names.append(f"{last} {(author.findtext('Initials') or '').strip()}".strip() if last else collective)
             first = _text(author.find("ForeName")) or _text(author.find("Initials"))
             name = f"{first} {_text(author.find('LastName'))}".strip() if last else collective
-            affiliations = [a for a in (_text(x) for x in author.findall("AffiliationInfo/Affiliation")) if a]
+            affiliations = clean_affiliations([_text(x) for x in author.findall("AffiliationInfo/Affiliation")])
             if name:
-                author_list.append({"name": name, "affiliation": "; ".join(affiliations)})
+                author_list.append({"name": name, "affiliations": affiliations})
         nct_ids = []
         for bank in art.findall("DataBankList/DataBank"):
             if (bank.findtext("DataBankName") or "").strip() == "ClinicalTrials.gov":
@@ -318,7 +340,7 @@ def trial_record(study: dict) -> Record:
     if pmids:
         lines.append("Result publications (PMID): " + ", ".join(pmids))
     officials = [
-        {"name": _clean(o.get("name")), "affiliation": _clean(o.get("affiliation")),
+        {"name": _clean(o.get("name")), "affiliations": clean_affiliations([o.get("affiliation")]),
          "role": (o.get("role") or "").replace("_", " ").capitalize()}
         for o in protocol.get("contactsLocationsModule", {}).get("overallOfficials", [])
         if _clean(o.get("name"))
@@ -450,13 +472,11 @@ def europepmc_authors(result: dict) -> list[dict]:
         last = _clean(a.get("lastName"))
         name = _clean(f"{first} {last}") if last else _clean(a.get("fullName")) or _clean(a.get("collectiveName"))
         details = (a.get("authorAffiliationDetailsList") or {}).get("authorAffiliation") or []
-        affiliations = [_clean(d.get("affiliation")) for d in details if _clean(d.get("affiliation"))]
-        if not affiliations and _clean(a.get("affiliation")):
-            affiliations = [_clean(a.get("affiliation"))]
+        affiliations = clean_affiliations([d.get("affiliation") for d in details]) or clean_affiliations([a.get("affiliation")])
         if name:
-            out.append({"name": name, "affiliation": "; ".join(affiliations)})
+            out.append({"name": name, "affiliations": affiliations})
     if not out:
-        out = [{"name": n, "affiliation": ""} for n in _europepmc_names(result)]
+        out = [{"name": n, "affiliations": []} for n in _europepmc_names(result)]
     return out
 
 

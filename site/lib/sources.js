@@ -3,6 +3,7 @@
 // fetch tool instead (see Claude.fetchUrl), which runs on Anthropic's servers. A port of
 // python/esf/sources.py.
 
+import { cleanAffiliations } from './affiliations.js';
 import { parseXml } from './jats.js';
 
 export class SourceError extends Error {}
@@ -103,8 +104,8 @@ export function shortAuthors(names) {
 export function makeRecord(fields) {
   return {
     title: '', authors: '', year: '', journal: '', pubtypes: [], abstract: '', doi: null, pmid: null, pmcid: null, nct_ids: [],
-    // Every author with their affiliations ("; "-joined), and for a registry record the officials with
-    // their roles: {name, affiliation, role?}. Shown in the review's author table.
+    // Every author with their affiliations (see affiliations.js), and for a registry record the officials
+    // with their roles: {name, affiliations, role?}. Shown in the review's author table.
     author_list: [],
     ...fields,
   };
@@ -225,8 +226,8 @@ export function parsePubmedXml(xml) {
       const last = text(kid(author, 'LastName'));
       const first = text(kid(author, 'ForeName')) || text(kid(author, 'Initials'));
       const name = last ? `${first} ${last}`.trim() : text(kid(author, 'CollectiveName'));
-      const affiliations = kids(author, 'AffiliationInfo').flatMap((info) => kids(info, 'Affiliation')).map(text).filter(Boolean);
-      return { name, affiliation: affiliations.join('; ') };
+      const affiliations = cleanAffiliations(kids(author, 'AffiliationInfo').flatMap((info) => kids(info, 'Affiliation')).map(text));
+      return { name, affiliations };
     }).filter((a) => a.name);
     const nctIds = kids(kid(art, 'DataBankList'), 'DataBank')
       .filter((bank) => text(kid(bank, 'DataBankName')) === 'ClinicalTrials.gov')
@@ -298,7 +299,7 @@ export function trialRecord(study) {
   const pmids = (protocol.referencesModule?.references || []).filter((r) => r.pmid && r.type === 'RESULT').map((r) => r.pmid);
   if (pmids.length) lines.push(`Result publications (PMID): ${pmids.join(', ')}`);
   const officials = (protocol.contactsLocationsModule?.overallOfficials || [])
-    .map((o) => ({ name: clean(o.name), affiliation: clean(o.affiliation), role: capitalize(String(o.role || '').replaceAll('_', ' ')) }))
+    .map((o) => ({ name: clean(o.name), affiliations: cleanAffiliations([o.affiliation]), role: capitalize(String(o.role || '').replaceAll('_', ' ')) }))
     .filter((o) => o.name);
   return makeRecord({
     source: 'clinicaltrials', ext_id: nct, title: ident.officialTitle || ident.briefTitle || '',
@@ -368,11 +369,11 @@ export function europepmcAuthors(result) {
     const first = clean(a.firstName) || clean(a.initials); // as PubMed's: the initials when there is no first name
     const last = clean(a.lastName);
     const name = last ? clean(`${first} ${last}`) : clean(a.fullName) || clean(a.collectiveName);
-    let affiliations = (a.authorAffiliationDetailsList?.authorAffiliation || []).map((d) => clean(d.affiliation)).filter(Boolean);
-    if (!affiliations.length && clean(a.affiliation)) affiliations = [clean(a.affiliation)];
-    if (name) out.push({ name, affiliation: affiliations.join('; ') });
+    const details = (a.authorAffiliationDetailsList?.authorAffiliation || []).map((d) => d.affiliation);
+    const affiliations = cleanAffiliations(details).length ? cleanAffiliations(details) : cleanAffiliations([a.affiliation]);
+    if (name) out.push({ name, affiliations });
   }
-  return out.length ? out : europepmcNames(result).map((name) => ({ name, affiliation: '' }));
+  return out.length ? out : europepmcNames(result).map((name) => ({ name, affiliations: [] }));
 }
 
 // A Europe PMC result that is not in PubMed, as a record.

@@ -3,6 +3,7 @@
 // comes from the papers through evidence.js: the model's text refers to values by key, e.g. [V3],
 // and is shown here with their numbers. Styles are in review.css.
 
+import { cleanAffiliations } from './affiliations.js';
 import { decisionsBasis } from './evidence.js';
 import { STATISTICS } from './spec-panel.js';
 
@@ -187,11 +188,18 @@ function authorsButton(paper, loadAuthors) {
     }
     heading.textContent = `${paper.source === 'clinicaltrials' ? 'Investigators' : 'Authors'} (${list.length})`;
     const roles = list.some((a) => a.role);
+    // Author lists saved before affiliations were cleaned hold one "; "-joined string.
+    const affiliationsOf = (a) => a.affiliations || cleanAffiliations([a.affiliation]);
+    const withAffiliations = list.filter((a) => affiliationsOf(a).length);
+    const firstOnly = list.length > 1 && withAffiliations.length === 1 && withAffiliations[0] === list[0];
     body.replaceChildren(h('div', { class: 'table-wrap' }, h('table', { class: 'authors-table' },
       h('thead', {}, h('tr', {}, ['#', 'Name', ...(roles ? ['Role'] : []), 'Affiliation'].map((t) => h('th', { scope: 'col' }, t)))),
       h('tbody', {}, list.map((a, i) => h('tr', {},
         h('td', { class: 'num' }, String(i + 1)), h('td', {}, a.name),
-        roles && h('td', {}, a.role || ''), h('td', {}, a.affiliation || '—')))))));
+        roles && h('td', {}, a.role || ''),
+        h('td', {}, affiliationsOf(a).length ? affiliationsOf(a).map((x) => h('div', {}, x)) : '—'))))),
+    firstOnly && h('p', { class: 'muted small' },
+      'PubMed gives an affiliation for the first author only, as most journals reported them before 2014.')));
   };
   const open = async () => {
     let list = paper.author_list || [];

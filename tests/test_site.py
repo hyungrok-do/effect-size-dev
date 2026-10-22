@@ -24,7 +24,7 @@ import pytest
 from esf import prompts
 from esf.config import REPO_ROOT
 from esf.jats import jats_to_text
-from esf.sources import europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_results_text
+from esf.sources import clean_affiliations, europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_results_text
 from esf.evidence import build_evidence, decisions_basis, overlap_records
 from esf.schemas import upgrade_spec
 from esf.verify import in_audit_sample, numbers_in, verify
@@ -75,6 +75,16 @@ EVIDENCE_OVERLAP = {"groups": [
     # A review and two studies it pools: separate studies, so none shares another's participants.
     {"records": ["R4", "R1", "R3"], "relation": "review_includes_study", "evidence": "R4 cites R1 and R3", "use": "R1"},
 ], "notes": ""}
+
+# Affiliation strings as PubMed and Europe PMC give them, cleaned the same way by both editions.
+AFFILIATION_CASES = [
+    ["The Research Clinic, Aarhus University Hospital, Denmark. lonefjor@rm.dk"],
+    ["Department of Psychiatry, Chongqing, China. Electronic address: luo@hospital.cqmu.edu.cn."],
+    ["School of Nursing (E-mail: a.b@uni.edu)", "School of Nursing"],
+    ["1 Dept A, Uni X; 2Dept B, Uni Y", "Dept A, Uni X"],
+    ["aDepartment of Medicine, Uni Z", "3rd Department of Surgery", "4th Military Medical University", "3D Lab, X"],
+    [None, "", " ; .", "Universidad Nacional de Córdoba,\u00a0Córdoba, Argentina."],
+]
 
 # A specification saved before the structured fields.
 OLD_SPEC = {
@@ -255,6 +265,7 @@ def test_browser_ports_match_python(browser, site_url):
         "europepmc": EUROPEPMC["resultList"]["result"][:3], "old_spec": OLD_SPEC,
         "evidence": [EVIDENCE_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP],
         "verify": [[e.model_dump(), t, r] for e, t, r in cases],
+        "affiliations": AFFILIATION_CASES,
     }
     result = page.evaluate("""async (data) => {
         const jats = await import('/lib/jats.js');
@@ -262,6 +273,7 @@ def test_browser_ports_match_python(browser, site_url):
         const v = await import('/lib/verify.js');
         const panel = await import('/lib/spec-panel.js');
         const ev = await import('/lib/evidence.js');
+        const affiliations = await import('/lib/affiliations.js');
         return {
             jats: jats.jatsToText(data.jats),
             trial: sources.trialResultsText(data.trial),
@@ -274,6 +286,7 @@ def test_browser_ports_match_python(browser, site_url):
             overlapRecords: ev.overlapRecords(data.evidence[0]),
             evidence: ev.buildEvidence(...data.evidence),
             basis: ev.decisionsBasis(data.evidence[0], data.evidence[1]),
+            affiliations: data.affiliations.map((texts) => affiliations.cleanAffiliations(texts)),
             europepmc: data.europepmc.map((r) => [sources.europepmcPmid(r), sources.europepmcPmid(r) ? null : sources.europepmcRecord(r),
                                                     sources.europepmcUrl(String(r.id))]),
         };
@@ -289,6 +302,7 @@ def test_browser_ports_match_python(browser, site_url):
     assert result["overlapRecords"] == overlap_records(EVIDENCE_PAPERS)
     assert result["evidence"] == build_evidence(EVIDENCE_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP)
     assert result["basis"] == decisions_basis(EVIDENCE_PAPERS, EVIDENCE_DECISIONS)
+    assert result["affiliations"] == [clean_affiliations(texts) for texts in AFFILIATION_CASES]
     # What the evidence holds: the excluded result and paper are gone, the overlapping record is kept
     # and marked as the same participants as the record to use, and nothing is combined.
     evidence = result["evidence"]
@@ -359,6 +373,24 @@ def test_results_read_as_a_line_per_group(browser, site_url):
     assert set(states[1].values()) == {"done"} and states[0]["ready"] == "pending"
     assert (states[2]["follow"], states[2]["screen"], states[2]["extract"]) == ("done", "active", "pending")
     assert (states[3]["extract"], states[3]["overlap"]) == ("stopped", "pending")
+    # An older record: PubMed gives the first author's affiliation only, with an email address. The
+    # table shows the institution and says why the others have none.
+    note = page.evaluate("""async () => {
+        const { paperHeader } = await import('/lib/review-view.js');
+        const paper = { id: 9, source: 'pubmed', ext_id: '23272986', title: 'T', authors: 'Fjorback LO, Arendt M',
+          author_list: [{ name: 'Lone Overby Fjorback', affiliation: 'Aarhus University Hospital, Denmark. lonefjor@rm.dk' },
+                        { name: 'Mikkel Arendt', affiliation: '' }] };
+        const article = document.createElement('article');
+        article.className = 'paper';
+        article.append(...paperHeader(paper, {}).filter(Boolean));
+        document.body.append(article);
+        article.querySelector('.authors-btn').click();
+        await new Promise((r) => setTimeout(r, 50));
+        const pop = document.querySelector('.authors-pop:popover-open');
+        return [pop.querySelector('tbody tr td:last-child').textContent, pop.querySelector('p.muted')?.textContent];
+    }""")
+    assert note == ["Aarhus University Hospital, Denmark.",
+                    "PubMed gives an affiliation for the first author only, as most journals reported them before 2014."], note
     page.close()
 
 
@@ -498,7 +530,8 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     officials = page.locator(".authors-pop:popover-open")
     officials.locator("tbody tr").first.wait_for()
     assert officials.locator("strong").inner_text() == "Investigators (1)"
-    assert officials.locator("tbody tr").first.inner_text().split("\t") == ["1", "Jane Doe, MD", "Principal investigator", "University of Example"]
+    assert [c.strip() for c in officials.locator("tbody tr").first.inner_text().split("\t")] == [
+        "1", "Jane Doe, MD", "Principal investigator", "University of Example"]
     page.keyboard.press("Escape")
     page.click("#source-switch button:has-text('Papers')")
 
@@ -589,9 +622,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     table = page.locator(".authors-pop:popover-open")
     table.locator("tbody tr").first.wait_for()
     assert table.locator("strong").inner_text() == "Authors (4)"
-    rows = [r.split("\t") for r in table.locator("tbody tr").all_inner_texts()]
+    rows = [[c.strip() for c in r.split("\t")] for r in table.locator("tbody tr").all_inner_texts()]
     assert rows[0] == ["1", "Jisoo Kim", "Department of Psychiatry, Seoul National University, Seoul, Korea."], rows
-    assert rows[1][2] == "College of Nursing, Yonsei University, Seoul, Korea.; Mind Health Institute, Seoul, Korea." and rows[3][2] == "—"
+    # Each affiliation on its own line; footnote markers and email addresses are gone.
+    assert rows[1][2] == "College of Nursing, Yonsei University, Seoul, Korea.\nMind Health Institute, Seoul, Korea." and rows[3][2] == "—"
+    assert rows[2][2] == "Department of Statistics, Example University, Seoul, Korea\nBiostatistics Unit, Example Hospital, Seoul, Korea."
     page.keyboard.press("Escape")
     assert page.locator(".authors-pop:popover-open").count() == 0
     # Opened quotes stay open when the card is redrawn after a decision.
@@ -622,7 +657,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     open_paper(page, "Brief mindfulness training").locator(".authors-btn").click()
     fetched = page.locator(".authors-pop:popover-open")
     fetched.locator("tbody tr").first.wait_for()
-    assert fetched.locator("tbody tr").first.inner_text().split("\t") == ["1", "Mindful Students Trial Group", "—"]
+    assert [c.strip() for c in fetched.locator("tbody tr").first.inner_text().split("\t")] == ["1", "Mindful Students Trial Group", "—"]
     page.keyboard.press("Escape")
     assert page.evaluate("""async () => {
         const { Store } = await import('/lib/store.js');
