@@ -6,7 +6,7 @@ import { Claude, looksLikeAnthropicKey, MODELS } from './lib/claude.js';
 import { download, exportRows, PAPER, toCsv } from './lib/export.js';
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
-import { Sources } from './lib/sources.js';
+import { europepmcUrl, Sources } from './lib/sources.js';
 import { RUNNING, Store } from './lib/store.js';
 
 const DESIGNS = {
@@ -56,11 +56,13 @@ const TABS = [
 ];
 const STEPS = ['setup', 'problem', 'spec', 'progress', 'review'];
 const PANELS = { setup: '#setup', problem: '#problem', spec: '#spec', progress: '#progress-card', review: '#review' };
-const SOURCES = [['pubmed', 'Papers (PubMed)'], ['clinicaltrials', 'ClinicalTrials.gov']];
+// Papers (from PubMed and Europe PMC) and registry records are reviewed separately.
+const SOURCES = [['papers', 'Papers'], ['clinicaltrials', 'ClinicalTrials.gov']];
+const kindOf = (paper) => (paper.source === 'clinicaltrials' ? 'clinicaltrials' : 'papers');
 // Which search found a paper, on its card; the search log names each level in full (LEVEL_NAMES).
 const LEVEL_SHORT = {
-  reviews: 'Reviews search', primary: 'Target-population search', wider: 'Related-populations search',
-  outcome_data: 'Outcome-data search', cited: 'Cited by a review', named: 'Named by Opus',
+  reviews: 'Reviews search', primary: 'Target-population search', full_text: 'Full-text search',
+  wider: 'Related-populations search', outcome_data: 'Outcome-data search', cited: 'Cited by a review', named: 'Named by Opus',
 };
 const version = (model) => model.replace(/^claude-[a-z]+-/, '').replace('-', '.');
 const AGENTS = [
@@ -80,7 +82,7 @@ const store = new Store();
 const jobs = new Set(); // projects and papers with work running in this tab
 const state = {
   id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
-  uploadFor: null, step: 'setup', stepChosen: false, source: 'pubmed', filter: 'all',
+  uploadFor: null, step: 'setup', stepChosen: false, source: 'papers', filter: 'all',
   available: { setup: true, problem: true, spec: false, progress: false, review: false },
 };
 
@@ -688,7 +690,7 @@ function renderFunnel(project) {
       h('td', { class: 'level' }, mark && h('span', { class: 'step', 'aria-hidden': 'true' }, mark), label, h('span', { class: 'how' }, how(level, entries))),
       ...counts(level).map((n) => h('td', { class: 'num' }, number(n))));
   };
-  const rows = [h('tr', { class: 'group' }, h('th', { colspan: '4', scope: 'colgroup' }, 'PubMed'))];
+  const rows = [h('tr', { class: 'group' }, h('th', { colspan: '4', scope: 'colgroup' }, 'Papers'))];
   let step = 0;
   for (const level of [...LEVELS, 'cited', 'named']) {
     if (!log.some((e) => e.level === level)) continue;
@@ -719,8 +721,8 @@ function renderReview() {
   state.papersKey = key;
 
   // Papers and registry records are reviewed separately.
-  const bySource = Object.fromEntries(SOURCES.map(([source]) => [source, state.papers.filter((p) => p.source === source)]));
-  if (!bySource[state.source].length) state.source = SOURCES.map(([source]) => source).find((source) => bySource[source].length) || 'pubmed';
+  const bySource = Object.fromEntries(SOURCES.map(([source]) => [source, state.papers.filter((p) => kindOf(p) === source)]));
+  if (!bySource[state.source].length) state.source = SOURCES.map(([source]) => source).find((source) => bySource[source].length) || 'papers';
   const extractedCount = (list) => list.filter((p) => p.status === 'extracted').length;
   $('#source-switch').replaceChildren(...SOURCES.map(([source, label]) => h('button', {
     type: 'button', 'aria-pressed': String(state.source === source),
@@ -747,8 +749,15 @@ function badge(text, kind = '') {
   return h('span', { class: `badge ${kind}`.trim() }, text);
 }
 
+function sourceBadge(paper) {
+  if (paper.source === 'clinicaltrials') return badge('ClinicalTrials.gov');
+  if (paper.source === 'pubmed') return badge('PubMed');
+  return paper.ext_id.startsWith('PPR') ? badge('Preprint, not peer reviewed', 'warn') : badge('Europe PMC');
+}
+
 function links(paper) {
   const out = {};
+  if (paper.source === 'europepmc') out['Europe PMC'] = europepmcUrl(paper.ext_id);
   if (paper.pmid) out.PubMed = `https://pubmed.ncbi.nlm.nih.gov/${paper.pmid}/`;
   if (paper.pmcid) out.PMC = `https://pmc.ncbi.nlm.nih.gov/articles/${paper.pmcid}/`;
   if (paper.doi) out.DOI = `https://doi.org/${paper.doi}`;
@@ -765,8 +774,8 @@ function paperCard(paper, trials) {
   const meta = h('div', { class: 'meta' },
     paper.year && h('span', {}, paper.year),
     paper.journal && h('span', {}, paper.journal),
-    badge(paper.source === 'clinicaltrials' ? 'ClinicalTrials.gov' : 'PubMed'),
-    paper.source === 'pubmed' && LEVEL_SHORT[paper.found_in?.[0]]
+    sourceBadge(paper),
+    paper.source !== 'clinicaltrials' && LEVEL_SHORT[paper.found_in?.[0]]
       && h('span', { class: 'badge', title: (paper.found_by || []).join('\n') }, LEVEL_SHORT[paper.found_in[0]]),
     paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind, paper.fulltext_kind === 'abstract' ? 'warn' : ''),
     paper.fetched_by === 'sonnet' && badge('Fetched by Sonnet'),
@@ -803,7 +812,7 @@ function paperCard(paper, trials) {
     actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => extractPaper(paper) },
       paper.status === 'screened_out' ? 'Extract anyway' : 'Try extracting again'));
   }
-  if (!busy && paper.source === 'pubmed') {
+  if (!busy && paper.source !== 'clinicaltrials') {
     actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => chooseUpload(paper) },
       paper.status === 'extracted' ? 'Re-extract from your PDF' : 'Upload the PDF'));
   }

@@ -10,10 +10,12 @@
 
 import { NO_ACTIVITY, short } from './activity.js';
 import { describeError, ModelDeclined, ModelTruncated } from './claude.js';
-import { LEVEL_NAMES, LEVELS } from './generated.js';
+import { LEVEL_NAMES, LEVELS, PROMPTS } from './generated.js';
 import { jatsToText } from './jats.js';
 import { pdfText } from './pdf.js';
-import { bytesToBase64, trialRecord, trialResultsText } from './sources.js';
+import {
+  bytesToBase64, europepmcPmid, europepmcRecord, europepmcUrl, trialRecord, trialResultsText,
+} from './sources.js';
 import { escalationReasons, inAuditSample, verify } from './verify.js';
 
 export const DEFAULTS = {
@@ -49,6 +51,7 @@ function recordText(paper) {
     `${paper.source === 'clinicaltrials' ? 'Registry record' : 'Article'}: ${paper.title}`,
     `Year: ${paper.year || 'unknown'}; source: ${paper.journal || ''}`,
     `Publication types: ${(paper.pubtypes || []).join(', ') || 'unknown'}`,
+    ...((paper.found_in || []).includes('full_text') ? [PROMPTS.FOUND_BY_FULL_TEXT] : []),
     '',
     paper.abstract || '(no abstract available)',
   ].join('\n');
@@ -154,14 +157,16 @@ export class Pipeline {
     const planned = plan.levels || (plan.pubmed_queries || []).map((query) => ({ level: 'primary', query, why: '' }));
     const levels = planned.filter((l) => l.query.trim()).sort((a, b) => LEVELS.indexOf(a.level) - LEVELS.indexOf(b.level));
     const queries = [
-      ...levels.map((l) => ['pubmed', l.level, l.query]),
+      ...levels.map((l) => [l.level === 'full_text' ? 'europepmc' : 'pubmed', l.level, l.query]),
       ...plan.clinicaltrials_queries.map((q) => ['clinicaltrials', 'registry', q]),
     ];
-    // id -> where it was found, in the order first found; `first` is the index of the search that found it first.
-    const pmids = new Map();
+    // Where each record was found, in the order first found; `first` is the index of the search that
+    // found it first. Papers are keyed "pmid:<PMID>", or by their Europe PMC ID when not in PubMed
+    // (`record` then holds them, as PubMed can't supply them); registry records by NCT ID.
+    const papers = new Map();
     const trials = new Map();
-    const found = (table, key, level, label, index, study = null) => {
-      const item = table.get(key) || { foundBy: [], foundIn: [], first: index, study };
+    const found = (table, key, level, label, index, record = null) => {
+      const item = table.get(key) || { foundBy: [], foundIn: [], first: index, record };
       item.foundBy.push(label);
       if (!item.foundIn.includes(level)) item.foundIn.push(level);
       table.set(key, item);
@@ -176,11 +181,19 @@ export class Pipeline {
         await this.activity.track({ agent: 'code', step: 'collect', text: `${LEVEL_NAMES[level]}: ${short(query, 90)}` }, async () => {
           if (source === 'pubmed') {
             const [hits, ids] = await this.sources.pubmed.search(query, limit);
-            for (const id of ids) found(pmids, id, level, label, index);
+            for (const id of ids) found(papers, `pmid:${id}`, level, label, index);
             Object.assign(entry, { hits, taken: ids.length });
+          } else if (source === 'europepmc') {
+            const [hits, results] = await this.sources.europepmc.search(query, limit);
+            for (const result of results) {
+              const pmid = europepmcPmid(result);
+              if (pmid) found(papers, `pmid:${pmid}`, level, label, index);
+              else found(papers, String(result.id), level, label, index, europepmcRecord(result));
+            }
+            Object.assign(entry, { hits, taken: results.length });
           } else {
             const [hits, studies] = await this.sources.trials.search(query, limit, true);
-            for (const study of studies) found(trials, trialRecord(study).ext_id, level, label, index, study);
+            for (const record of studies.map(trialRecord)) found(trials, record.ext_id, level, label, index, record);
             Object.assign(entry, { hits, taken: studies.length });
           }
         }, () => `${plural(entry.hits, 'hit')}; the top ${entry.taken} taken`);
@@ -197,20 +210,21 @@ export class Pipeline {
     for (const extra of plan.extra_ids.map((x) => x.trim())) {
       if (NCT.test(extra)) {
         const study = await this.sources.trials.study(extra.toUpperCase()).catch(() => null);
-        if (study) found(trials, extra.toUpperCase(), 'named', named, entries.length, study);
+        if (study) found(trials, extra.toUpperCase(), 'named', named, entries.length, trialRecord(study));
       } else if (/^\d+$/.test(extra)) {
-        found(pmids, extra, 'named', named, entries.length);
+        found(papers, `pmid:${extra}`, 'named', named, entries.length);
       }
     }
-    if ([...pmids.values(), ...trials.values()].some((item) => item.first === entries.length)) {
+    if ([...papers.values(), ...trials.values()].some((item) => item.first === entries.length)) {
       entries.push({ level: 'named', source: 'pubmed', query: plan.extra_ids.join(', '), hits: null, taken: null });
     }
 
-    const pmidList = [...pmids.keys()].slice(0, this.settings.maxCandidates);
+    const keys = [...papers.keys()].slice(0, this.settings.maxCandidates);
+    const pmidList = keys.filter((key) => key.startsWith('pmid:')).map((key) => key.slice('pmid:'.length));
     const records = pmidList.length ? await this.sources.pubmed.fetch(pmidList) : [];
-    const byPmid = new Map(records.map((r) => [r.pmid, r]));
-    const articles = pmidList.filter((p) => byPmid.has(p)).map((p) => [byPmid.get(p), pmids.get(p)]);
-    const registry = [...trials.values()].map((item) => [trialRecord(item.study), item]);
+    const byPmid = new Map(records.map((r) => [`pmid:${r.pmid}`, r]));
+    const articles = keys.map((key) => [byPmid.get(key) || papers.get(key).record, papers.get(key)]).filter(([record]) => record);
+    const registry = [...trials.values()].map((item) => [item.record, item]);
     // Interleave the two sources so the cap on candidates keeps the top of each.
     const merged = [];
     for (let i = 0; i < Math.max(articles.length, registry.length); i++) {
@@ -218,7 +232,7 @@ export class Pipeline {
       if (registry[i]) merged.push(registry[i]);
     }
     let added = 0;
-    const bySource = { pubmed: 0, clinicaltrials: 0 };
+    const bySource = { pubmed: 0, europepmc: 0, clinicaltrials: 0 };
     for (const [record, item] of merged) {
       if (added >= this.settings.maxCandidates) break;
       if (await this.store.addPaper(projectId, { ...record, found_by: item.foundBy, found_in: item.foundIn, status: 'candidate' })) {
@@ -231,7 +245,8 @@ export class Pipeline {
     await this.store.updateProject(projectId, { search_log: entries });
     await this.activity.note({
       agent: 'code', step: 'collect', text: `Collected ${plural(added, 'record')} to screen`,
-      detail: `${plural(bySource.pubmed, 'paper')} from PubMed, ${plural(bySource.clinicaltrials, 'registry record')} from ClinicalTrials.gov`,
+      detail: `${plural(bySource.pubmed, 'paper')} from PubMed, ${bySource.europepmc} only in Europe PMC, `
+        + `${plural(bySource.clinicaltrials, 'registry record')} from ClinicalTrials.gov`,
     });
     await this.progress(projectId, 'running the search', queries.length, queries.length);
   }
@@ -362,7 +377,8 @@ export class Pipeline {
       }
     }
     if (paper.abstract) {
-      return { kind: 'abstract', text: `# ${paper.title}\n\n## Abstract\n${paper.abstract}\n`, url: `https://pubmed.ncbi.nlm.nih.gov/${paper.ext_id}/` };
+      const url = paper.source === 'europepmc' ? europepmcUrl(paper.ext_id) : `https://pubmed.ncbi.nlm.nih.gov/${paper.ext_id}/`;
+      return { kind: 'abstract', text: `# ${paper.title}\n\n## Abstract\n${paper.abstract}\n`, url };
     }
     return null;
   }
@@ -494,6 +510,18 @@ export class Toolbox {
       const [count, ids] = await this.sources.pubmed.search(query, maxResults);
       const lines = [`Total hits: ${count}`];
       for (const r of await this.sources.pubmed.summaries(ids)) lines.push(`${r.pmid} | ${r.year} | ${r.pubtypes.join(', ')} | ${r.title}`);
+      return lines.join('\n');
+    }, (out) => out.split('\n')[0].replace('Total hits:', 'hits:'));
+  }
+
+  previewEuropepmc(query, maxResults) {
+    return this.activity.track({ agent: 'opus', step: 'search', text: `Tries Europe PMC: ${short(query, 90)}` }, async () => {
+      const [total, results] = await this.sources.europepmc.search(query, maxResults, { abstracts: false });
+      const lines = [`Total hits: ${total}`];
+      for (const r of results) {
+        const types = r.pubType || (r.pubTypeList?.pubType || []).join(', ');
+        lines.push(`${r.id} | ${r.pubYear ?? ''} | ${r.source} | ${types} | ${r.title ?? ''}`);
+      }
       return lines.join('\n');
     }, (out) => out.split('\n')[0].replace('Total hits:', 'hits:'));
   }

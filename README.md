@@ -1,7 +1,7 @@
 # Effect Size Finder
 
-Describe a study you are planning in a short paragraph. Effect Size Finder searches PubMed and
-ClinicalTrials.gov, reads the papers it can open, and extracts the statistics they report (group
+Describe a study you are planning in a short paragraph. Effect Size Finder searches PubMed, Europe
+PMC and ClinicalTrials.gov, reads the papers it can open, and extracts the statistics they report (group
 sizes, means, SDs, event counts, CIs, hazard ratios, and so on), each with the sentence or table
 row it came from. You review the results, include or exclude each one, and export what you keep.
 
@@ -32,7 +32,7 @@ paragraph
 OPUS    Read the problem → search specification (PICO, design, outcome type, statistics needed)
 YOU     Check and edit the specification
 OPUS    Plan the search from the top down: concept blocks, hit counts, then one query per level
-CODE    Run the levels in order (reviews → target population → wider), then ClinicalTrials.gov
+CODE    Run the levels in order (reviews → target population → full text → wider), then ClinicalTrials.gov
 HAIKU   Screen every title and abstract: include / exclude / unsure
 CODE    Add the studies cited by the reviews that passed screening; Haiku screens those too
 CODE    Get text: posted registry results → PMC full text (Europe PMC) → open-access PDF (Unpaywall) → abstract
@@ -56,15 +56,23 @@ search the way a librarian would:
 
 1. **Concept blocks.** One block each for the intervention, the condition and the population, each
    a MeSH heading ORed with free-text synonyms. Opus checks each block's hit count (the
-   `count_pubmed` tool) before combining them, and never makes a block from the comparator or an
-   instrument name.
+   `count_pubmed` tool) before combining them, and never makes a PubMed block from the comparator
+   or an instrument name.
 2. **Levels**, run in this order:
    - **Reviews and meta-analyses** of the intervention and condition, in any population. They give
      pooled effects and list the trials they include.
    - **Studies in the target population**: population, intervention and condition, with a filter
      for the planned design (trials, or cohort and case-control studies).
-   - **Studies in related populations**, the same with the narrowest concept relaxed, when the
-     target population has few.
+   - **Outcome reported in the full text**, searched in Europe PMC, which also searches the full
+     text of open-access articles section by section: the intervention and condition, with the
+     instrument named in the methods or results (`METHODS:"PHQ-9" OR RESULTS:"PHQ-9"`). It finds the
+     papers whose abstracts never mention the instrument but whose tables hold its means and SDs,
+     and these usually have open full text to read. Europe PMC also has articles only in PubMed Central and
+     preprints (medRxiv, PsyArXiv and others), which the review marks as not peer reviewed. Records
+     PubMed already found are not screened twice, and the screening step is told which records this
+     search found, so an abstract that doesn't name the outcome isn't held against them.
+   - **Studies in related populations**, the same as the target-population level with its narrowest
+     concept relaxed, when the target population has few.
    - **Outcome data in the target population** (optional), for a control-group SD or event rate.
 3. **Cited by the included reviews.** After screening, the reference lists of the reviews that
    passed (from Europe PMC, or PubMed Central when Europe PMC has none) are added, without the

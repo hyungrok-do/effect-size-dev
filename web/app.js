@@ -447,7 +447,8 @@ function paperCard(paper, trials) {
   const meta = h('div', { class: 'meta' },
     paper.year && h('span', {}, paper.year),
     paper.journal && h('span', {}, paper.journal),
-    badge(paper.source === 'clinicaltrials' ? 'ClinicalTrials.gov' : 'PubMed'),
+    badge({ clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed' }[paper.source]
+      || (paper.ext_id.startsWith('PPR') ? 'Preprint, not peer reviewed' : 'Europe PMC'), paper.ext_id.startsWith('PPR') ? 'warn' : ''),
     paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind, paper.fulltext_kind === 'abstract' ? 'warn' : ''),
     paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
     paper.extracted_by === 'worker' && badge('Extracted by Haiku'),

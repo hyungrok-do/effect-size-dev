@@ -39,6 +39,8 @@ class SearchToolbox(Protocol):
 
     def preview_pubmed(self, query: str, max_results: int) -> str: ...
 
+    def preview_europepmc(self, query: str, max_results: int) -> str: ...
+
     def preview_trials(self, query: str, max_results: int) -> str: ...
 
 
@@ -69,6 +71,18 @@ def search_tools(toolbox: SearchToolbox, submitted: dict[str, SearchPlan]) -> li
         return toolbox.preview_pubmed(query, max(1, min(max_results, 50)))
 
     @beta_tool
+    def search_europepmc(query: str, max_results: int = 20) -> str:
+        """Search Europe PMC, which also searches the full text of open-access articles section by section, and preprints.
+
+        Returns the total number of hits and, for each listed record: ID | year | kind | publication types | title. Kind MED is a PubMed record (the ID is its PMID), PMC an article only in PubMed Central, PPR a preprint.
+
+        Args:
+            query: A Europe PMC query, e.g. 'mindfulness AND depress* AND (METHODS:"PHQ-9" OR RESULTS:"PHQ-9")'.
+            max_results: How many records to list, at most 50.
+        """
+        return toolbox.preview_europepmc(query, max(1, min(max_results, 50)))
+
+    @beta_tool
     def search_clinicaltrials(query: str, max_results: int = 20) -> str:
         """Search ClinicalTrials.gov for studies with posted results.
 
@@ -87,7 +101,7 @@ def search_tools(toolbox: SearchToolbox, submitted: dict[str, SearchPlan]) -> li
         """Record the final search plan. Call this exactly once, when the levels are final.
 
         Args:
-            levels: The PubMed levels from the top down (reviews, primary, then wider or outcome_data if used); the top records of each are screened.
+            levels: The levels from the top down (reviews, primary, then full_text, wider or outcome_data if used); the top records of each are screened.
             clinicaltrials_queries: The final ClinicalTrials.gov queries (studies with posted results).
             extra_ids: Specific PMIDs or NCT IDs to include regardless of the queries.
             summary: Two or three sentences on the strategy, for the methods section.
@@ -100,7 +114,7 @@ def search_tools(toolbox: SearchToolbox, submitted: dict[str, SearchPlan]) -> li
         )
         return SEARCH_PLAN_RECORDED
 
-    return [count_pubmed, search_pubmed, search_clinicaltrials, submit_search_plan]
+    return [count_pubmed, search_pubmed, search_europepmc, search_clinicaltrials, submit_search_plan]
 
 
 SEARCH_PLAN_RECORDED = "Recorded. Reply with a one-paragraph summary and stop."

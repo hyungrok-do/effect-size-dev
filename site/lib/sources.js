@@ -324,11 +324,45 @@ export function trialResultsText(study) {
 
 // -- Europe PMC and Unpaywall -------------------------------------------------------
 
+// Europe PMC kinds kept from a search: PubMed records, articles only in PubMed Central, preprints.
+const EUROPEPMC_KINDS = new Set(['MED', 'PMC', 'PPR']);
+// Europe PMC titles and abstracts carry HTML tags (<i>, <h4>Background</h4>).
+const plain = (html) => clean(String(html || '').replace(/<[^>]+>/g, ' '));
+
+export const europepmcPmid = (result) => String(result.pmid || (result.source === 'MED' ? result.id : '')) || null;
+
+// A Europe PMC result that is not in PubMed, as a record.
+export function europepmcRecord(result) {
+  const types = result.pubTypeList?.pubType || [];
+  return makeRecord({
+    source: 'europepmc', ext_id: String(result.id), title: plain(result.title), year: yearOf(String(result.pubYear ?? '')),
+    journal: result.journalInfo?.journal?.title || result.bookOrReportDetails?.publisher || '',
+    pubtypes: typeof types === 'string' ? [types] : [...types], abstract: plain(result.abstractText),
+    doi: result.doi ?? null, pmcid: result.pmcid ?? null,
+  });
+}
+
+export function europepmcUrl(extId) {
+  const kind = extId.startsWith('PPR') ? 'PPR' : extId.startsWith('PMC') ? 'PMC' : 'MED';
+  return `https://europepmc.org/article/${kind}/${extId}`;
+}
+
 export class EuropePMC {
   static BASE = 'https://www.ebi.ac.uk/europepmc/webservices/rest/';
 
   constructor(http) {
     this.http = http;
+  }
+
+  // Results of a Europe PMC query, by relevance: PubMed records (MED), articles only in PubMed Central
+  // (PMC) and preprints (PPR). Europe PMC searches the full text of open-access articles too.
+  async search(query, limit, { abstracts = true } = {}) {
+    const params = new URLSearchParams({
+      query, format: 'json', pageSize: String(Math.max(1, Math.min(limit, 1000))), resultType: abstracts ? 'core' : 'lite',
+    });
+    const payload = await this.http.get(`${EuropePMC.BASE}search?${params}`, 'json');
+    const results = (payload?.resultList?.result || []).filter((r) => EUROPEPMC_KINDS.has(r.source) && r.id);
+    return [Number(payload?.hitCount || 0), results.slice(0, limit)];
   }
 
   async fulltextXml(pmcid) {

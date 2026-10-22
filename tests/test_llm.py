@@ -158,7 +158,9 @@ def test_search_agent_explores_then_submits_a_plan():
     first = api.requests[0][1]
     assert first["model"] == "claude-opus-5-5" and first["output_config"]["effort"] == "high"
     assert first["fallbacks"] == "default"
-    assert [t["name"] for t in first["tools"]] == ["count_pubmed", "search_pubmed", "search_clinicaltrials", "submit_search_plan"]
+    assert [t["name"] for t in first["tools"]] == [
+        "count_pubmed", "search_pubmed", "search_europepmc", "search_clinicaltrials", "submit_search_plan",
+    ]
     assert "top down" in first["system"][0]["text"]
     results = api.requests[1][1]["messages"][-1]["content"]
     assert [r["tool_use_id"] for r in results] == ["t0", "t1", "t2"]

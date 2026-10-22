@@ -6,7 +6,8 @@ from esf.schemas import SearchLevel
 from esf.server import export_rows
 from esf.sources import Sources
 from esf.store import Store
-from fixtures import CITED_TRIAL, NOT_A_STUDY, PLAN, REVIEW, FakeLLM, LiteratureAPIs, mock_client
+from esf import prompts
+from fixtures import CITED_TRIAL, NOT_A_STUDY, PLAN, PMC_ONLY, PREPRINT, REVIEW, FakeLLM, LiteratureAPIs, mock_client
 
 
 def make_pipeline(tmp_path, **overrides):
@@ -30,21 +31,21 @@ def test_search_screen_extract_end_to_end(tmp_path):
     pipeline, store, llm, project_id = run_all(tmp_path)
     project = store.project(project_id)
     assert project["status"] == "done", project["error"]
-    assert [lv["level"] for lv in project["search_plan"]["levels"]] == ["primary", "reviews"]
+    assert [lv["level"] for lv in project["search_plan"]["levels"]] == ["primary", "reviews", "full_text"]
 
     papers = {p["ext_id"]: p for p in store.papers(project_id)}
-    assert set(papers) == {"11111111", "22222222", "33333333", "44444444", "NCT01234567", REVIEW, CITED_TRIAL}
+    assert set(papers) == {"11111111", "22222222", "33333333", "44444444", "NCT01234567", REVIEW, CITED_TRIAL, PMC_ONLY, PREPRINT}
     assert papers["33333333"]["status"] == "screened_out"
     assert papers["NCT01234567"]["found_by"] == ["ClinicalTrials.gov: mindfulness AND depression"]
 
     kinds = {k: p["fulltext_kind"] for k, p in papers.items() if p["status"] == "extracted"}
     assert kinds == {
         "11111111": "pmc_xml", "22222222": "oa_pdf", "44444444": "abstract", "NCT01234567": "registry",
-        REVIEW: "abstract", CITED_TRIAL: "abstract",
+        REVIEW: "abstract", CITED_TRIAL: "abstract", PMC_ONLY: "abstract", PREPRINT: "abstract",
     }
 
     # Clean extractions stand as the worker made them.
-    for key in ("11111111", "22222222", "NCT01234567", REVIEW, CITED_TRIAL):
+    for key in ("11111111", "22222222", "NCT01234567", REVIEW, CITED_TRIAL, PMC_ONLY, PREPRINT):
         assert papers[key]["extracted_by"] == "worker", (key, papers[key]["escalation"])
         assert papers[key]["verification"]["flags"] == []
     # The abstract-only pilot had a number that is not in its quote: the manager redid it.
@@ -55,8 +56,8 @@ def test_search_screen_extract_end_to_end(tmp_path):
     assert [v["value"] for v in pilot["extraction"]["results"][0]["values"]] == [7.9, 3.8, 20, 9.6, 4.1, 21]
 
     assert llm.calls.count("spec") == 1 and llm.calls.count("search") == 1
-    assert llm.calls.count("screen") == 7
-    assert llm.calls.count("extract") == 6 and llm.calls.count("adjudicate") == 1
+    assert llm.calls.count("screen") == 9
+    assert llm.calls.count("extract") == 8 and llm.calls.count("adjudicate") == 1
     assert "8.1 (4.2)" in pipeline.source_text(project_id, papers["11111111"]["id"])
 
 
@@ -67,8 +68,11 @@ def test_the_search_runs_from_the_top_down(tmp_path):
     # records are interleaved with the articles.
     assert [p["ext_id"] for p in papers][:3] == [REVIEW, "NCT01234567", "11111111"]
     found_in = {p["ext_id"]: p["found_in"] for p in papers}
-    assert found_in[REVIEW] == ["reviews"] and found_in["22222222"] == ["primary"]
+    assert found_in[REVIEW] == ["reviews"] and found_in["11111111"] == ["primary"]
     assert found_in["NCT01234567"] == ["registry"] and found_in[CITED_TRIAL] == ["cited"]
+    # The full-text search found one paper PubMed had already found, and two it hadn't.
+    assert found_in["22222222"] == ["primary", "full_text"]
+    assert found_in[PMC_ONLY] == ["full_text"] and found_in[PREPRINT] == ["full_text"]
 
     # The trial only the review cites was added after screening; the narrative review it also
     # cites was not, and the trial already found was not added twice.
@@ -77,11 +81,12 @@ def test_the_search_runs_from_the_top_down(tmp_path):
     assert NOT_A_STUDY not in found_in
 
     log = store.project(project_id)["search_log"]
-    assert [(e["level"], e.get("hits"), e.get("taken"), e["added"]) for e in log] == [
-        ("reviews", 1, 1, 1), ("primary", 4, 4, 4), ("registry", 1, 1, 1), ("cited", None, None, 1),
+    assert [(e["level"], e["source"], e.get("hits"), e.get("taken"), e["added"]) for e in log] == [
+        ("reviews", "pubmed", 1, 1, 1), ("primary", "pubmed", 4, 4, 4), ("full_text", "europepmc", 4, 3, 2),
+        ("registry", "clinicaltrials", 1, 1, 1), ("cited", "pubmed", None, None, 1),
     ]
     assert log[0]["query"] == PLAN.levels[1].query
-    assert {k: log[3][k] for k in ("reviews", "cited", "already", "not_studies")} == {
+    assert {k: log[4][k] for k in ("reviews", "cited", "already", "not_studies")} == {
         "reviews": 1, "cited": 3, "already": 1, "not_studies": 1,
     }
 
@@ -125,8 +130,8 @@ def test_decisions_drive_the_export(tmp_path):
 def test_audit_sends_clean_papers_to_the_manager(tmp_path):
     _, store, llm, project_id = run_all(tmp_path, audit_fraction=1.0)
     audited = [p for p in store.papers(project_id) if (p["escalation"] or {}).get("audit")]
-    assert len(audited) == 5
-    assert llm.calls.count("adjudicate") == 6
+    assert len(audited) == 7
+    assert llm.calls.count("adjudicate") == 8
 
 
 def test_one_failing_query_does_not_stop_the_search(tmp_path):
@@ -153,7 +158,7 @@ def test_one_failing_query_does_not_stop_the_search(tmp_path):
     assert project["status"] == "done"
     assert project["search_plan"]["failed_queries"][0].startswith("Studies in related populations: BROKEN")
     assert [e["level"] for e in project["search_log"] if "error" in e] == ["wider"]
-    assert len(store.papers(project_id)) == 7
+    assert len(store.papers(project_id)) == 9
 
 
 def test_a_failed_worker_is_never_dropped(tmp_path):
@@ -193,4 +198,20 @@ def test_cited_records_that_cannot_be_fetched_do_not_stop_the_search(tmp_path, m
     assert project["status"] == "done", project["error"]
     cited = project["search_log"][-1]
     assert cited["added"] == 0 and cited["failed"][0].startswith("fetching the 2 cited records")
-    assert store.status_counts(project_id) == {"extracted": 5, "screened_out": 1}
+    assert store.status_counts(project_id) == {"extracted": 7, "screened_out": 1}
+
+
+def test_papers_only_in_europe_pmc(tmp_path):
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    papers = {p["ext_id"]: p for p in store.papers(project_id)}
+    pmc, preprint = papers[PMC_ONLY], papers[PREPRINT]
+    assert (pmc["source"], pmc["pmid"], pmc["pmcid"], pmc["year"]) == ("europepmc", None, PMC_ONLY, "2023")
+    assert pmc["title"] == "Mindfulness app use and depressive symptoms in nursing students: a randomised trial"
+    assert pmc["abstract"].startswith("Results PHQ-9 at 8 weeks")  # HTML tags dropped
+    assert (preprint["journal"], preprint["pubtypes"], preprint["doi"]) == ("medRxiv", ["Preprint"], "10.1101/2024.01.01.24300001")
+    assert pmc["fulltext_url"] == f"https://europepmc.org/article/PMC/{PMC_ONLY}"
+    assert preprint["fulltext_url"] == f"https://europepmc.org/article/PPR/{PREPRINT}"
+    # Screening is told which records the full-text search found, so an abstract that doesn't name
+    # the outcome is not held against them.
+    marked = [t for t in llm.screened if prompts.FOUND_BY_FULL_TEXT in t]
+    assert len(marked) == 3 and all(("Brief mindfulness" in t) or ("nursing" in t) or ("smartphone" in t) for t in marked)

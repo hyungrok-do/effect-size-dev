@@ -19,7 +19,7 @@ from .config import Settings
 from .llm import ClaudeLLM
 from .pipeline import Pipeline
 from .schemas import LEVEL_NAMES, SearchSpec
-from .sources import Sources
+from .sources import Sources, europepmc_url
 from .store import RUNNING, Store
 
 PAPER = -1  # result_index of a decision about the whole paper
@@ -48,6 +48,8 @@ def effective_decision(decisions: dict[int, dict], result_index: int) -> dict | 
 
 def _links(paper: dict) -> dict[str, str]:
     links = {}
+    if paper["source"] == "europepmc":
+        links["Europe PMC"] = europepmc_url(paper["ext_id"])
     if paper.get("pmid"):
         links["PubMed"] = f"https://pubmed.ncbi.nlm.nih.gov/{paper['pmid']}/"
     if paper.get("pmcid"):

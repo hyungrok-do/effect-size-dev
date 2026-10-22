@@ -125,6 +125,30 @@ PUBMED_XML = """<?xml version="1.0" ?>
 PMIDS = ["11111111", "22222222", "33333333", "44444444"]
 REVIEW, CITED_TRIAL, NOT_A_STUDY = "55555555", "66666666", "77777777"
 ALL_PMIDS = [*PMIDS, REVIEW, CITED_TRIAL, NOT_A_STUDY]
+
+# What the full-text search in Europe PMC finds: a paper PubMed already found, one only in PubMed
+# Central, a preprint, and a patent (which is left out).
+PMC_ONLY, PREPRINT = "PMC9000002", "PPR555555"
+PMC_ONLY_LINE = "PHQ-9 at 8 weeks: app 9.2 (SD 4.1, n = 40); control 10.8 (SD 4.4, n = 41)."
+PREPRINT_LINE = "PHQ-9 at 12 weeks was 7.5 (SD 3.9) with the app and 9.1 (SD 4.2) on the waitlist, n = 30 per arm."
+EUROPEPMC = {
+    "version": "6.9",
+    "hitCount": 4,
+    "resultList": {"result": [
+        {"id": "22222222", "source": "MED", "pmid": "22222222", "title": "Brief mindfulness training versus waitlist: a randomised trial.",
+         "pubYear": "2019", "pubType": "research-article; journal article"},
+        {"id": PMC_ONLY, "source": "PMC", "pmcid": PMC_ONLY,
+         "title": "Mindfulness app use and depressive symptoms in <i>nursing</i> students: a randomised trial",
+         "pubYear": "2023", "journalInfo": {"journal": {"title": "Nursing Education Trials"}},
+         "pubTypeList": {"pubType": ["research-article", "Journal Article"]}, "pubType": "research-article; journal article",
+         "abstractText": f"<h4>Results</h4><p>{PMC_ONLY_LINE}</p>"},
+        {"id": PREPRINT, "source": "PPR", "doi": "10.1101/2024.01.01.24300001",
+         "title": "A smartphone mindfulness programme for depressive symptoms: a pilot randomised trial",
+         "pubYear": 2024, "bookOrReportDetails": {"publisher": "medRxiv"}, "pubTypeList": {"pubType": "Preprint"},
+         "pubType": "preprint", "abstractText": PREPRINT_LINE},
+        {"id": "EP1234567", "source": "PAT", "title": "A mindfulness device", "pubYear": "2020"},
+    ]},
+}
 REFERENCES = {
     "hitCount": 5,
     "referenceList": {"reference": [
@@ -293,6 +317,9 @@ class LiteratureAPIs:
             return httpx.Response(200, text=JATS, headers={"content-type": "application/xml"})
         if url.host == "www.ebi.ac.uk" and url.path.endswith(f"/MED/{REVIEW}/references"):
             return httpx.Response(200, json=REFERENCES)
+        if url.host == "www.ebi.ac.uk" and url.path == "/europepmc/webservices/rest/search":
+            assert url.params["resultType"] in ("core", "lite") and url.params["format"] == "json"
+            return httpx.Response(200, json=EUROPEPMC)
         if url.host == "api.unpaywall.org" and url.path == "/v2/10.1000/rct2":
             return httpx.Response(200, json={"doi": "10.1000/rct2", "is_oa": True, "best_oa_location": {"url_for_pdf": "https://example.org/rct2.pdf"}})
         if url.host == "example.org" and url.path == "/rct2.pdf":
@@ -353,11 +380,13 @@ REVIEW_LINE = "Apps reduced depressive symptoms (pooled SMD 0.35, 95% CI 0.20 to
 CITED_LINE = "PHQ-9 at 12 weeks: app 8.4 (SD 4.0, n = 75); waitlist 10.1 (SD 4.3, n = 74)."
 
 REVIEW_FILTER = "(systematic review[pt] OR meta-analysis[pt])"
+EUROPEPMC_QUERY = 'mindfulness AND depress* AND (METHODS:"PHQ-9" OR RESULTS:"PHQ-9")'
 PLAN = SearchPlan(
     levels=[
         # Submitted out of order on purpose: the pipeline runs the levels from the top down.
         SearchLevel(level="primary", query="mindfulness[tiab] AND depress*[tiab]", why="Trials in students."),
         SearchLevel(level="reviews", query=f"mindfulness[tiab] AND depress*[tiab] AND {REVIEW_FILTER}", why="Pooled effects."),
+        SearchLevel(level="full_text", query=EUROPEPMC_QUERY, why="PHQ-9 named in the methods or results."),
     ],
     clinicaltrials_queries=["mindfulness AND depression"],
     extra_ids=[],
@@ -370,6 +399,7 @@ class FakeLLM:
 
     def __init__(self):
         self.calls: list[str] = []
+        self.screened: list[str] = []  # the record texts screening saw
 
     def read_spec(self, paragraph, sink=None):
         self.calls.append("spec")
@@ -381,11 +411,13 @@ class FakeLLM:
             f"#1 4 | mindfulness[tiab]\n#2 1 | mindfulness[tiab] AND {REVIEW_FILTER}"
         )
         assert "Total hits: 4" in toolbox.preview_pubmed("mindfulness", 5)
+        assert f"{PREPRINT} | 2024 | PPR | preprint | A smartphone" in toolbox.preview_europepmc(EUROPEPMC_QUERY, 5)
         assert "NCT01234567" in toolbox.preview_trials("mindfulness", 5)
         return PLAN
 
     def screen(self, spec, record_text, sink=None):
         self.calls.append("screen")
+        self.screened.append(record_text)
         excluded = "mouse" in record_text.lower()
         review = "systematic review" in record_text.lower()
         return ScreenDecision(
@@ -427,6 +459,17 @@ class FakeLLM:
                 _value("App", "mean", 8.4, CITED_LINE, "Abstract"), _value("App", "sd", 4.0, CITED_LINE, "Abstract"),
                 _value("App", "n", 75, CITED_LINE, "Abstract"), _value("Waitlist", "mean", 10.1, CITED_LINE, "Abstract"),
                 _value("Waitlist", "sd", 4.3, CITED_LINE, "Abstract"), _value("Waitlist", "n", 74, CITED_LINE, "Abstract"),
+            ])])
+        if title.startswith("Mindfulness app use"):
+            return _extraction([_result([
+                _value("App", "mean", 9.2, PMC_ONLY_LINE, "Abstract"), _value("App", "sd", 4.1, PMC_ONLY_LINE, "Abstract"),
+                _value("App", "n", 40, PMC_ONLY_LINE, "Abstract"), _value("Control", "mean", 10.8, PMC_ONLY_LINE, "Abstract"),
+            ])])
+        if title.startswith("A smartphone mindfulness programme"):
+            return _extraction([_result([
+                _value("App", "mean", 7.5, PREPRINT_LINE, "Abstract"), _value("App", "sd", 3.9, PREPRINT_LINE, "Abstract"),
+                _value("Waitlist", "mean", 9.1, PREPRINT_LINE, "Abstract"), _value("Waitlist", "sd", 4.2, PREPRINT_LINE, "Abstract"),
+                _value("App", "n", 30, PREPRINT_LINE, "Abstract"), _value("Waitlist", "n", 30, PREPRINT_LINE, "Abstract"),
             ])])
         if title.startswith("A Randomized Trial"):
             return _extraction([_result([

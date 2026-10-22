@@ -1,8 +1,10 @@
 from esf.config import Settings
 from esf.fulltext import get_fulltext
 from esf.jats import jats_to_text
-from esf.sources import Sources, parse_pubmed_xml, trial_record, trial_results_text
-from fixtures import CITED_TRIAL, JATS, NOT_A_STUDY, PDF_LINE, PUBMED_XML, REVIEW, TRIAL, LiteratureAPIs, mock_client
+from esf.sources import Sources, europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_record, trial_results_text
+from fixtures import (
+    CITED_TRIAL, EUROPEPMC, JATS, NOT_A_STUDY, PDF_LINE, PMC_ONLY, PREPRINT, PUBMED_XML, REVIEW, TRIAL, LiteratureAPIs, mock_client,
+)
 
 
 def sources(email="test@example.com"):
@@ -98,3 +100,18 @@ def test_counting_asks_pubmed_for_no_records():
     src, handler = sources()
     assert src.pubmed.search("mindfulness AND (systematic review[pt])", 0) == (1, [])
     assert b"retmax=0" in handler.requests[-1].content
+
+
+def test_europe_pmc_search_keeps_papers_and_preprints():
+    src, handler = sources()
+    total, results = src.europepmc.search('mindfulness AND METHODS:"PHQ-9"', 100)
+    assert total == 4 and [r["id"] for r in results] == ["22222222", PMC_ONLY, PREPRINT]  # not the patent
+    assert handler.requests[-1].url.params["pageSize"] == "100"
+    assert handler.requests[-1].url.params["resultType"] == "core"
+    assert [europepmc_pmid(r) for r in results] == ["22222222", None, None]
+    record = europepmc_record(results[1])
+    assert (record.source, record.ext_id, record.pmcid, record.journal) == ("europepmc", PMC_ONLY, PMC_ONLY, "Nursing Education Trials")
+    assert record.title == "Mindfulness app use and depressive symptoms in nursing students: a randomised trial"
+    assert europepmc_record(results[2]).pubtypes == ["Preprint"]
+    assert europepmc_url(PREPRINT) == f"https://europepmc.org/article/PPR/{PREPRINT}"
+    assert EUROPEPMC["resultList"]["result"][3]["source"] == "PAT"

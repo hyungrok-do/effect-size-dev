@@ -111,6 +111,7 @@ export class Claude {
     const tools = {
       count_pubmed: (input) => toolbox.countPubmed((input.queries || []).slice(0, MAX_COUNTED)),
       search_pubmed: (input) => toolbox.previewPubmed(input.query, Math.max(1, Math.min(input.max_results ?? 20, 50))),
+      search_europepmc: (input) => toolbox.previewEuropepmc(input.query, Math.max(1, Math.min(input.max_results ?? 20, 50))),
       search_clinicaltrials: (input) => toolbox.previewTrials(input.query, Math.max(1, Math.min(input.max_results ?? 20, 50))),
       submit_search_plan: (input) => {
         const levels = input.levels || [];

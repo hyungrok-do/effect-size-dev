@@ -32,7 +32,10 @@ def tools() -> list[dict]:
 
 def render() -> str:
     data = {
-        "PROMPTS": {name: getattr(prompts, name) for name in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE")},
+        "PROMPTS": {
+            name: getattr(prompts, name)
+            for name in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "FOUND_BY_FULL_TEXT")
+        },
         "SCHEMAS": {
             "SearchSpec": schema(SearchSpec),
             "ScreenDecision": schema(ScreenDecision),

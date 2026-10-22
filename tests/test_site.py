@@ -23,11 +23,11 @@ import pytest
 from esf import prompts
 from esf.config import REPO_ROOT
 from esf.jats import jats_to_text
-from esf.sources import parse_pubmed_xml, trial_results_text
+from esf.sources import europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_results_text
 from esf.verify import in_audit_sample, numbers_in, verify
 from fixtures import (
-    ABSTRACT_LINE, JATS, PDF_LINE, PLAN, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL, FakeLLM, LiteratureAPIs, _extraction, _result,
-    _value, make_pdf, streamed,
+    ABSTRACT_LINE, EUROPEPMC, EUROPEPMC_QUERY, JATS, PDF_LINE, PLAN, PMC_ONLY, PREPRINT, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL,
+    FakeLLM, LiteratureAPIs, _extraction, _result, _value, make_pdf, streamed,
 )
 
 sync_api = pytest.importorskip("playwright.sync_api")
@@ -140,11 +140,17 @@ class Network:
                 {"type": "tool_use", "id": "t0", "name": "count_pubmed", "input": {"queries": ["mindfulness[tiab]", f"mindfulness[tiab] AND {REVIEW_FILTER}"]}},
                 {"type": "tool_use", "id": "t1", "name": "search_pubmed", "input": {"query": "mindfulness[tiab] AND depress*[tiab]", "max_results": 5}},
                 {"type": "tool_use", "id": "t2", "name": "search_clinicaltrials", "input": {"query": "mindfulness AND depression"}},
+                {"type": "tool_use", "id": "t4", "name": "search_europepmc", "input": {"query": EUROPEPMC_QUERY, "max_results": 5}},
             ], "tool_use")
         if turns == 3:
             results = body["messages"][2]["content"]
             assert results[0]["content"] == f"#1 4 | mindfulness[tiab]\n#2 1 | mindfulness[tiab] AND {REVIEW_FILTER}"
             assert "Total hits: 4" in json.dumps(results) and "NCT01234567" in json.dumps(results)
+            assert results[3]["content"].splitlines()[1:] == [
+                "22222222 | 2019 | MED | research-article; journal article | Brief mindfulness training versus waitlist: a randomised trial.",
+                f"{PMC_ONLY} | 2023 | PMC | research-article; journal article | Mindfulness app use and depressive symptoms in <i>nursing</i> students: a randomised trial",
+                f"{PREPRINT} | 2024 | PPR | preprint | A smartphone mindfulness programme for depressive symptoms: a pilot randomised trial",
+            ]
             plan = PLAN.model_dump()
             return message(OPUS, [{"type": "tool_use", "id": "t3", "name": "submit_search_plan", "input": plan}], "tool_use")
         return message(OPUS, [{"type": "text", "text": "Done."}], "end_turn")
@@ -184,6 +190,7 @@ def test_browser_ports_match_python(browser, site_url):
     g_cases = [0, 1.5, 100.0, 1234567, 0.00001, 0.0001, -2.2, 12.345678, 1e21]
     data = {
         "jats": JATS, "trial": TRIAL, "pubmed": PUBMED_XML, "numbers": numbers, "keys": keys, "g": g_cases,
+        "europepmc": EUROPEPMC["resultList"]["result"][:3],
         "verify": [[e.model_dump(), t, r] for e, t, r in cases],
     }
     result = page.evaluate("""async (data) => {
@@ -198,6 +205,8 @@ def test_browser_ports_match_python(browser, site_url):
             verify: data.verify.map(([e, t, r]) => v.verify(e, t, r)),
             audit: await Promise.all(data.keys.map((k) => v.inAuditSample(k, 0.1))),
             g: data.g.map(v.g),
+            europepmc: data.europepmc.map((r) => [sources.europepmcPmid(r), sources.europepmcPmid(r) ? null : sources.europepmcRecord(r),
+                                                    sources.europepmcUrl(String(r.id))]),
         };
     }""", data)
     assert result["jats"] == jats_to_text(JATS)
@@ -207,6 +216,10 @@ def test_browser_ports_match_python(browser, site_url):
     assert result["verify"] == [verify(e, t, r).to_dict() for e, t, r in cases]
     assert result["audit"] == [in_audit_sample(k, 0.1) for k in keys]
     assert result["g"] == [format(x, "g") for x in g_cases]
+    assert result["europepmc"] == [
+        [europepmc_pmid(r), None if europepmc_pmid(r) else asdict(europepmc_record(r)), europepmc_url(str(r["id"]))]
+        for r in data["europepmc"]
+    ]
 
 
 def test_a_blocked_api_is_fetched_through_claude(browser, site_url):
@@ -238,8 +251,14 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
-    # The refused PDF request is expected to log a failed load; any other error is a bug.
-    page.on("console", lambda m: errors.append(m.text) if m.type == "error" and not m.location.get("url", "").startswith("https://example.org/") else None)
+    # Expected failed loads: the refused PDF, and 404s from Europe PMC and Unpaywall, which is how they say
+    # they have no full text or PDF for a paper. Any other error is a bug.
+    def expected(m):
+        url = m.location.get("url", "")
+        missing = "status of 404" in m.text and url.startswith(("https://www.ebi.ac.uk/", "https://api.unpaywall.org/"))
+        return url.startswith("https://example.org/") or missing
+
+    page.on("console", lambda m: errors.append(f"{m.text} ({m.location.get('url')})") if m.type == "error" and not expected(m) else None)
 
     page.goto(site_url)
     # Without a key the page opens at Setup, and a job sent off without one comes back to it.
@@ -268,9 +287,15 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
 
     # Papers and registry records are reviewed separately.
     sources = page.locator("#source-switch button").all_inner_texts()
-    assert sources == ["Papers (PubMed) · 5 extracted of 6", "ClinicalTrials.gov · 1 extracted of 1"], sources
+    assert sources == ["Papers · 7 extracted of 8", "ClinicalTrials.gov · 1 extracted of 1"], sources
     tabs = page.locator("#tabs button").all_inner_texts()
-    assert tabs[0] == "Extracted (5)" and tabs[3] == "Screened out (1)", tabs
+    assert tabs[0] == "Extracted (7)" and tabs[3] == "Screened out (1)", tabs
+    # Papers only Europe PMC has: one from PubMed Central, and a preprint marked as one.
+    pmc = page.locator(".paper", has_text="Mindfulness app use and depressive symptoms")
+    assert pmc.locator(".badge", has_text="Europe PMC").count() == 1 and pmc.locator(".badge", has_text="Full-text search").count() == 1
+    assert pmc.locator("a", has_text="Europe PMC").get_attribute("href") == f"https://europepmc.org/article/PMC/{PMC_ONLY}"
+    preprint = page.locator(".paper", has_text="A smartphone mindfulness programme")
+    assert preprint.locator(".badge", has_text="Preprint, not peer reviewed").count() == 1
     # Each paper says how the search found it.
     assert page.locator(".paper", has_text="Smartphone mindfulness").locator(".badge", has_text="Cited by a review").count() == 1
     assert page.locator(".paper", has_text="systematic review and meta-analysis").locator(".badge", has_text="Reviews search").count() == 1
@@ -283,10 +308,10 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     rows = page.evaluate("""[...document.querySelectorAll('#funnel tbody tr')].map((tr) => tr.dataset.level
         ? [tr.dataset.level, ...[...tr.querySelectorAll('td.num')].map((td) => Number(td.textContent))]
         : [tr.textContent])""")
-    assert rows == [["PubMed"], ["reviews", 1, 1, 1], ["primary", 4, 3, 3], ["cited", 1, 1, 1],
+    assert rows == [["Papers"], ["reviews", 1, 1, 1], ["primary", 4, 3, 3], ["full_text", 3, 3, 3], ["cited", 1, 1, 1],
                     ["ClinicalTrials.gov"], ["registry", 1, 1, 1]], rows
     funnel = page.inner_text("#funnel")
-    assert "1 hit; the top 1 taken" in funnel and "4 hits; the top 4 taken" in funnel
+    assert "1 hit; the top 1 taken" in funnel and "4 hits; the top 4 taken" in funnel and "4 hits; the top 3 taken" in funnel
     assert "References of 1 review: 3 in PubMed, 1 already found, 1 not studies" in funnel
     page.click("#plan-details summary")
     strategy = page.locator("#plan-queries li").all_inner_texts()
@@ -301,7 +326,9 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert "calls" in agents[0] and "Idle" in agents[0]
     timeline = "\n".join(page.locator("#timeline li").all_inner_texts())
     for expected in ("Reading the problem", "Counts 2 PubMed queries", "#1 4, #2 1", "Tries PubMed: mindfulness", "Planning the search",
-                     "Final plan: primary → reviews", "Reviews and meta-analyses: mindfulness", "Collected 6 records to screen",
+                     "Final plan: primary → reviews → full_text", "Reviews and meta-analyses: mindfulness", "Collected 8 records to screen",
+                     "5 papers from PubMed, 2 only in Europe PMC, 1 registry record from ClinicalTrials.gov",
+                     "Tries Europe PMC: mindfulness", "Outcome reported in the full text (Europe PMC): mindfulness",
                      "Following the references of 1 included review", "References of “Mindfulness apps for depressive",
                      "Added 1 study cited by the reviews", "Screening “Smartphone mindfulness",
                      "Screening “Stress responses in a mouse model", "exclude: Animal study.",
@@ -373,7 +400,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert "before it finished" in page.inner_text("#project-list")
     page.click("#continue")
     page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
-    page.wait_for_function("document.querySelector('#tabs button').textContent === 'Extracted (5)'")
+    page.wait_for_function("document.querySelector('#tabs button').textContent === 'Extracted (7)'")
     assert "Continuing the search" in page.inner_text("#timeline")
 
     phone = context.new_page()

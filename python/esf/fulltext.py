@@ -10,7 +10,7 @@ from typing import Literal
 from pypdf import PdfReader
 
 from .jats import jats_to_text
-from .sources import Sources, trial_results_text
+from .sources import Sources, europepmc_url, trial_results_text
 
 Kind = Literal["registry", "pmc_xml", "oa_pdf", "abstract"]
 
@@ -73,5 +73,6 @@ def get_fulltext(paper: dict, sources: Sources) -> FullText | None:
 
     if paper.get("abstract"):
         text = f"# {paper['title']}\n\n## Abstract\n{paper['abstract']}\n"
-        return FullText(kind="abstract", text=text, url=f"https://pubmed.ncbi.nlm.nih.gov/{paper['ext_id']}/")
+        url = europepmc_url(paper["ext_id"]) if paper["source"] == "europepmc" else f"https://pubmed.ncbi.nlm.nih.gov/{paper['ext_id']}/"
+        return FullText(kind="abstract", text=text, url=url)
     return None

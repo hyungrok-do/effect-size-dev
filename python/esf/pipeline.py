@@ -15,11 +15,12 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
+from . import prompts
 from .config import Settings
 from .fulltext import FullText, get_fulltext
 from .llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec
-from .sources import Record, SourceError, Sources, trial_record
+from .sources import Record, SourceError, Sources, europepmc_pmid, europepmc_record, trial_record
 from .store import Store
 from .verify import Verification, escalation_reasons, in_audit_sample, verify
 
@@ -56,6 +57,14 @@ class Toolbox:
             lines.append(f"{r.pmid} | {r.year} | {', '.join(r.pubtypes)} | {r.title}")
         return "\n".join(lines)
 
+    def preview_europepmc(self, query: str, max_results: int) -> str:
+        total, results = self.sources.europepmc.search(query, max_results, abstracts=False)
+        lines = [f"Total hits: {total}"]
+        for r in results:
+            types = r.get("pubType") or ", ".join((r.get("pubTypeList") or {}).get("pubType") or [])
+            lines.append(f"{r['id']} | {r.get('pubYear', '')} | {r['source']} | {types} | {r.get('title', '')}")
+        return "\n".join(lines)
+
     def preview_trials(self, query: str, max_results: int) -> str:
         total, studies = self.sources.trials.search(query, max_results, with_results=True)
         lines = [f"Total studies with posted results: {total}"]
@@ -72,9 +81,10 @@ def _record_text(paper: dict) -> str:
         f"{kind}: {paper['title']}",
         f"Year: {paper.get('year') or 'unknown'}; source: {paper.get('journal') or ''}",
         f"Publication types: {', '.join(paper.get('pubtypes') or []) or 'unknown'}",
-        "",
-        paper.get("abstract") or "(no abstract available)",
     ]
+    if "full_text" in (paper.get("found_in") or []):
+        parts.append(prompts.FOUND_BY_FULL_TEXT)
+    parts += ["", paper.get("abstract") or "(no abstract available)"]
     return "\n".join(parts)
 
 
@@ -155,16 +165,18 @@ class Pipeline:
         order. Each search's hits and how many records it added go to the project's search log."""
         limit = self.settings.per_query_limit
         levels = sorted((lv for lv in plan.levels if lv.query.strip()), key=lambda lv: LEVELS.index(lv.level))
-        queries = [("pubmed", lv.level, lv.query) for lv in levels]
+        queries = [("europepmc" if lv.level == "full_text" else "pubmed", lv.level, lv.query) for lv in levels]
         queries += [("clinicaltrials", "registry", q) for q in plan.clinicaltrials_queries]
-        # id -> where it was found, in the order first found; `first` is the index of the search that found it first.
-        pmids: dict[str, dict] = {}
+        # Where each record was found, in the order first found; `first` is the index of the search that
+        # found it first. Papers are keyed "pmid:<PMID>", or by their Europe PMC ID when not in PubMed
+        # (`record` then holds them, as PubMed can't supply them); registry records by NCT ID.
+        papers: dict[str, dict] = {}
         trials: dict[str, dict] = {}
         entries: list[dict] = []
         failed: list[str] = []
 
-        def found(table: dict, key: str, level: str, label: str, index: int, study: dict | None = None) -> None:
-            item = table.setdefault(key, {"found_by": [], "found_in": [], "first": index, "study": study})
+        def found(table: dict, key: str, level: str, label: str, index: int, record: Any = None) -> None:
+            item = table.setdefault(key, {"found_by": [], "found_in": [], "first": index, "record": record})
             item["found_by"].append(label)
             if level not in item["found_in"]:
                 item["found_in"].append(level)
@@ -177,12 +189,21 @@ class Pipeline:
                 if source == "pubmed":
                     hits, ids = self.sources.pubmed.search(query, limit)
                     for pmid in ids:
-                        found(pmids, pmid, level, label, index)
+                        found(papers, f"pmid:{pmid}", level, label, index)
                     entry.update(hits=hits, taken=len(ids))
+                elif source == "europepmc":
+                    hits, results = self.sources.europepmc.search(query, limit)
+                    for result in results:
+                        pmid = europepmc_pmid(result)
+                        if pmid:
+                            found(papers, f"pmid:{pmid}", level, label, index)
+                        else:
+                            found(papers, str(result["id"]), level, label, index, europepmc_record(result))
+                    entry.update(hits=hits, taken=len(results))
                 else:
                     hits, studies = self.sources.trials.search(query, limit, with_results=True)
-                    for study in studies:
-                        found(trials, trial_record(study).ext_id, level, label, index, study)
+                    for record in map(trial_record, studies):
+                        found(trials, record.ext_id, level, label, index, record)
                     entry.update(hits=hits, taken=len(studies))
             except SourceError as exc:
                 failed.append(f"{label} ({exc})")
@@ -199,17 +220,19 @@ class Pipeline:
             if NCT.match(extra):
                 study = self.sources.trials.study(extra.upper())
                 if study:
-                    found(trials, extra.upper(), "named", named, len(entries), study)
+                    found(trials, extra.upper(), "named", named, len(entries), trial_record(study))
             elif extra.isdigit():
-                found(pmids, extra, "named", named, len(entries))
-        if any(item["first"] == len(entries) for item in [*pmids.values(), *trials.values()]):
+                found(papers, f"pmid:{extra}", "named", named, len(entries))
+        if any(item["first"] == len(entries) for item in [*papers.values(), *trials.values()]):
             entries.append({"level": "named", "source": "pubmed", "query": ", ".join(plan.extra_ids), "hits": None, "taken": None})
 
-        pmid_list = list(pmids)[: self.settings.max_candidates]
+        keys = list(papers)[: self.settings.max_candidates]
+        pmid_list = [key.removeprefix("pmid:") for key in keys if key.startswith("pmid:")]
         records: list[Record] = self.sources.pubmed.fetch(pmid_list) if pmid_list else []
-        by_pmid = {r.pmid: r for r in records}
-        articles = [(by_pmid[p], pmids[p]) for p in pmid_list if p in by_pmid]
-        registry = [(trial_record(item["study"]), item) for item in trials.values()]
+        by_pmid = {f"pmid:{r.pmid}": r for r in records}
+        articles = [(by_pmid.get(key) or papers[key]["record"], papers[key]) for key in keys]
+        articles = [(record, item) for record, item in articles if record is not None]
+        registry = [(item["record"], item) for item in trials.values()]
         # Interleave the two sources so the cap on candidates keeps the top of each.
         merged = [item for pair in zip_longest(articles, registry) for item in pair if item is not None]
         added = 0

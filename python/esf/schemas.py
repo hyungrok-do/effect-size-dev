@@ -51,14 +51,16 @@ class SearchSpec(BaseModel):
     open_questions: list[str] = Field(description="Ambiguities the investigator should resolve.")
 
 
-# The PubMed search runs from the top down: reviews first, then primary studies in the target
-# population, then wider ones. Trials cited by the included reviews are added after screening.
-Level = Literal["reviews", "primary", "wider", "outcome_data"]
-LEVELS: tuple[str, ...] = ("reviews", "primary", "wider", "outcome_data")
+# The search runs from the top down: reviews first, then primary studies in the target population,
+# then those whose full text reports the outcome (Europe PMC), then wider ones. Trials cited by the
+# included reviews are added after screening. Every level but full_text searches PubMed.
+Level = Literal["reviews", "primary", "full_text", "wider", "outcome_data"]
+LEVELS: tuple[str, ...] = ("reviews", "primary", "full_text", "wider", "outcome_data")
 # How each way of finding a record is named on the page; "cited", "registry" and "named" are added by code.
 LEVEL_NAMES = {
     "reviews": "Reviews and meta-analyses",
     "primary": "Studies in the target population",
+    "full_text": "Outcome reported in the full text (Europe PMC)",
     "wider": "Studies in related populations",
     "outcome_data": "Outcome data in the target population",
     "cited": "Cited by the included reviews",
@@ -70,10 +72,11 @@ LEVEL_NAMES = {
 class SearchLevel(BaseModel):
     level: Level = Field(
         description="reviews: systematic reviews and meta-analyses; primary: studies of the planned design in the "
-        "target population; wider: the same with the narrowest concept relaxed; outcome_data: studies reporting the "
-        "outcome in the target population, any design."
+        "target population; full_text: studies whose full text names the outcome, searched in Europe PMC; wider: "
+        "the primary level with its narrowest concept relaxed; outcome_data: studies reporting the outcome in the "
+        "target population, any design."
     )
-    query: str = Field(description="The PubMed query for this level.")
+    query: str = Field(description="The query for this level: Europe PMC syntax for full_text, PubMed for the others.")
     why: str = Field(description="One sentence on what this level adds.")
 
 

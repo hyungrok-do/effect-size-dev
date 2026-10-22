@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,8 @@ MAX_PDF_BYTES = 20 * 1024 * 1024
 
 @dataclass
 class Record:
-    source: Literal["pubmed", "clinicaltrials"]
+    # europepmc: an article in Europe PMC but not in PubMed (only in PubMed Central, or a preprint)
+    source: Literal["pubmed", "clinicaltrials", "europepmc"]
     ext_id: str
     title: str
     year: str = ""
@@ -358,6 +360,20 @@ class EuropePMC:
     def __init__(self, http: Http):
         self.http = http
 
+    def search(self, query: str, limit: int, abstracts: bool = True) -> tuple[int, list[dict]]:
+        """Results of a Europe PMC query, by relevance: PubMed records (source MED), articles only in
+        PubMed Central (PMC) and preprints (PPR). Other kinds (patents, theses, Agricola) are left out.
+        Europe PMC searches the full text of open-access articles too, section by section."""
+        params = {"query": query, "format": "json", "pageSize": max(1, min(limit, 1000)),
+                  "resultType": "core" if abstracts else "lite"}
+        response = self.http.request("GET", self.BASE + "search", params=params)
+        if response.status_code != 200:
+            raise SourceError(f"Europe PMC returned HTTP {response.status_code}")
+        payload = response.json()
+        results = (payload.get("resultList") or {}).get("result") or []
+        kept = [r for r in results if r.get("source") in EUROPEPMC_KINDS and r.get("id")]
+        return int(payload.get("hitCount") or 0), kept[:limit]
+
     def fulltext_xml(self, pmcid: str) -> str | None:
         pmcid = pmcid if pmcid.upper().startswith("PMC") else f"PMC{pmcid}"
         response = self.http.request("GET", f"{self.BASE}{pmcid}/fullTextXML")
@@ -374,6 +390,42 @@ class EuropePMC:
             return []
         found = (response.json().get("referenceList") or {}).get("reference") or []
         return [str(r["id"]) for r in found if r.get("source") == "MED" and r.get("id")]
+
+
+EUROPEPMC_KINDS = {"MED", "PMC", "PPR"}
+
+
+def _plain(text: str | None) -> str:
+    """Europe PMC titles and abstracts carry HTML tags (<i>, <h4>Background</h4>)."""
+    return " ".join(re.sub(r"<[^>]+>", " ", text or "").split())
+
+
+def europepmc_pmid(result: dict) -> str | None:
+    return str(result.get("pmid") or (result["id"] if result.get("source") == "MED" else "")) or None
+
+
+def europepmc_record(result: dict) -> Record:
+    """A Europe PMC result that is not in PubMed, as a record."""
+    journal = ((result.get("journalInfo") or {}).get("journal") or {}).get("title") or (
+        (result.get("bookOrReportDetails") or {}).get("publisher") or ""
+    )
+    pubtypes = (result.get("pubTypeList") or {}).get("pubType") or []
+    return Record(
+        source="europepmc",
+        ext_id=str(result["id"]),
+        title=_plain(result.get("title")),
+        year=_year(str(result.get("pubYear") or "")),
+        journal=journal,
+        pubtypes=[pubtypes] if isinstance(pubtypes, str) else list(pubtypes),
+        abstract=_plain(result.get("abstractText")),
+        doi=result.get("doi"),
+        pmcid=result.get("pmcid"),
+    )
+
+
+def europepmc_url(ext_id: str) -> str:
+    kind = "PPR" if ext_id.startswith("PPR") else "PMC" if ext_id.startswith("PMC") else "MED"
+    return f"https://europepmc.org/article/{kind}/{ext_id}"
 
 
 class Unpaywall:

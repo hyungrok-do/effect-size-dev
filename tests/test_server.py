@@ -49,8 +49,8 @@ def test_full_flow_over_http(tmp_path):
     project = wait_for(client, project_id, {"done", "error"})
     assert project["status"] == "done", project["error"]
     assert project["spec"]["timepoint"] == "8 to 12 weeks"
-    assert project["counts"] == {"extracted": 6, "screened_out": 1}
-    assert [e["level"] for e in project["search_log"]] == ["reviews", "primary", "registry", "cited"]
+    assert project["counts"] == {"extracted": 8, "screened_out": 1}
+    assert [e["level"] for e in project["search_log"]] == ["reviews", "primary", "full_text", "registry", "cited"]
     assert project["level_names"]["cited"] == "Cited by the included reviews"
 
     papers = {p["ext_id"]: p for p in client.get(f"/api/projects/{project_id}/papers").json()}
