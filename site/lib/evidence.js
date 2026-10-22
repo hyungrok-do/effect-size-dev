@@ -5,9 +5,10 @@
 // numbers, authors, arms and their sizes) and which reviews in the set cite them.
 //
 // buildEvidence: what the summary describes: the records the investigator kept something from, and
-// every reported value they have not excluded (V1, V2, ...), each marked with the record whose
-// participants it shares when the overlap check says to use that record's numbers instead. Nothing
-// is combined across studies. Claude refers to values by key, so every number in a summary comes
+// every reported value they have not excluded (V1, V2, ...). A value from a report of a study that is
+// reported more than once (a same_study group) is marked with the record whose numbers to use
+// instead; reviews and the studies they pool are separate studies and are not marked. Nothing is
+// combined across studies. Claude refers to values by key, so every number in a summary comes
 // from here, never from the model.
 
 const PAPER = -1; // result_index of a decision about the whole paper
@@ -51,7 +52,7 @@ function decisionOf(decisions, paperId, index) {
 export function buildEvidence(papers, decisions, overlap) {
   const useInstead = new Map(); // record -> the record of the same participants to use instead
   for (const group of overlap?.groups || []) {
-    if (!group.use) continue;
+    if (!group.use || group.relation !== 'same_study') continue;
     for (const r of group.records) if (r !== group.use && !useInstead.has(r)) useInstead.set(r, group.use);
   }
 
@@ -86,8 +87,10 @@ export function buildEvidence(papers, decisions, overlap) {
   return { records: overlapRecords(papers).filter((r) => kept.has(r.key)), values };
 }
 
-// What a summary was based on, to tell when it is out of date.
+// What a summary was based on, to tell when it is out of date: each extracted record, its decisions,
+// and the values it reports (a re-extraction changes them).
 export function decisionsBasis(papers, decisions) {
   return extracted(papers).map((p) => [p.id, p.status,
-    Object.entries(decisions[p.id] || {}).map(([k, d]) => [Number(k), d.decision]).sort((a, b) => a[0] - b[0])]);
+    Object.entries(decisions[p.id] || {}).map(([k, d]) => [Number(k), d.decision]).sort((a, b) => a[0] - b[0]),
+    p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value])])]);
 }

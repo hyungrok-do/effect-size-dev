@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 from .llm import ClaudeLLM
-from .pipeline import Pipeline
+from .pipeline import Pipeline, previous_summary
 from .schemas import LEVEL_NAMES, SearchSpec, upgrade_spec
 from .sources import Sources, europepmc_url
 from .store import RUNNING, Store
@@ -216,6 +216,8 @@ def create_app(
             raise HTTPException(400, "Read the problem first.")
         if project["status"] in RUNNING:
             raise HTTPException(409, "This project is already running.")
+        if (project.get("summary") or {}).get("status") == "running":
+            raise HTTPException(409, "Wait until the summary is written.")
         job = pipeline_for(x_anthropic_api_key)
         store.update_project(project_id, status="searching")
         submit(project_id, lambda: job.run(project_id))
@@ -229,7 +231,7 @@ def create_app(
         if (project.get("summary") or {}).get("status") == "running":
             raise HTTPException(409, "The summary is already being written.")
         job = pipeline_for(x_anthropic_api_key)
-        store.update_project(project_id, summary={"status": "running"})
+        store.update_project(project_id, summary={"status": "running", "previous": previous_summary(project.get("summary"))})
         submit(f"summary-{project_id}", lambda: job.summarize(project_id))
         return {"ok": True}
 

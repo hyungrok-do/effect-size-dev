@@ -89,6 +89,15 @@ def _record_text(paper: dict) -> str:
     return "\n".join(parts)
 
 
+def previous_summary(summary: dict | None) -> dict | None:
+    """The finished summary to keep while another is written: the summary itself if it is done, or
+    the one a running summary kept."""
+    summary = summary or {}
+    if summary.get("status") == "done":
+        return {k: v for k, v in summary.items() if k != "last_error"}
+    return summary.get("previous")
+
+
 class Pipeline:
     def __init__(self, store: Store, llm: ClaudeLLM, sources: Sources, settings: Settings):
         self.store = store
@@ -139,7 +148,7 @@ class Pipeline:
         assert project is not None and project["spec"]
         spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
         self.store.clear_papers(project_id)
-        self.store.update_project(project_id, error=None, search_plan=None, search_log=None)
+        self.store.update_project(project_id, error=None, search_plan=None, search_log=None, overlap=None, summary=None, progress=None)
         try:
             self.store.update_project(project_id, status="searching")
             self._progress(project_id, "planning the search")
@@ -391,19 +400,21 @@ class Pipeline:
         report: dict = {"groups": [], "notes": ""}
         if len(records) > 1:
             report = self.llm.check_overlap(spec, records, self._sink(project_id)).model_dump()
-        self.store.update_project(project_id, overlap={"report": report, "records": [r["key"] for r in records]})
+        self.store.update_project(project_id, overlap={"report": report, "records": [r["key"] for r in records], "input": records})
 
     def summarize(self, project_id: str) -> None:
         """Opus describes, for each number the plan needs, the values the investigator kept: how they
-        compare and where they share participants. It does not combine them or recommend one."""
-        self.store.update_project(project_id, summary={"status": "running"})
+        compare and where they share participants. It does not combine them or recommend one. If writing
+        it again fails, the previous summary stays, with the error."""
+        previous = previous_summary((self.store.project(project_id) or {}).get("summary"))
+        self.store.update_project(project_id, summary={"status": "running", "previous": previous})
         try:
             project = self.store.project(project_id)
             assert project is not None
             spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
             papers = self.store.papers(project_id)
             overlap = project.get("overlap") or {}
-            if "report" not in overlap or overlap.get("records") != [r["key"] for r in overlap_records(papers)]:
+            if "report" not in overlap or overlap.get("input") != overlap_records(papers):
                 self.check_overlap(project_id)
                 overlap = (self.store.project(project_id) or {})["overlap"]
             decisions = self.store.decisions(project_id)
@@ -417,7 +428,8 @@ class Pipeline:
             })
         except Exception as exc:
             log.exception("the summary failed")
-            self.store.update_project(project_id, summary={"status": "error", "error": describe_error(exc)})
+            error = describe_error(exc)
+            self.store.update_project(project_id, summary={**previous, "last_error": error} if previous else {"status": "error", "error": error})
 
     # -- one paper ------------------------------------------------------------
 

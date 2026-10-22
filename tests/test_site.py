@@ -70,7 +70,11 @@ EVIDENCE_PAPERS = [
     _paper(7, [("PHQ-9", "12 weeks", [("App", "sd", 2.0), ("App", "n", 5)])], status="screened_out"),
 ]
 EVIDENCE_DECISIONS = {"1": {"1": {"decision": "exclude"}, "0": {"decision": "include"}}, "6": {"-1": {"decision": "exclude"}}}
-EVIDENCE_OVERLAP = {"groups": [{"records": ["R2", "R5"], "relation": "same_study", "evidence": "NCT00000001", "use": "R2"}], "notes": ""}
+EVIDENCE_OVERLAP = {"groups": [
+    {"records": ["R2", "R5"], "relation": "same_study", "evidence": "NCT00000001", "use": "R2"},
+    # A review and two studies it pools: separate studies, so none shares another's participants.
+    {"records": ["R4", "R1", "R3"], "relation": "review_includes_study", "evidence": "R4 cites R1 and R3", "use": "R1"},
+], "notes": ""}
 
 # A specification saved before the structured fields.
 OLD_SPEC = {
@@ -314,6 +318,12 @@ def test_results_read_as_a_line_per_group(browser, site_url):
         [v("A vs B", "hazard_ratio", 0.71), v("A vs B", "ci_lower", 0.55), v("A vs B", "ci_upper", 0.92)],
         [v("A", "mean_change", -3.1), v("A", "sd_change", 5.0), v("A", "icc", 0.05)],
         [v("A", "n", 98), v("A", "n", 100), v("A", "other", 3)],
+        # A CI goes with the estimate it follows.
+        [v("A vs B", "standardized_mean_difference", 0.45), v("A vs B", "ci_lower", 0.1), v("A vs B", "ci_upper", 0.8),
+         v("A vs B", "mean_difference", -3.2), v("A vs B", "ci_lower", -5.1), v("A vs B", "ci_upper", -1.3)],
+        [v("A", "mean", 25.1), v("A", "mean_change", -3.2), v("A", "ci_lower", -4.5), v("A", "ci_upper", -1.9)],
+        [v("A", "mean", 8.1), v("A", "sd", 4.2), v("A", "ci_lower", 7.3), v("A", "ci_upper", 8.9)],
+        [v("A", "ci_lower", 1), v("A", "ci_upper", 2)],
     ]
     lines = page.evaluate("""async (cases) => {
         const { groupLine } = await import('/lib/review-view.js');
@@ -328,7 +338,27 @@ def test_results_read_as_a_line_per_group(browser, site_url):
         {"text": "HR 0.71 (95% CI 0.55 to 0.92)", "n": None},
         {"text": "change -3.1 ± 5 · ICC 0.05", "n": None},
         {"text": "n 100 · Other 3", "n": 98},
+        {"text": "MD -3.2 (95% CI -5.1 to -1.3) · SMD 0.45 (95% CI 0.1 to 0.8)", "n": None},
+        {"text": "mean 25.1 · change -3.2 (95% CI -4.5 to -1.9)", "n": None},
+        {"text": "8.1 ± 4.2 (95% CI 7.3 to 8.9)", "n": None},
+        {"text": "95% CI 1 to 2", "n": None},
     ], lines
+    # The search map's stages for searches in each state.
+    plan = {"levels": [{"level": "primary", "query": "q"}], "clinicaltrials_queries": [], "extra_ids": []}
+    states = page.evaluate("""async (cases) => {
+        const { stageStates } = await import('/lib/search-map.js');
+        return cases.map(([project, running]) => stageStates(project, running));
+    }""", [
+        [{"status": "searching", "progress": {"stage": "done"}, "search_plan": None}, True],  # Search again, before it writes progress
+        [{"status": "spec_ready", "progress": {"stage": "done"}, "search_plan": plan}, False],  # a finished search, spec edited
+        [{"status": "screening", "progress": {"stage": "screening", "done": 3, "total": 9}, "search_plan": plan,
+          "search_log": [{"level": "cited"}]}, True],  # screening what the reviews cite
+        [{"status": "interrupted", "progress": {"stage": "extracting", "done": 1, "total": 4}, "search_plan": plan}, False],
+    ])
+    assert [s["plan"] for s in states] == ["active", "done", "done", "done"]
+    assert set(states[1].values()) == {"done"} and states[0]["ready"] == "pending"
+    assert (states[2]["follow"], states[2]["screen"], states[2]["extract"]) == ("done", "active", "pending")
+    assert (states[3]["extract"], states[3]["overlap"]) == ("stopped", "pending")
     page.close()
 
 
@@ -564,8 +594,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert rows[1][2] == "College of Nursing, Yonsei University, Seoul, Korea.; Mind Health Institute, Seoul, Korea." and rows[3][2] == "—"
     page.keyboard.press("Escape")
     assert page.locator(".authors-pop:popover-open").count() == 0
+    # Opened quotes stay open when the card is redrawn after a decision.
+    open_paper(page, "A mindfulness app for depressive").locator(".result").first.locator("details.quotes summary").click()
     open_paper(page, "A mindfulness app for depressive").locator(".result").first.locator("button.include").click()
     page.wait_for_selector(".result[data-decision='include']")
+    assert page.locator(".result").first.locator("details.quotes").get_attribute("open") is not None
     # Every result of this paper is decided: it counts as reviewed, and Next is the button to press.
     page.wait_for_function("document.querySelector('#review-progress-text').textContent === 'Reviewed 1 of 7 papers'")
     assert page.get_attribute("#queue button[aria-current='true']", "data-state") == "included"

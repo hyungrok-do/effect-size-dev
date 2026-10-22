@@ -188,9 +188,9 @@ class Store:
         )
         for row in self._all("SELECT id, summary FROM projects WHERE summary IS NOT NULL"):
             if row["summary"].get("status") == "running":
-                self.update_project(row["id"], summary={
-                    "status": "error", "error": "The server restarted while the summary was being written.",
-                })
+                error = "The server restarted while the summary was being written."
+                previous = row["summary"].get("previous")
+                self.update_project(row["id"], summary={**previous, "last_error": error} if previous else {"status": "error", "error": error})
 
     # -- papers ---------------------------------------------------------------
 

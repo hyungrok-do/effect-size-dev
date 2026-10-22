@@ -59,7 +59,7 @@ export function logRows(events, papers) {
   const titles = new Map(papers.map((p) => [p.id, p.title || p.ext_id]));
   return events.map((e) => ({
     at: e.at, started: e.started || '', agent: e.agent, models: (e.models || []).join('; '), step: e.step, phase: e.phase,
-    job: e.job || '', parent: e.parent || '', paper_id: e.paper_id ?? '', paper_title: titles.get(e.paper_id) || '',
+    job: e.job || '', parent: e.parent || '', paper_id: e.paper_id ?? '', paper_title: e.paper_title || titles.get(e.paper_id) || '',
     text: e.text, detail: e.detail || '', ms: e.ms ?? '', calls: e.usage?.calls ?? '', input_tokens: e.usage?.input ?? '',
     output_tokens: e.usage?.output ?? '',
   }));

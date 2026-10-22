@@ -40,6 +40,11 @@ export class Activity {
 
   async log(event) {
     try {
+      // The paper's title is kept with the step: a new search replaces the papers, not the log.
+      if (event.paper_id != null && event.paper_title == null) {
+        const paper = await this.store.paper(event.paper_id);
+        event.paper_title = paper ? paper.title || paper.ext_id : null;
+      }
       await this.store.addEvent(this.projectId, event);
     } catch (error) {
       console.warn('Could not record activity:', error); // the log is a convenience; never stop the work for it

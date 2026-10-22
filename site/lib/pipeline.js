@@ -74,6 +74,16 @@ export function documentBlock(doc, title) {
   return { type: 'document', source: { type: 'text', media_type: 'text/plain', data: doc.text }, title: name };
 }
 
+// The finished summary to keep while another is written: the summary itself if it is done, or the one
+// a running summary kept. Mirrors previous_summary in python/esf/pipeline.py.
+export function previousSummary(summary) {
+  if (summary?.status === 'done') {
+    const { last_error: _, ...kept } = summary;
+    return kept;
+  }
+  return summary?.previous ?? null;
+}
+
 export class Pipeline {
   constructor({ store, claude, sources, settings = {}, activity = NO_ACTIVITY }) {
     this.store = store;
@@ -116,7 +126,9 @@ export class Pipeline {
     const spec = project.spec;
     if (!resume) {
       await this.store.clearPapers(projectId);
-      await this.store.updateProject(projectId, { error: null, search_plan: null, search_log: null, collected: false, followed: false });
+      await this.store.updateProject(projectId, {
+        error: null, search_plan: null, search_log: null, collected: false, followed: false, overlap: null, summary: null, progress: null,
+      });
       project = await this.store.project(projectId);
     } else {
       await this.store.updateProject(projectId, { error: null });
@@ -399,18 +411,18 @@ export class Pipeline {
         ].join('\n'),
       );
     }
-    await this.store.updateProject(projectId, { overlap: { report, records: records.map((r) => r.key) } });
+    await this.store.updateProject(projectId, { overlap: { report, records: records.map((r) => r.key), input: records } });
   }
 
   // Opus describes, for each number the plan needs, the values the investigator kept: how they
   // compare and where they share participants. It does not combine them or recommend one.
   async summarize(projectId) {
-    await this.store.updateProject(projectId, { summary: { status: 'running' } });
+    const previous = previousSummary((await this.store.project(projectId)).summary);
+    await this.store.updateProject(projectId, { summary: { status: 'running', previous } });
     try {
       const papers = await this.store.papers(projectId);
       let overlap = (await this.store.project(projectId)).overlap || {};
-      const keys = overlapRecords(papers).map((r) => r.key);
-      if (!overlap.report || JSON.stringify(overlap.records) !== JSON.stringify(keys)) {
+      if (!overlap.report || JSON.stringify(overlap.input) !== JSON.stringify(overlapRecords(papers))) {
         await this.checkOverlap(projectId);
         overlap = (await this.store.project(projectId)).overlap;
       }
@@ -435,7 +447,10 @@ export class Pipeline {
         summary: { status: 'done', result, evidence, basis: decisionsBasis(papers, decisions) },
       });
     } catch (error) {
-      await this.store.updateProject(projectId, { summary: { status: 'error', error: describeError(error) } });
+      const message = describeError(error);
+      await this.store.updateProject(projectId, {
+        summary: previous ? { ...previous, last_error: message } : { status: 'error', error: message },
+      });
     }
   }
 

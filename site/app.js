@@ -7,7 +7,8 @@ import { csvOf, download, exportRows, LOG_COLUMNS, logRows, PAPER, toCsv } from 
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
 import { europepmcUrl, Sources } from './lib/sources.js';
-import { overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from './lib/review-view.js';
+import { decisionsBasis } from './lib/evidence.js';
+import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from './lib/review-view.js';
 import { searchMap } from './lib/search-map.js';
 import { SpecPanel } from './lib/spec-panel.js';
 import { RUNNING, Store } from './lib/store.js';
@@ -530,7 +531,7 @@ async function exportLog(format) {
     search: { id, created_at: state.project.created_at, paragraph: state.project.paragraph },
     exported_at: new Date().toISOString(),
     agents: AGENT_NAMES,
-    events: events.map(({ project_id: _, ...e }) => ({ ...e, paper_title: titles.get(e.paper_id) ?? null })),
+    events: events.map(({ project_id: _, ...e }) => ({ ...e, paper_title: e.paper_title || titles.get(e.paper_id) || null })),
   };
   download(`${name}.json`, JSON.stringify(body, null, 2), 'application/json');
 }
@@ -605,16 +606,19 @@ function renderSpec(project) {
     specPanel.show(project.spec);
   }
   const running = jobs.has(project.id);
+  // A new search replaces the papers a summary being written is about: it waits for the summary.
+  const summarizing = jobs.has(`summary-${project.id}`);
   specPanel.disabled = running;
-  $('#run').disabled = running;
+  $('#run').disabled = running || summarizing;
   const hasPapers = state.papers.length > 0;
   $('#run').textContent = hasPapers ? 'Search again' : 'Search and extract';
-  $('#run-status').textContent = hasPapers && !running ? 'Searching again replaces the papers and decisions below.' : '';
+  $('#run-status').textContent = summarizing ? 'Wait until the summary is written.'
+    : hasPapers && !running ? 'Searching again replaces the papers and decisions below.' : '';
 }
 
 async function runSearch(event) {
   event.preventDefault();
-  if (!haveKey()) return;
+  if (!haveKey() || jobs.has(`summary-${state.id}`)) return;
   const id = state.id;
   const spec = specPanel.collect();
   if (!spec) return; // an open edit has a value to fix; the panel says which
@@ -644,7 +648,7 @@ function renderProgress(project) {
   state.available.progress = Boolean(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
   if (!state.available.progress) return;
 
-  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running }));
+  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running, fetcher: true }));
 
   const progress = project.progress || {};
   const bar = $('#progress');
@@ -770,14 +774,25 @@ function renderReview() {
   const shown = groups[state.tab];
   if (!shown.length) {
     $('#review-nav').hidden = true;
+    state.cardKey = '';
     $('#papers').replaceChildren(h('p', { class: 'muted' }, 'Nothing here.'));
     return;
   }
+  const at = `${state.source}:${state.tab}`;
   const current = reviewNav({
-    papers: shown, current: state.reviewAt[`${state.source}:${state.tab}`], decisionsOf: (p) => state.decisions[p.id] || {},
+    papers: shown, current: state.reviewAt[at], decisionsOf: (p) => state.decisions[p.id] || {},
     show: showPaper, counting: state.tab === 'extracted',
   });
-  $('#papers').replaceChildren(paperCard(current, trials));
+  // The paper shown stays shown when others join the list, and its card is redrawn only when it
+  // changes, so what the reader has open stays open while the search runs.
+  state.reviewAt[at] = current.id;
+  const cardKey = JSON.stringify([current.id, current.status, current.extracted_by, current.error, current.fulltext_kind,
+    state.decisions[current.id], state.project?.overlap?.report, jobs.has(state.id), jobs.has(`paper-${current.id}`),
+    (current.nct_ids || []).map((nct) => trials.get(nct))]);
+  if (cardKey !== state.cardKey) {
+    state.cardKey = cardKey;
+    $('#papers').replaceChildren(paperCard(current, trials));
+  }
 }
 
 function showPaper(paperId) {
@@ -795,7 +810,12 @@ function renderSummary(project) {
   $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
   $('#summarize-status').textContent = running ? 'Opus is checking for overlap and writing the summary…'
     : jobs.has(project.id) ? 'Wait until the search finishes.' : '';
-  showError($('#summary-error'), summary?.status === 'error' ? summary.error : '');
+  showError($('#summary-error'), summary?.status === 'error' ? summary.error
+    : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
+  const key = JSON.stringify([summary, running, project.overlap?.report, decisionsBasis(state.papers, state.decisions),
+    state.papers.map((p) => [p.id, p.title, p.authors, p.year, p.pmid, p.pmcid])]);
+  if (key === state.summaryKey) return;
+  state.summaryKey = key;
   $('#summary-body').replaceChildren(...(summary?.status === 'done'
     ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions: state.decisions, linksOf: links })
     : running ? [] : [h('p', { class: 'muted' },
@@ -856,7 +876,7 @@ function paperCard(paper, trials) {
 
   const screen = paper.screen;
   const reasons = paper.escalation?.reasons || [];
-  const details = h('details', { class: 'paper-details' }, h('summary', {}, 'Details'),
+  const details = foldable(`details:${paper.id}`, { class: 'paper-details' }, 'Details',
     h('div', { class: 'meta' },
       badge({ clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed' }[paper.source] || 'Europe PMC'),
       paper.source !== 'clinicaltrials' && LEVEL_SHORT[paper.found_in?.[0]]

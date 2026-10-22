@@ -274,3 +274,52 @@ def test_a_record_stored_without_its_authors_gets_them_from_its_source(tmp_path)
     registry = papers["NCT01234567"]
     store.update_paper(registry["id"], author_list=None)
     assert pipeline.author_list(registry["id"]) == [{"name": "Jane Doe, MD", "affiliation": "University of Example", "role": "Principal investigator"}]
+
+
+def test_the_summary_keeps_up_with_new_extractions_and_new_searches(tmp_path):
+    from esf.evidence import decisions_basis
+
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    pipeline.summarize(project_id)
+    first = store.project(project_id)["summary"]
+    assert first["status"] == "done" and llm.calls.count("overlap") == 1
+    # Re-extracting a paper changes its numbers: the summary's basis no longer matches.
+    paper = next(p for p in store.papers(project_id) if p["ext_id"] == "22222222")
+    extraction = paper["extraction"]
+    extraction["results"][0]["values"][0]["value"] += 1
+    store.update_paper(paper["id"], extraction=extraction)
+    assert decisions_basis(store.papers(project_id), store.decisions(project_id)) != first["basis"]
+    pipeline.summarize(project_id)
+    assert llm.calls.count("overlap") == 1  # what the overlap check sees (arms, sizes, outcomes) is the same
+    # When the arms or their sizes change, the overlap check runs again before the next summary.
+    extraction["groups"] = [*extraction["groups"], "Booster arm (n = 12)"]
+    store.update_paper(paper["id"], extraction=extraction)
+    pipeline.summarize(project_id)
+    assert llm.calls.count("overlap") == 2
+    # A failed rewrite keeps the summary there was, with the error.
+    def broken(*args, **kwargs):
+        raise RuntimeError("overloaded")
+    llm.summarize = broken
+    pipeline.summarize(project_id)
+    kept = store.project(project_id)["summary"]
+    assert kept["status"] == "done" and "overloaded" in kept["last_error"] and kept["result"] == first["result"]
+    # A new search starts clean: no overlap, summary or progress from the one before.
+    store.update_project(project_id, status="spec_ready")
+    pipeline.store.update_project = (lambda original: (lambda pid, **f: (seen.append(set(f)), original(pid, **f))[1]))(store.update_project)
+    seen: list = []
+    pipeline.run(project_id)
+    assert {"overlap", "summary", "progress"} <= next(f for f in seen if "search_plan" in f)
+    assert store.project(project_id)["summary"] is None
+
+
+def test_a_restart_keeps_the_summary_that_was_being_rewritten(tmp_path):
+    from esf.store import Store
+
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    pipeline.summarize(project_id)
+    done = store.project(project_id)["summary"]
+    store.update_project(project_id, summary={"status": "running", "previous": done})
+    store.interrupt_running()
+    kept = store.project(project_id)["summary"]
+    assert kept["status"] == "done" and kept["result"] == done["result"] and "restarted" in kept["last_error"]
+    assert isinstance(store, Store)

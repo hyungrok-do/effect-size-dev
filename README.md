@@ -274,7 +274,9 @@ and overlaps it suspects but cannot confirm (`possible_overlap`). It is given wh
 apart: registration numbers, authors, arms and their sizes, populations, dates, and which reviews
 in the set cite which records (from the reference lists read during the search). A citation alone
 is not taken as proof that a review pools a study. For each group Opus says whose numbers to use;
-the paper shows the note, and the summary marks the other records' values as the same participants.
+the paper shows the note. When a study is reported more than once, the summary marks the other
+reports' values as the same participants as the record to use; a review and the studies it pools
+are separate studies and are not marked.
 
 ### The summary
 
@@ -294,7 +296,8 @@ tables and wherever the text names it by key (R12), links to its PubMed, Europe 
 ClinicalTrials.gov page. Opus writes values'
 keys rather than numbers (the SDs run from [V4] to [V9]), and the page shows the numbers as the
 papers print them. If you change a decision afterwards, the page says the summary is out of date
-until you write it again.
+until you write it again; so does re-extracting a paper. If writing it again fails, the previous
+summary stays, with the error.
 
 ## Privacy
 

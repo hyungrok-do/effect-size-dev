@@ -47,14 +47,19 @@ const KEPT = new Set(['screened_in', 'unsure', 'fetching', 'extracting', 'extrac
 
 // Where each stage stands: 'done', 'active', 'stopped' (where a search that is not running stopped),
 // or 'pending'. `running` says whether the search is running now.
+const UNDER_WAY = new Set(['searching', 'screening', 'extracting']);
+
 export function stageStates(project, running) {
   const states = Object.fromEntries(ORDER.map((k) => [k, 'pending']));
-  if (project.status === 'done') {
+  // A run that finished: done, also after the specification is edited again (status spec_ready).
+  // A run just started may still carry the last run's 'done' until it writes its own progress.
+  const finished = project.progress?.stage === 'done';
+  if (project.status === 'done' || (finished && !running && !UNDER_WAY.has(project.status))) {
     for (const k of ORDER) states[k] = 'done';
     return states;
   }
   const log = project.search_log || [];
-  const current = STAGE_OF[project.progress?.stage] || (project.search_plan ? 'search' : 'plan');
+  const current = (!finished && STAGE_OF[project.progress?.stage]) || (project.search_plan ? 'search' : 'plan');
   const at = ORDER.indexOf(current);
   ORDER.forEach((k, i) => { if (i < at) states[k] = 'done'; });
   // Records cited by the reviews are screened after the references are read.
@@ -95,7 +100,7 @@ function details(key, { project, papers, state, progress, log }) {
   const plan = project.search_plan;
   if (key === 'plan') {
     if (!plan) return null;
-    const levels = (plan.levels || []).length;
+    const levels = queriesOf(plan).filter((q) => q.level !== 'registry').length;
     return facts(`${plural(levels, 'level')} planned`, `${plural(plan.clinicaltrials_queries.length, 'ClinicalTrials.gov query', 'ClinicalTrials.gov queries')}`,
       plan.extra_ids.length > 0 && `${plural(plan.extra_ids.length, 'record')} named directly`);
   }
@@ -106,9 +111,11 @@ function details(key, { project, papers, state, progress, log }) {
     let step = 0;
     const rows = queries.map((q, i) => {
       const e = entries[i];
-      const nodeState = e ? (e.error ? 'error' : 'done') : state === 'active' && progress.done === i ? 'active' : state === 'stopped' && progress.done === i ? 'stopped' : 'pending';
+      const nodeState = e ? (e.error ? 'error' : 'done')
+        : state === 'done' ? 'done'
+          : state === 'active' && progress.done === i ? 'active' : state === 'stopped' && progress.done === i ? 'stopped' : 'pending';
       const result = e?.error ? `Failed: ${e.error}`
-        : e ? [plural(e.hits, 'hit'), `top ${number(e.taken)} taken`, e.added != null && `${number(e.added)} new`].filter(Boolean).join(' → ')
+        : e?.hits != null ? [plural(e.hits, 'hit'), `top ${number(e.taken)} taken`, e.added != null && `${number(e.added)} new`].filter(Boolean).join(' → ')
           : nodeState === 'active' ? 'Searching…' : '';
       const mark = q.level === 'registry' ? '+' : String(++step);
       return h('li', { class: 'map-level', 'data-state': nodeState, 'data-level': q.level },
@@ -169,6 +176,7 @@ function details(key, { project, papers, state, progress, log }) {
     ];
   }
   if (key === 'overlap') {
+    if (state === 'pending') return null;
     const overlap = project.overlap;
     if (overlap?.error) return h('p', { class: 'map-note' }, `The check failed: ${overlap.error}. The summary tries it again.`);
     if (!overlap?.report) return null;
@@ -190,8 +198,9 @@ function details(key, { project, papers, state, progress, log }) {
 
 const STATE_TEXT = { done: 'Done', active: 'Running', stopped: 'Stopped here', pending: 'Waiting' };
 
-// The map of a search. `running` says whether it is running now.
-export function searchMap({ project, papers, running }) {
+// The map of a search. `running` says whether it is running now; `fetcher` whether Sonnet downloads
+// what the browser may not (the browser edition; the local server downloads by itself).
+export function searchMap({ project, papers, running, fetcher = false }) {
   const states = stageStates(project, running);
   const progress = project.progress || {};
   const log = project.search_log || [];
@@ -204,7 +213,8 @@ export function searchMap({ project, papers, running }) {
       h('div', { class: 'map-card' },
         h('div', { class: 'map-head' },
           h('h4', {}, stage.title),
-          h('span', { class: 'map-agents' }, stage.agents.map((a) => h('span', { class: 'map-agent', 'data-agent': a }, AGENT_LABELS[a]))),
+          h('span', { class: 'map-agents' }, stage.agents.filter((a) => fetcher || a !== 'sonnet')
+            .map((a) => h('span', { class: 'map-agent', 'data-agent': a }, AGENT_LABELS[a]))),
           h('span', { class: 'map-state' }, live)),
         h('p', { class: 'map-how' }, stage.how),
         details(stage.key, { project, papers, state, progress, log })));

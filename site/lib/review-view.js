@@ -36,6 +36,16 @@ const badge = (text, kind = '') => h('span', { class: `badge ${kind}`.trim() }, 
 const short = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+// Which folded sections the reader has opened, by key, so that redrawing a card or the summary keeps
+// them open.
+const OPENED = new Set();
+export function foldable(key, attrs, label, ...children) {
+  return h('details', {
+    ...attrs, open: OPENED.has(key) || null,
+    ontoggle: (e) => { if (e.target.open) OPENED.add(key); else OPENED.delete(key); },
+  }, h('summary', {}, label), ...children);
+}
+
 // -- the review ---------------------------------------------------------------------
 
 // How far a paper's review has got: every result decided (included, excluded or both), some, or
@@ -82,10 +92,24 @@ export function reviewNav({ papers, current, decisionsOf, show, counting }) {
   return papers[at];
 }
 
+const popoverOpen = () => {
+  try {
+    return Boolean(document.querySelector('[popover]:popover-open'));
+  } catch {
+    return false; // a browser without popovers has none open
+  }
+};
+
 // Arrow keys move through the review while it is on screen and nothing that takes typing has the focus.
 export function reviewKeys(event) {
-  if ($('#review').hidden || $('#review-nav').hidden || $('dialog[open]')) return;
-  if (event.target.closest('input, select, textarea, [role="tab"]')) return;
+  if ($('#review').hidden || $('#review-nav').hidden || $('dialog[open]') || popoverOpen()) return;
+  // Focus on nothing in particular or inside the review, and the navigator on screen: on the local
+  // page every step is on one page, and the keys must not move the review from elsewhere.
+  const target = event.target;
+  if (!(target === document.body || target === document.documentElement || $('#review').contains(target))) return;
+  if (target.closest('input, select, textarea, [role="tab"], .table-wrap')) return;
+  const box = $('#review-nav').getBoundingClientRect();
+  if (box.bottom < 0 || box.top > window.innerHeight) return;
   const button = { ArrowLeft: '#review-prev', ArrowRight: '#review-next' }[event.key];
   if (!button || $(button).disabled) return;
   event.preventDefault();
@@ -204,39 +228,76 @@ const EFFECTS = {
   risk_difference: 'RD', icc: 'ICC', correlation: 'r',
 };
 
+// Statistics a 95% CI can be reported for, and the CI bounds.
+const ESTIMATES = new Set(['mean', 'mean_change', 'median', 'percent', ...Object.keys(EFFECTS)]);
+const BOUNDS = new Set(['ci_lower', 'ci_upper']);
+
 // One group's numbers in the usual shorthand, as printed: mean ± SD, median [Q1–Q3], events/n, an
-// effect with its 95% CI, p. Returns {text, n}; anything else is listed by name.
+// effect with its 95% CI, p. A CI goes with the estimate it follows in the paper (else the one after
+// it). Returns {text, n}; anything else is listed by name.
 export function groupLine(values) {
-  const left = [...values];
+  const ciOf = new Map(); // estimate -> {ci_lower, ci_upper}
+  const loose = []; // bounds with no estimate to go with
+  values.forEach((v, i) => {
+    if (!BOUNDS.has(v.statistic)) return;
+    const before = values.slice(0, i).reverse().find((x) => ESTIMATES.has(x.statistic));
+    const owner = before || values.slice(i + 1).find((x) => ESTIMATES.has(x.statistic));
+    const ci = owner && (ciOf.get(owner) || {});
+    if (ci && ci[v.statistic] === undefined) {
+      ci[v.statistic] = v.value;
+      ciOf.set(owner, ci);
+    } else {
+      loose.push(v);
+    }
+  });
+  const ci = (estimate) => {
+    const c = ciOf.get(estimate);
+    return c ? ` (95% CI ${c.ci_lower ?? '?'} to ${c.ci_upper ?? '?'})` : '';
+  };
+  const left = values.filter((v) => !BOUNDS.has(v.statistic));
   const has = (stat) => left.some((v) => v.statistic === stat);
   const take = (stat) => {
     const i = left.findIndex((v) => v.statistic === stat);
-    return i < 0 ? null : left.splice(i, 1)[0].value;
+    return i < 0 ? null : left.splice(i, 1)[0];
   };
-  const ci = () => (has('ci_lower') && has('ci_upper') ? ` (95% CI ${take('ci_lower')} to ${take('ci_upper')})` : '');
-  const n = take('n');
+  const n = take('n')?.value ?? null;
   const parts = [];
   if (has('mean')) {
     const mean = take('mean');
-    parts.push(has('sd') ? `${mean} ± ${take('sd')}` : has('se') ? `${mean} ± ${take('se')} (SE)` : `mean ${mean}${ci()}`);
+    parts.push(has('sd') ? `${mean.value} ± ${take('sd').value}${ci(mean)}`
+      : has('se') ? `${mean.value} ± ${take('se').value} (SE)${ci(mean)}` : `mean ${mean.value}${ci(mean)}`);
   }
   if (has('mean_change')) {
     const change = take('mean_change');
-    parts.push(has('sd_change') ? `change ${change} ± ${take('sd_change')}` : `change ${change}${ci()}`);
+    parts.push(has('sd_change') ? `change ${change.value} ± ${take('sd_change').value}${ci(change)}` : `change ${change.value}${ci(change)}`);
   }
   if (has('median')) {
     const median = take('median');
-    parts.push(has('q1') && has('q3') ? `median ${median} [${take('q1')}–${take('q3')}]`
-      : has('min') && has('max') ? `median ${median} (${take('min')}–${take('max')})` : `median ${median}`);
+    parts.push(has('q1') && has('q3') ? `median ${median.value} [${take('q1').value}–${take('q3').value}]${ci(median)}`
+      : has('min') && has('max') ? `median ${median.value} (${take('min').value}–${take('max').value})${ci(median)}`
+        : `median ${median.value}${ci(median)}`);
   }
   if (has('events')) {
     const events = take('events');
-    parts.push(`${events}${n != null ? `/${n}` : ''} events${has('percent') ? ` (${take('percent')}%)` : ''}`);
+    const percent = has('percent') ? take('percent') : null;
+    parts.push(`${events.value}${n != null ? `/${n}` : ''} events${percent ? ` (${percent.value}%)${ci(percent)}` : ''}`);
   }
-  if (has('percent')) parts.push(`${take('percent')}%`);
-  for (const [stat, label] of Object.entries(EFFECTS)) while (has(stat)) parts.push(`${label} ${take(stat)}${ci()}`);
-  if (has('ci_lower') || has('ci_upper')) parts.push(`95% CI ${take('ci_lower') ?? '?'} to ${take('ci_upper') ?? '?'}`);
-  if (has('p_value')) parts.push(`p = ${take('p_value')}`);
+  if (has('percent')) {
+    const percent = take('percent');
+    parts.push(`${percent.value}%${ci(percent)}`);
+  }
+  for (const [stat, label] of Object.entries(EFFECTS)) {
+    while (has(stat)) {
+      const effect = take(stat);
+      parts.push(`${label} ${effect.value}${ci(effect)}`);
+    }
+  }
+  for (let i = 0; i < loose.length; i++) {
+    const lower = loose[i].statistic === 'ci_lower' ? loose[i].value : null;
+    const upper = lower == null ? loose[i].value : loose[i + 1]?.statistic === 'ci_upper' ? loose[++i].value : null;
+    parts.push(`95% CI ${lower ?? '?'} to ${upper ?? '?'}`);
+  }
+  if (has('p_value')) parts.push(`p = ${take('p_value').value}`);
   for (const v of left) parts.push(`${STATISTICS[v.statistic] || v.statistic} ${v.value}`);
   return { text: parts.join(' · '), n };
 }
@@ -322,7 +383,7 @@ export function resultBox(paper, result, index, decisions, decide) {
     head,
     resultLines(result),
     notes.length > 0 && h('p', { class: 'flags' }, notes.join(' · ')),
-    h('details', { class: 'quotes' }, h('summary', {}, 'Quotes'),
+    foldable(`quotes:${paper.id}:${index}`, { class: 'quotes' }, 'Quotes',
       h('p', { class: 'reason' }, [POPULATIONS[result.analysis_population] || result.analysis_population,
         result.adjusted !== 'unclear' && result.adjusted, `${result.confidence} confidence`].filter(Boolean).join(' · ')),
       h('div', { class: 'table-wrap' }, h('table', {},
@@ -452,7 +513,8 @@ export function summaryView({ summary, overlap, papers, decisions, linksOf }) {
       h('ul', {}, result.caveats.map((x) => h('li', {}, text(x))))),
     result.gaps.length > 0 && h('div', { class: 'summary-block' }, h('h3', {}, 'What the sources don’t give'),
       h('ul', {}, result.gaps.map((x) => h('li', {}, text(x))))),
-    h('details', { class: 'summary-block' }, h('summary', {}, `Every value kept (${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')})`),
+    foldable('summary:every-value', { class: 'summary-block' },
+      `Every value kept (${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')})`,
       valueTable(evidence.values, study)),
   ].filter(Boolean);
 }

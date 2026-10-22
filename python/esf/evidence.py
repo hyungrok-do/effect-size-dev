@@ -4,9 +4,10 @@ overlap_records: the extracted records, with what tells reports of one study apa
 numbers, authors, arms and their sizes) and which reviews in the set cite them.
 
 build_evidence: what the summary describes: the records the investigator kept something from, and
-every reported value they have not excluded (V1, V2, ...), each marked with the record whose
-participants it shares when the overlap check says to use that record's numbers instead. Nothing is
-combined across studies. Claude refers to values by key, so every number in a summary comes from
+every reported value they have not excluded (V1, V2, ...). A value from a report of a study that is
+reported more than once (a same_study group) is marked with the record whose numbers to use instead;
+reviews and the studies they pool are separate studies and are not marked. Nothing is combined across
+studies. Claude refers to values by key, so every number in a summary comes from
 here, never from the model.
 
 Mirrors site/lib/evidence.js; the tests require identical output.
@@ -66,7 +67,7 @@ def _decision(decisions: dict, paper_id: Any, index: int) -> str | None:
 def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) -> dict:
     use_instead: dict[str, str] = {}  # record -> the record of the same participants to use instead
     for group in (overlap or {}).get("groups") or []:
-        if group.get("use"):
+        if group.get("use") and group.get("relation") == "same_study":
             for r in group["records"]:
                 if r != group["use"]:
                     use_instead.setdefault(r, group["use"])
@@ -101,8 +102,14 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
 
 
 def decisions_basis(papers: list[dict], decisions: dict) -> list:
-    """What a summary was based on, to tell when it is out of date."""
-    return [[p["id"], p["status"], _decision_list(decisions, p["id"])] for p in _extracted(papers)]
+    """What a summary was based on, to tell when it is out of date: each extracted record, its
+    decisions, and the values it reports (a re-extraction changes them)."""
+    return [[p["id"], p["status"], _decision_list(decisions, p["id"]), _values_of(p)] for p in _extracted(papers)]
+
+
+def _values_of(paper: dict) -> list:
+    return [[r["outcome_measure"], r["timepoint"], [[v["group"], v["statistic"], v["value"]] for v in r["values"]]]
+            for r in paper["extraction"]["results"]]
 
 
 def _decision_list(decisions: dict, paper_id: Any) -> list:

@@ -1,6 +1,7 @@
 // Effect Size Finder: the page. Talks to the JSON API in python/esf/server.py.
 
-import { overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
+import { decisionsBasis } from '/lib/evidence.js';
+import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
 import { searchMap } from '/lib/search-map.js';
 import { SpecPanel } from '/lib/spec-panel.js';
 
@@ -153,7 +154,7 @@ async function loadProjects() {
 
 function newSearch() {
   clearTimeout(state.timer);
-  Object.assign(state, { id: null, project: null, papers: [], specKey: '', papersKey: '' });
+  Object.assign(state, { id: null, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', reviewAt: {} });
   history.replaceState(null, '', location.pathname);
   const paragraph = $('#paragraph');
   paragraph.value = '';
@@ -161,14 +162,14 @@ function newSearch() {
   $('#read').hidden = false;
   $('#read-status').textContent = '';
   showError($('#problem-error'), '');
-  for (const id of ['#spec', '#progress-card', '#review']) $(id).hidden = true;
+  for (const id of ['#spec', '#progress-card', '#review', '#summary']) $(id).hidden = true;
   loadProjects();
   paragraph.focus();
 }
 
 async function openProject(id) {
   clearTimeout(state.timer);
-  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '', reviewAt: {} });
+  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', reviewAt: {} });
   history.replaceState(null, '', `#${id}`);
   try {
     await refresh();
@@ -186,7 +187,7 @@ async function refresh() {
   const wasRunning = state.project && RUNNING.has(state.project.status);
   state.project = project;
   const hasPapers = Object.keys(project.counts || {}).length > 0;
-  if (hasPapers) state.papers = await api(`/api/projects/${id}/papers`);
+  state.papers = hasPapers ? await api(`/api/projects/${id}/papers`) : [];
   if (id !== state.id) return;
   renderProblem(project);
   renderSpec(project);
@@ -297,7 +298,7 @@ function renderProgress(project) {
   card.hidden = !(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
   if (card.hidden) return;
 
-  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running: RUNNING.has(project.status) }));
+  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running: RUNNING.has(project.status), fetcher: false }));
 
   const progress = project.progress || {};
   const bar = $('#progress');
@@ -327,7 +328,8 @@ function renderProgress(project) {
     const found = (level, query) => {
       const e = log.find((x) => x.level === level && x.query === query);
       if (!e) return '';
-      return e.error ? ` (failed: ${e.error})` : ` (${count(e.hits, 'hit')}; ${count(e.added, 'new record')} screened)`;
+      if (e.error) return ` (failed: ${e.error})`;
+      return e.added == null ? ` (${count(e.hits, 'hit')})` : ` (${count(e.hits, 'hit')}; ${count(e.added, 'new record')} screened)`;
     };
     const levels = [...(plan.levels || (plan.pubmed_queries || []).map((query) => ({ level: 'primary', query, why: '' })))]
       .sort((a, b) => order.indexOf(a.level) - order.indexOf(b.level));
@@ -389,6 +391,7 @@ function renderReview() {
     papers: groups[state.tab], current: state.reviewAt[state.tab], decisionsOf: (p) => p.decisions || {},
     show: showPaper, counting: state.tab === 'extracted',
   });
+  if (current) state.reviewAt[state.tab] = current.id; // stays shown when others join the list
   $('#papers').replaceChildren(current ? paperCard(current, trials) : h('p', { class: 'muted' }, 'Nothing here.'));
 }
 
@@ -435,7 +438,7 @@ function paperCard(paper, trials) {
 
   const screen = paper.screen;
   const reasons = paper.escalation?.reasons || [];
-  const details = h('details', { class: 'paper-details' }, h('summary', {}, 'Details'),
+  const details = foldable(`details:${paper.id}`, { class: 'paper-details' }, 'Details',
     h('div', { class: 'meta' },
       badge({ clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed' }[paper.source] || 'Europe PMC'),
       paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind),
@@ -558,8 +561,13 @@ function renderSummary(project) {
   $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
   $('#summarize-status').textContent = running ? 'Opus is checking for overlap and writing the summary…'
     : searching ? 'Wait until the search finishes.' : '';
-  showError($('#summary-error'), summary?.status === 'error' ? summary.error : '');
+  showError($('#summary-error'), summary?.status === 'error' ? summary.error
+    : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
   const decisions = Object.fromEntries(state.papers.map((p) => [p.id, p.decisions || {}]));
+  const key = JSON.stringify([summary, project.overlap?.report, decisionsBasis(state.papers, decisions),
+    state.papers.map((p) => [p.id, p.title, p.authors, p.year, p.pmid, p.pmcid])]);
+  if (key === state.summaryKey) return;
+  state.summaryKey = key;
   $('#summary-body').replaceChildren(...(summary?.status === 'done'
     ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions, linksOf: (p) => p.links })
     : running ? [] : [h('p', { class: 'muted' },

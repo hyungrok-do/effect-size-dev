@@ -157,6 +157,11 @@ def test_the_summary_over_http(tmp_path):
     assert client.get(f"/api/projects/{project_id}/export.json").json()["project"]["summary"]["status"] == "done"
 
     assert client.post("/api/projects/nope/summary").status_code == 404
+    # A new search waits for a summary being written: it would replace the papers it is about.
+    app_store = client.app.state.store
+    app_store.update_project(project_id, summary={"status": "running", "previous": summary})
+    assert client.post(f"/api/projects/{project_id}/run").status_code == 409
+    app_store.update_project(project_id, summary=summary)
     # A paper's authors with their affiliations.
     trial = next(p for p in client.get(f"/api/projects/{project_id}/papers").json() if p["ext_id"] == "11111111")
     authors = client.get(f"/api/projects/{project_id}/papers/{trial['id']}/authors").json()["authors"]
