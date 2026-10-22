@@ -1,6 +1,6 @@
 // Effect Size Finder: the page. Talks to the JSON API in python/esf/server.py.
 
-import { conclusionView, overlapNote, reviewKeys, reviewNav } from '/lib/review-view.js';
+import { overlapNote, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
 import { SpecPanel, STATISTICS } from '/lib/spec-panel.js';
 
 const RUNNING = new Set(['reading', 'searching', 'screening', 'extracting']);
@@ -206,9 +206,9 @@ async function refresh() {
   } else {
     $('#review').hidden = true;
   }
-  renderConclusion(project);
+  renderSummary(project);
   const extracting = state.papers.some((p) => p.status === 'fetching' || p.status === 'extracting');
-  if (RUNNING.has(project.status) || extracting || project.conclusion?.status === 'running') {
+  if (RUNNING.has(project.status) || extracting || project.summary?.status === 'running') {
     clearTimeout(state.timer);
     state.timer = setTimeout(() => refresh().catch(() => {}), 2500);
   } else if (wasRunning) {
@@ -554,7 +554,7 @@ async function decide(paper, resultIndex, decision, reason) {
     else delete paper.decisions[key];
     state.papersKey = '';
     renderReview();
-    renderConclusion(state.project);
+    renderSummary(state.project);
   } catch (error) {
     alert(`Could not save the decision: ${error.message}`);
   }
@@ -620,33 +620,33 @@ async function showSource(paper) {
   pre.querySelector('mark')?.scrollIntoView({ block: 'center' });
 }
 
-// -- step 5: the conclusion ---------------------------------------------------------
+// -- step 5: the summary -------------------------------------------------------------
 
-function renderConclusion(project) {
-  const c = project.conclusion;
-  const running = c?.status === 'running';
+function renderSummary(project) {
+  const summary = project.summary;
+  const running = summary?.status === 'running';
   const searching = RUNNING.has(project.status);
-  $('#conclusion').hidden = !state.papers.some((p) => p.status === 'extracted') && !c;
-  $('#conclude').disabled = running || searching;
-  $('#conclude').textContent = c?.status === 'done' ? 'Write the conclusion again' : 'Write the conclusion';
-  $('#conclude-status').textContent = running ? 'Opus is checking for overlap and writing the conclusion…'
+  $('#summary').hidden = !state.papers.some((p) => p.status === 'extracted') && !summary;
+  $('#summarize').disabled = running || searching;
+  $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
+  $('#summarize-status').textContent = running ? 'Opus is checking for overlap and writing the summary…'
     : searching ? 'Wait until the search finishes.' : '';
-  showError($('#conclusion-error'), c?.status === 'error' ? c.error : '');
+  showError($('#summary-error'), summary?.status === 'error' ? summary.error : '');
   const decisions = Object.fromEntries(state.papers.map((p) => [p.id, p.decisions || {}]));
-  $('#conclusion-body').replaceChildren(...(c?.status === 'done'
-    ? conclusionView({ conclusion: c, overlap: project.overlap?.report, papers: state.papers, decisions })
+  $('#summary-body').replaceChildren(...(summary?.status === 'done'
+    ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions })
     : running ? [] : [h('p', { class: 'muted' },
-      'Review the papers first: the conclusion uses every result you included or left undecided, and none you excluded.')]));
+      'Review the papers first: the summary uses every result you included or left undecided, and none you excluded.')]));
 }
 
-async function writeConclusion() {
+async function writeSummary() {
   if (!haveKey() || !state.id) return;
-  showError($('#conclusion-error'), '');
-  $('#conclude').disabled = true;
+  showError($('#summary-error'), '');
+  $('#summarize').disabled = true;
   try {
-    await api(`/api/projects/${state.id}/conclusion`, { method: 'POST', withKey: true });
+    await api(`/api/projects/${state.id}/summary`, { method: 'POST', withKey: true });
   } catch (error) {
-    showError($('#conclusion-error'), error.message);
+    showError($('#summary-error'), error.message);
   }
   await refresh();
 }
@@ -661,7 +661,7 @@ async function start() {
   $('#api-key').addEventListener('input', saveKey);
   $('#remember-key').addEventListener('change', saveKey);
   $('#forget-key').addEventListener('click', forgetKey);
-  $('#conclude').addEventListener('click', writeConclusion);
+  $('#summarize').addEventListener('click', writeSummary);
   document.addEventListener('keydown', reviewKeys);
   loadKey();
   try {

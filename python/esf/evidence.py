@@ -1,37 +1,26 @@
-"""What the overlap check and the conclusion are given.
+"""What the overlap check and the summary are given.
 
 overlap_records: the extracted records, with what tells reports of one study apart (registration
 numbers, authors, arms and their sizes) and which reviews in the set cite them.
 
-build_evidence: the candidate values for the conclusion. Every reported value the investigator has
-not excluded (V1, V2, ...), and summaries this code computes across studies (S1, S2, ...): a pooled
-SD where every arm reports its size, and otherwise the median and range. Claude recommends
-candidates by key; every number in a conclusion comes from here, never from the model.
+build_evidence: what the summary describes: the records the investigator kept something from, and
+every reported value they have not excluded (V1, V2, ...), each marked with the record whose
+participants it shares when the overlap check says to use that record's numbers instead. Nothing is
+combined across studies. Claude refers to values by key, so every number in a summary comes from
+here, never from the model.
 
 Mirrors site/lib/evidence.js; the tests require identical output.
 """
 
 from __future__ import annotations
 
-import math
-import re
 from typing import Any
 
 PAPER = -1  # result_index of a decision about the whole paper
-# Statistics that summarize across studies; the rest (n, bounds, test statistics) are only listed.
-SUMMARIZED = {
-    "mean", "sd", "se", "median", "events", "percent", "mean_change", "sd_change", "mean_difference",
-    "standardized_mean_difference", "odds_ratio", "risk_ratio", "hazard_ratio", "risk_difference", "icc", "correlation",
-}
-POOLED = {"sd", "sd_change"}  # pooled across arms and studies, weighted by n - 1
 
 
 def record_key(paper: dict) -> str:
     return f"R{paper['id']}"
-
-
-def _norm(text: str | None) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
 def _extracted(papers: list[dict]) -> list[dict]:
@@ -75,10 +64,12 @@ def _decision(decisions: dict, paper_id: Any, index: int) -> str | None:
 
 
 def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) -> dict:
-    dropped: set[str] = set()  # records the overlap check says not to use
+    use_instead: dict[str, str] = {}  # record -> the record of the same participants to use instead
     for group in (overlap or {}).get("groups") or []:
         if group.get("use"):
-            dropped |= {r for r in group["records"] if r != group["use"]}
+            for r in group["records"]:
+                if r != group["use"]:
+                    use_instead.setdefault(r, group["use"])
 
     values: list[dict] = []
     for p in _extracted(papers):
@@ -103,49 +94,14 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                     "relevance": r["relevance"],
                     "confidence": r["confidence"],
                     "quote_found": bool(check and check["quote"] != "missing" and check["number_in_quote"]),
-                    "dropped_for_overlap": record_key(p) in dropped,
+                    "same_participants_as": use_instead.get(record_key(p)),
                 })
-
-    groups: dict[tuple[str, str, str], list[dict]] = {}
-    for v in values:
-        if v["dropped_for_overlap"] or v["statistic"] not in SUMMARIZED:
-            continue
-        groups.setdefault((_norm(v["outcome"]), _norm(v["timepoint"]), v["statistic"]), []).append(v)
-
-    summaries: list[dict] = []
-    for (_, _, statistic), group in groups.items():
-        if len(group) < 2:
-            continue
-        numbers = sorted(v["value"] for v in group)
-        middle = len(numbers) // 2
-        base = {
-            "outcome": group[0]["outcome"],
-            "timepoint": group[0]["timepoint"],
-            "statistic": statistic,
-            "records": list(dict.fromkeys(v["record"] for v in group)),
-            "values": [v["key"] for v in group],
-            "count": len(group),
-            "min": numbers[0],
-            "max": numbers[-1],
-        }
-        if statistic in POOLED and all(v["n"] is not None and v["n"] > 1 for v in group):
-            # Plain loops, not sum(): Python's sum() of floats is compensated, JavaScript's isn't.
-            squares = 0.0
-            freedom = 0.0
-            total = 0.0
-            for v in group:
-                squares += (v["n"] - 1) * (v["value"] * v["value"])
-                freedom += v["n"] - 1
-                total += v["n"]
-            summaries.append({"key": f"S{len(summaries) + 1}", "method": "pooled_sd", "value": math.sqrt(squares / freedom),
-                              "n": total, **base})
-        median = numbers[middle] if len(numbers) % 2 else (numbers[middle - 1] + numbers[middle]) / 2
-        summaries.append({"key": f"S{len(summaries) + 1}", "method": "median", "value": median, "n": None, **base})
-    return {"values": values, "summaries": summaries}
+    kept = {v["record"] for v in values}
+    return {"records": [r for r in overlap_records(papers) if r["key"] in kept], "values": values}
 
 
 def decisions_basis(papers: list[dict], decisions: dict) -> list:
-    """What a conclusion was based on, to tell when it is out of date."""
+    """What a summary was based on, to tell when it is out of date."""
     return [[p["id"], p["status"], _decision_list(decisions, p["id"])] for p in _extracted(papers)]
 
 

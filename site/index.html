@@ -400,7 +400,7 @@
 
 <section class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published numbers a study plan needs</h2>
-  <p class="lede">Describe the study you are planning. Claude searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and Opus concludes which values to use. Everything runs in this page, with your own Anthropic API key.</p>
+  <p class="lede">Describe the study you are planning. Claude searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and Opus summarizes what the papers you kept report. Everything runs in this page, with your own Anthropic API key.</p>
   <ul id="points" class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
@@ -431,7 +431,7 @@
       <button id="tab-spec" role="tab" type="button" aria-controls="spec" data-step="spec"><span class="num">3</span>What to look for</button>
       <button id="tab-progress" role="tab" type="button" aria-controls="progress-card" data-step="progress"><span class="num">4</span>Search<span class="live-dot" aria-hidden="true" hidden></span></button>
       <button id="tab-review" role="tab" type="button" aria-controls="review" data-step="review"><span class="num">5</span>Review<span id="review-count" class="count"></span></button>
-      <button id="tab-conclusion" role="tab" type="button" aria-controls="conclusion" data-step="conclusion"><span class="num">6</span>Conclusion</button>
+      <button id="tab-summary" role="tab" type="button" aria-controls="summary" data-step="summary"><span class="num">6</span>Summary</button>
     </nav>
 
     <section id="setup" class="card" role="tabpanel" aria-labelledby="tab-setup" hidden>
@@ -535,15 +535,15 @@
       <input id="upload" class="file-input" type="file" accept="application/pdf" tabindex="-1" aria-hidden="true">
     </section>
 
-    <section id="conclusion" class="card" role="tabpanel" aria-labelledby="tab-conclusion" hidden>
-      <h2 id="conclusion-title">Conclusion</h2>
-      <p class="summary">Opus weighs the results you kept, avoids counting a study twice, and recommends a value for each number the plan needs. Every number here is computed from the papers by code; Opus only chooses among them.</p>
+    <section id="summary" class="card" role="tabpanel" aria-labelledby="tab-summary" hidden>
+      <h2 id="summary-title">Summary</h2>
+      <p class="summary">Opus describes what the papers you kept report for each number the plan needs: the values side by side, how closely each matches your study, how much they vary, and which share participants. It does not combine studies or pick a value; that is for you. Every number here comes from the papers; Opus refers to them by key.</p>
       <div class="actions">
-        <button id="conclude" type="button" class="primary">Write the conclusion</button>
-        <span id="conclude-status" class="muted small" aria-live="polite"></span>
+        <button id="summarize" type="button" class="primary">Write the summary</button>
+        <span id="summarize-status" class="muted small" aria-live="polite"></span>
       </div>
-      <div id="conclusion-error" class="error" role="alert" hidden></div>
-      <div id="conclusion-body"></div>
+      <div id="summary-error" class="error" role="alert" hidden></div>
+      <div id="summary-body"></div>
     </section>
   </main>
 

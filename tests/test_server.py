@@ -132,7 +132,7 @@ def test_unknown_ids(tmp_path):
     assert client.get("/api/projects/nope/papers").status_code == 404
 
 
-def test_the_conclusion_over_http(tmp_path):
+def test_the_summary_over_http(tmp_path):
     llm, keys = FakeLLM(), []
     client = make_client(tmp_path, llm=FakeLLM(), llm_for_key=lambda key: keys.append(key) or llm)
     project_id = client.post("/api/projects", json={"paragraph": "A randomized trial of a mindfulness app for PHQ-9."}).json()["id"]
@@ -141,21 +141,21 @@ def test_the_conclusion_over_http(tmp_path):
     project = wait_for(client, project_id, {"done"})
     # The overlap check runs after extraction, and the page is told what it found.
     assert {g["relation"] for g in project["overlap"]["report"]["groups"]} == {"same_study", "review_includes_study"}
-    assert project["conclusion"] is None
+    assert project["summary"] is None
 
-    assert client.post(f"/api/projects/{project_id}/conclusion", headers={"X-Anthropic-Api-Key": "sk-ant-test"}).status_code == 202
+    assert client.post(f"/api/projects/{project_id}/summary", headers={"X-Anthropic-Api-Key": "sk-ant-test"}).status_code == 202
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        conclusion = client.get(f"/api/projects/{project_id}").json()["conclusion"]
-        if conclusion["status"] != "running":
+        summary = client.get(f"/api/projects/{project_id}").json()["summary"]
+        if summary["status"] != "running":
             break
         time.sleep(0.05)
-    assert conclusion["status"] == "done", conclusion
-    assert conclusion["result"]["answers"][0]["candidate"].startswith("S") and conclusion["evidence"]["summaries"]
-    assert keys == ["sk-ant-test", "sk-ant-test"] and llm.calls[-1] == "conclude"
+    assert summary["status"] == "done", summary
+    assert summary["result"]["needs"][0]["values"] and summary["evidence"]["records"]
+    assert keys == ["sk-ant-test", "sk-ant-test"] and llm.calls[-1] == "summarize"
     assert llm.calls.count("overlap") == 1  # the check from the run is still current
-    assert client.get(f"/api/projects/{project_id}/export.json").json()["project"]["conclusion"]["status"] == "done"
+    assert client.get(f"/api/projects/{project_id}/export.json").json()["project"]["summary"]["status"] == "done"
 
-    assert client.post("/api/projects/nope/conclusion").status_code == 404
+    assert client.post("/api/projects/nope/summary").status_code == 404
     # The page's shared modules are served next to it.
     assert client.get("/lib/review-view.js").status_code == 200 and client.get("/lib/evidence.js").status_code == 200

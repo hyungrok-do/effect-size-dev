@@ -167,12 +167,12 @@ export class Claude {
     });
   }
 
-  conclude(spec, overlap, evidence, { sink } = {}) {
-    const data = { overlap, values: evidence.values, summaries: evidence.summaries };
+  summarize(spec, overlap, evidence, { sink } = {}) {
+    const data = { records: evidence.records, overlap, values: evidence.values };
     return this.parse({
-      step: 'conclude', manager: true, system: withSpec(PROMPTS.CONCLUDE, spec),
-      content: [{ type: 'text', text: `Candidates and the overlap check:\n${JSON.stringify(data, null, 1)}` }],
-      schema: SCHEMAS.Conclusion, effort: 'high', sink,
+      step: 'summarize', manager: true, system: withSpec(PROMPTS.SUMMARIZE, spec),
+      content: [{ type: 'text', text: `Records, the overlap check and the values:\n${JSON.stringify(data, null, 1)}` }],
+      schema: SCHEMAS.EvidenceSummary, effort: 'high', sink,
     });
   }
 

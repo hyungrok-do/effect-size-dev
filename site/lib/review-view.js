@@ -1,7 +1,7 @@
-// The review, one paper at a time, what the overlap check found, and the conclusion, drawn for both
-// pages (site/app.js and web/app.js), which share the markup they fill. Every number in a conclusion
-// comes from the evidence code computed (evidence.js): the model's text refers to candidates by key,
-// e.g. [S2], and is shown here with their values. Styles are in review.css.
+// The review, one paper at a time, what the overlap check found, and the summary, drawn for both
+// pages (site/app.js and web/app.js), which share the markup they fill. Every number in a summary
+// comes from the papers through evidence.js: the model's text refers to values by key, e.g. [V3],
+// and is shown here with their numbers. Styles are in review.css.
 
 import { decisionsBasis } from './evidence.js';
 import { STATISTICS } from './spec-panel.js';
@@ -34,7 +34,6 @@ const $ = (selector) => document.querySelector(selector);
 const badge = (text, kind = '') => h('span', { class: `badge ${kind}`.trim() }, text);
 const short = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-export const fmt = (x) => (x == null ? '' : Number.isInteger(x) ? String(x) : String(Number(x.toPrecision(4))));
 
 // -- the review ---------------------------------------------------------------------
 
@@ -62,7 +61,7 @@ export function reviewNav({ papers, current, decisionsOf, show, counting }) {
   const states = papers.map((p) => reviewState(p, decisionsOf(p)));
   const reviewed = states.filter((st) => REVIEWED.has(st)).length;
   $('#review-progress-text').textContent = counting
-    ? `Reviewed ${reviewed} of ${plural(papers.length, 'paper')}${reviewed === papers.length ? ' · all done; the conclusion is next' : ''}`
+    ? `Reviewed ${reviewed} of ${plural(papers.length, 'paper')}${reviewed === papers.length ? ' · all done; the summary is next' : ''}`
     : plural(papers.length, 'paper');
   $('#queue').replaceChildren(...papers.map((p, i) => h('li', {}, h('button', {
     type: 'button', 'data-state': states[i], 'aria-current': String(i === at), title: p.title || p.ext_id,
@@ -92,40 +91,7 @@ export function reviewKeys(event) {
   $(button).click();
 }
 
-// -- overlap and the conclusion -------------------------------------------------------
-
-// A candidate's number and what it is.
-export function describeCandidate(key, evidence, papers) {
-  const who = (record) => {
-    const p = papers.find((x) => `R${x.id}` === record);
-    return p ? `${record} ${(p.authors || '').split(',')[0] || short(p.title || '', 40)} ${p.year || ''}`.trim() : record;
-  };
-  const where = (c) => `${c.outcome}${c.timepoint ? ` at ${c.timepoint}` : ''}`;
-  const summary = evidence.summaries.find((c) => c.key === key);
-  if (summary) {
-    const what = STATISTICS[summary.statistic] || summary.statistic;
-    const studies = plural(summary.records.length, 'study', 'studies');
-    return summary.method === 'pooled_sd'
-      ? { value: fmt(summary.value), label: `Pooled ${what} of ${where(summary)}, ${summary.count} arms in ${studies} (n = ${fmt(summary.n)})` }
-      : { value: fmt(summary.value), label: `Median ${what} of ${where(summary)}, range ${fmt(summary.min)}–${fmt(summary.max)}, ${summary.count} values in ${studies}` };
-  }
-  const v = evidence.values.find((c) => c.key === key);
-  if (!v) return null;
-  return {
-    value: fmt(v.value),
-    label: `${STATISTICS[v.statistic] || v.statistic} of ${where(v)}, ${v.group}${v.n != null ? ` (n = ${fmt(v.n)})` : ''}, `
-      + `${who(v.record)}${v.quote_found ? '' : '; quote not found'}${v.dropped_for_overlap ? '; left out for overlap' : ''}`,
-  };
-}
-
-// Text from the model with [S2]-style keys shown as the candidates' numbers.
-function withValues(text, evidence, papers) {
-  return String(text || '').split(/(\[(?:S|V)\d+\])/).map((part) => {
-    const match = part.match(/^\[((?:S|V)\d+)\]$/);
-    const c = match && describeCandidate(match[1], evidence, papers);
-    return c ? h('span', { class: 'cand', title: `${match[1]}: ${c.label}` }, c.value) : part;
-  });
-}
+// -- overlap and the summary ----------------------------------------------------------
 
 // What the overlap check found about one paper: each group it is in, the others in it, and which to use.
 export function overlapNote(paper, report, papers) {
@@ -138,48 +104,107 @@ export function overlapNote(paper, report, papers) {
   };
   return h('div', { class: 'overlap-note' }, h('strong', {}, 'Overlap'), h('ul', {}, groups.map((g) => h('li', {},
     `${RELATIONS[g.relation]?.[0] || g.relation}: ${g.records.filter((r) => r !== mine).map(name).join('; ')}. ${g.evidence} `,
-    g.use === mine ? 'Use this record.' : g.use ? `Use ${name(g.use)}; this record is left out of the conclusion.` : ''))));
+    g.use === mine ? 'Use this record’s numbers.' : g.use ? `Use the numbers of ${name(g.use)} instead.` : ''))));
 }
 
-// The conclusion: the summary, a recommended value for each number the plan needs (with the
-// alternatives), the overlap found, caveats, gaps, and every candidate. `decisions` is
-// {paperId: {resultIndex: {decision}}}, to tell when the conclusion is out of date.
-export function conclusionView({ conclusion, overlap, papers, decisions }) {
-  const { result, evidence } = conclusion;
-  const stale = JSON.stringify(decisionsBasis(papers, decisions)) !== JSON.stringify(conclusion.basis);
-  const text = (t) => withValues(t, evidence, papers);
-  const candidate = (key) => {
-    const d = key && describeCandidate(key, evidence, papers);
-    return d ? [h('span', { class: 'value' }, d.value), h('span', { class: 'label' }, d.label)] : [h('span', { class: 'muted' }, 'Nothing fits')];
-  };
+// A record as the summary names it: key, first author and year.
+function who(record, papers) {
+  const p = papers.find((x) => `R${x.id}` === record);
+  return p ? `${record} ${(p.authors || '').split(',')[0] || short(p.title || '', 40)} ${p.year || ''}`.trim() : record;
+}
+
+// What a value is, in words.
+function describeValue(v, papers) {
+  return `${STATISTICS[v.statistic] || v.statistic} of ${v.outcome}${v.timepoint ? ` at ${v.timepoint}` : ''}, ${v.group}`
+    + `${v.n != null ? ` (n = ${v.n})` : ''}, ${who(v.record, papers)}`;
+}
+
+// Text from the model with [V3]-style keys shown as the values they name.
+function withValues(text, values, papers) {
+  return String(text || '').split(/(\[V\d+\])/).map((part) => {
+    const v = /^\[V\d+\]$/.test(part) && values.get(part.slice(1, -1));
+    return v ? h('span', { class: 'cand', title: `${v.key}: ${describeValue(v, papers)}` }, String(v.value), ' ', h('span', { class: 'cand-src' }, v.record)) : part;
+  });
+}
+
+// The values for one number to find, one row per study arm (record, outcome, timepoint and group)
+// and a column per statistic, in the order the summary lists them. A value whose quote was not found
+// is marked in its cell and in the row's check.
+function armTable(list, papers) {
+  const rows = new Map();
+  for (const v of list) {
+    const id = JSON.stringify([v.record, v.outcome, v.timepoint, v.group]);
+    if (!rows.has(id)) rows.set(id, { first: v, cells: new Map() });
+    const cells = rows.get(id).cells;
+    if (!cells.has(v.statistic)) cells.set(v.statistic, []);
+    cells.get(v.statistic).push(v);
+  }
+  const statistics = Object.keys(STATISTICS).filter((st) => list.some((v) => v.statistic === st));
+  return h('div', { class: 'table-wrap' }, h('table', { class: 'value-table' },
+    h('thead', {}, h('tr', {}, ['Study', 'Outcome', 'Group', ...statistics.map((st) => STATISTICS[st]), 'Check'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, [...rows.values()].map(({ first, cells }) => {
+      const paper = papers.find((x) => `R${x.id}` === first.record);
+      const unchecked = statistics.filter((st) => (cells.get(st) || []).some((v) => !v.quote_found));
+      return h('tr', {},
+        h('td', { title: paper?.title || '' }, who(first.record, papers)),
+        h('td', {}, first.outcome, first.timepoint ? h('span', { class: 'sub' }, first.timepoint) : null),
+        h('td', {}, first.group),
+        statistics.map((st) => h('td', { class: 'num' }, (cells.get(st) || []).flatMap((v, i) => [
+          i ? ' / ' : '',
+          h('span', { title: `${v.key}: ${v.describes}`, class: v.quote_found ? null : 'unchecked' }, String(v.value)),
+        ]))),
+        h('td', {}, unchecked.length
+          ? badge(`quote not found: ${unchecked.map((st) => STATISTICS[st]).join(', ')}`, 'warn') : badge('quotes found', 'ok'),
+        first.same_participants_as && [' ', badge(`same participants as ${first.same_participants_as}`, 'warn')]));
+    }))));
+}
+
+// Every value, one row each, with its key.
+function valueTable(list, papers) {
+  return h('div', { class: 'table-wrap' }, h('table', { class: 'value-table' },
+    h('thead', {}, h('tr', {}, ['Key', 'Study', 'Outcome', 'Group', 'Statistic', 'Value', 'n', 'Check'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, list.map((v) => {
+      const paper = papers.find((x) => `R${x.id}` === v.record);
+      return h('tr', {},
+        h('td', {}, v.key),
+        h('td', { title: paper?.title || '' }, who(v.record, papers)),
+        h('td', {}, v.outcome, v.timepoint ? h('span', { class: 'sub' }, v.timepoint) : null),
+        h('td', {}, v.group),
+        h('td', {}, STATISTICS[v.statistic] || v.statistic),
+        h('td', { class: 'num' }, String(v.value)),
+        h('td', { class: 'num' }, v.n == null ? '' : String(v.n)),
+        h('td', {}, badge(v.quote_found ? 'quote found' : 'quote not found', v.quote_found ? 'ok' : 'warn'),
+          v.same_participants_as && [' ', badge(`same participants as ${v.same_participants_as}`, 'warn')]));
+    }))));
+}
+
+// The summary: an overview, then for each number the plan needs the values that bear on it side by
+// side with how they compare, then overlap, caveats and gaps. Nothing is combined or recommended.
+// `decisions` is {paperId: {resultIndex: {decision}}}, to tell when the summary is out of date.
+export function summaryView({ summary, overlap, papers, decisions }) {
+  const { result, evidence } = summary;
+  const values = new Map(evidence.values.map((v) => [v.key, v]));
+  const stale = JSON.stringify(decisionsBasis(papers, decisions)) !== JSON.stringify(summary.basis);
+  const text = (t) => withValues(t, values, papers);
   const groups = overlap?.groups || [];
   return [
     stale && h('p', { class: 'notice stale' }, 'Your decisions have changed since this was written. Write it again to use them.'),
-    h('div', { class: 'conclusion-summary' }, text(result.summary)),
-    h('div', { class: 'conclusion-block' }, h('h3', {}, 'Recommended values'),
-      h('div', { class: 'table-wrap' }, h('table', { class: 'answers' },
-        h('thead', {}, h('tr', {}, ['Needed', 'Recommended', 'Confidence', 'Why'].map((t) => h('th', {}, t)))),
-        h('tbody', {}, result.answers.map((a) => h('tr', {},
-          h('td', {}, a.need),
-          h('td', {}, candidate(a.candidate),
-            a.alternatives.length > 0 && h('span', { class: 'alt' }, 'Also: ',
-              a.alternatives.flatMap((k, i) => [i ? '; ' : '', ...text(`[${k}]`), ' ', describeCandidate(k, evidence, papers)?.label || '']))),
-          h('td', {}, badge(a.confidence, { high: 'ok', medium: 'warn', low: 'err' }[a.confidence])),
-          h('td', {}, text(a.reasoning)))))))),
-    (groups.length > 0 || result.overlap_handling) && h('div', { class: 'conclusion-block' }, h('h3', {}, 'Overlap'),
-      result.overlap_handling && h('p', {}, text(result.overlap_handling)),
+    h('div', { class: 'summary-overview' }, text(result.overview)),
+    ...result.needs.map((need) => {
+      const list = need.values.map((k) => values.get(k)).filter(Boolean);
+      return h('div', { class: 'summary-block need' }, h('h3', {}, need.need),
+        h('p', {}, text(need.comparison)),
+        list.length ? armTable(list, papers) : h('p', { class: 'muted' }, 'No reported value bears on this.'));
+    }),
+    (groups.length > 0 || result.overlap) && h('div', { class: 'summary-block' }, h('h3', {}, 'Overlap'),
+      result.overlap && h('p', {}, text(result.overlap)),
       groups.length > 0 && h('ul', {}, groups.map((g) => h('li', {},
         `${g.records.join(', ')}: ${RELATIONS[g.relation]?.[1] || g.relation}. ${g.evidence}${g.use ? ` Use ${g.use}.` : ''}`)))),
-    result.caveats.length > 0 && h('div', { class: 'conclusion-block' }, h('h3', {}, 'Check before relying on it'),
+    result.caveats.length > 0 && h('div', { class: 'summary-block' }, h('h3', {}, 'Check before using them'),
       h('ul', {}, result.caveats.map((x) => h('li', {}, text(x))))),
-    result.gaps.length > 0 && h('div', { class: 'conclusion-block' }, h('h3', {}, 'What the sources don’t give'),
+    result.gaps.length > 0 && h('div', { class: 'summary-block' }, h('h3', {}, 'What the sources don’t give'),
       h('ul', {}, result.gaps.map((x) => h('li', {}, text(x))))),
-    h('details', { class: 'conclusion-block' }, h('summary', {}, `All candidates (${evidence.summaries.length} summaries, ${evidence.values.length} values)`),
-      h('div', { class: 'table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, ['Key', 'Value', 'What'].map((t) => h('th', {}, t)))),
-        h('tbody', {}, [...evidence.summaries, ...evidence.values].map((x) => {
-          const d = describeCandidate(x.key, evidence, papers);
-          return h('tr', {}, h('td', {}, x.key), h('td', { class: 'num' }, d.value), h('td', {}, d.label));
-        }))))),
+    h('details', { class: 'summary-block' }, h('summary', {}, `Every value kept (${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')})`),
+      valueTable(evidence.values, papers)),
   ].filter(Boolean);
 }

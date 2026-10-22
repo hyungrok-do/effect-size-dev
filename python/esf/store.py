@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS projects (
     search_plan TEXT,
     search_log TEXT,
     overlap TEXT,
-    conclusion TEXT
+    summary TEXT
 );
 CREATE TABLE IF NOT EXISTS papers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +81,7 @@ JSON_COLUMNS = {
     "search_plan",
     "search_log",
     "overlap",
-    "conclusion",
+    "summary",
     "nct_ids",
     "pubtypes",
     "found_by",
@@ -129,7 +129,7 @@ class Store:
             self._db.executescript(SCHEMA)
             # Columns added since the first version; CREATE TABLE IF NOT EXISTS leaves old tables as they were.
             for table, column in (
-                ("projects", "search_log"), ("projects", "overlap"), ("projects", "conclusion"),
+                ("projects", "search_log"), ("projects", "overlap"), ("projects", "summary"),
                 ("papers", "found_in"), ("papers", "authors"), ("papers", "cited_by"),
             ):
                 if column not in {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}:
@@ -184,10 +184,10 @@ class Store:
             "UPDATE papers SET status = 'error', error = 'The server restarted while this was being extracted.' "
             "WHERE status IN ('fetching', 'extracting')"
         )
-        for row in self._all("SELECT id, conclusion FROM projects WHERE conclusion IS NOT NULL"):
-            if row["conclusion"].get("status") == "running":
-                self.update_project(row["id"], conclusion={
-                    "status": "error", "error": "The server restarted while the conclusion was being written.",
+        for row in self._all("SELECT id, summary FROM projects WHERE summary IS NOT NULL"):
+            if row["summary"].get("status") == "running":
+                self.update_project(row["id"], summary={
+                    "status": "error", "error": "The server restarted while the summary was being written.",
                 })
 
     # -- papers ---------------------------------------------------------------

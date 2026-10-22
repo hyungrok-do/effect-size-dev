@@ -220,11 +220,7 @@ def test_papers_only_in_europe_pmc(tmp_path):
     assert len(marked) == 3 and all(("Brief mindfulness" in t) or ("nursing" in t) or ("smartphone" in t) for t in marked)
 
 
-def test_overlap_is_checked_and_the_conclusion_uses_what_was_kept(tmp_path):
-    import math
-
-    import pytest
-
+def test_overlap_is_checked_and_the_summary_describes_what_was_kept(tmp_path):
     pipeline, store, llm, project_id = run_all(tmp_path)
     keys = {p["ext_id"]: f"R{p['id']}" for p in store.papers(project_id)}
     report = store.project(project_id)["overlap"]["report"]
@@ -239,25 +235,28 @@ def test_overlap_is_checked_and_the_conclusion_uses_what_was_kept(tmp_path):
 
     pilot = next(p for p in store.papers(project_id) if p["ext_id"] == "44444444")
     store.set_decision(pilot["id"], 0, "exclude")
-    pipeline.conclude(project_id)
-    conclusion = store.project(project_id)["conclusion"]
-    assert conclusion["status"] == "done", conclusion
-    evidence = conclusion["evidence"]
-    assert not any(v["record"] == keys["44444444"] for v in evidence["values"])  # excluded by the investigator
-    assert all(v["dropped_for_overlap"] for v in evidence["values"] if v["record"] == keys["NCT01234567"])
-    pooled = next(s for s in evidence["summaries"] if s["method"] == "pooled_sd")
-    arms = [(4.2, 100), (4.5, 100), (4.1, 40), (3.9, 30), (4.2, 30), (4.0, 75), (4.3, 74)]
-    expected = math.sqrt(math.fsum((n - 1) * sd * sd for sd, n in arms) / math.fsum(n - 1 for _, n in arms))
-    assert pooled["value"] == pytest.approx(expected) and pooled["n"] == 449 and pooled["count"] == 7
-    assert conclusion["result"]["answers"][0]["candidate"] == pooled["key"]
-    assert conclusion["basis"][0][0] == min(p["id"] for p in store.papers(project_id) if p["status"] == "extracted")
+    pipeline.summarize(project_id)
+    summary = store.project(project_id)["summary"]
+    assert summary["status"] == "done", summary
+    evidence = summary["evidence"]
+    # The pilot's only result was excluded, so neither it nor its values are described.
+    assert keys["44444444"] not in {v["record"] for v in evidence["values"]} | {r["key"] for r in evidence["records"]}
+    # The registry record is kept, marked as the same participants as its paper; nothing is pooled.
+    registry = [v for v in evidence["values"] if v["record"] == keys["NCT01234567"]]
+    assert registry and all(v["same_participants_as"] == keys["11111111"] for v in registry)
+    assert all(v["same_participants_as"] is None for v in evidence["values"] if v["record"] != keys["NCT01234567"])
+    assert set(evidence) == {"records", "values"} and [v["key"] for v in evidence["values"]][:2] == ["V1", "V2"]
+    need = summary["result"]["needs"][0]
+    assert need["need"] == "The difference and its SD" and need["values"]
+    assert {evidence["values"][int(k[1:]) - 1]["statistic"] for k in need["values"]} <= {"mean", "sd", "n"}
+    assert summary["basis"][0][0] == min(p["id"] for p in store.papers(project_id) if p["status"] == "extracted")
 
 
-def test_nothing_kept_means_no_conclusion(tmp_path):
+def test_nothing_kept_means_no_summary(tmp_path):
     pipeline, store, llm, project_id = run_all(tmp_path)
     for paper in store.papers(project_id):
         store.set_decision(paper["id"], -1, "exclude")
-    pipeline.conclude(project_id)
-    conclusion = store.project(project_id)["conclusion"]
-    assert conclusion["status"] == "error" and "nothing to conclude" in conclusion["error"]
-    assert "conclude" not in llm.calls
+    pipeline.summarize(project_id)
+    summary = store.project(project_id)["summary"]
+    assert summary["status"] == "error" and "nothing to summarize" in summary["error"]
+    assert "summarize" not in llm.calls

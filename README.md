@@ -4,10 +4,11 @@ Describe a study you are planning in a short paragraph. Effect Size Finder searc
 PMC and ClinicalTrials.gov, reads the papers it can open, and extracts the statistics they report (group
 sizes, means, SDs, event counts, CIs, hazard ratios, and so on), each with the sentence or table
 row it came from. You review the papers one at a time, including or excluding each result; Opus
-checks the studies for overlap and concludes which value to use for each number your plan needs.
+checks the studies for overlap and summarizes, for each number your plan needs, what the studies
+you kept report.
 
-It **searches for relevant papers**, **extracts the reported numbers** and **recommends values**
-from them. It does not compute a sample size yet.
+It **searches for relevant papers**, **extracts the reported numbers** and **summarizes them**. It
+does not combine studies into an effect size or compute a sample size: those choices are yours.
 
 This project was largely generated with Claude Code and is under validation.
 
@@ -43,13 +44,12 @@ CODE    Check each quote is in the source and each number is in its quote; plaus
 OPUS    Re-extract anything that failed a check, was flagged, or fell in the random audit sample
 OPUS    Check the extracted records for overlap: one study reported twice, reviews pooling studies in the set
 YOU     Review one paper at a time: include or exclude each result; export CSV or JSON
-CODE    Compute the candidates from what you kept: every value, and pooled SDs, medians and ranges
-OPUS    Conclude: recommend a candidate for each number the plan needs, with alternatives, caveats, gaps
+OPUS    Summarize: for each number the plan needs, the values that bear on it and how they compare
 ```
 
 Claude reads and quotes; it never computes or converts a number. Every value is checked by code
-against the text it was read from, and in the conclusion Opus chooses among values code computed,
-naming them by key.
+against the text it was read from, and in the summary Opus refers to values by key rather than
+typing them.
 
 ### The search, from the top down
 
@@ -200,7 +200,7 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 ## The browser edition's page
 
 Each step has its own tab: **Setup** (your Anthropic API key, a contact email and an optional NCBI
-key), **Describe**, **What to look for**, **Search**, **Review** and **Conclusion**. The page opens at Setup until
+key), **Describe**, **What to look for**, **Search**, **Review** and **Summary**. The page opens at Setup until
 it has a key. **What to look for** shows how Opus read your paragraph, as a structured specification: the
 question in one sentence, anything worth deciding before the search, then one table per part: the
 comparison (population with its condition, age and setting; intervention with its delivery, dose
@@ -231,7 +231,7 @@ numbered chip per paper, colored once its results are decided, let you jump to a
 **Previous** and **Next** (or the arrow keys) step through them, and **Next not yet reviewed** skips
 to the first paper still open. Next is highlighted once every result of the paper is decided.
 
-Each paper has a key (R12) that the overlap check and the conclusion refer to, its authors, where
+Each paper has a key (R12) that the overlap check and the summary refer to, its authors, where
 its text came from (registry results, PMC full text, open-access PDF, or abstract only), which
 model produced the extraction, why Opus reviewed it if it did, and a warning when another record
 shares its trial registration number. Each result lists its values with their quotes and the
@@ -251,25 +251,25 @@ and overlaps it suspects but cannot confirm (`possible_overlap`). It is given wh
 apart: registration numbers, authors, arms and their sizes, populations, dates, and which reviews
 in the set cite which records (from the reference lists read during the search). A citation alone
 is not taken as proof that a review pools a study. For each group Opus says whose numbers to use;
-the paper shows the note, and the other records of the group are left out of the conclusion's
-summaries.
+the paper shows the note, and the summary marks the other records' values as the same participants.
 
-### The conclusion
+### The summary
 
-**Write the conclusion** gives Opus the specification, the overlap check, and the candidates code
-computed from the results you included or left undecided (none you excluded):
+**Write the summary** gives Opus the specification, the overlap check, the records you kept
+something from, and every value of the results you included or left undecided (none you
+excluded), each with a key (V1, V2, ...), its group size, how relevant it is and whether its quote
+was found. Opus is told to describe, not decide: it does not combine studies, average or pool
+values, convert between statistics, or recommend a value.
 
-- every reported value (V1, V2, ...), with its group size, how relevant and well checked it is;
-- across studies, for each outcome, timepoint and statistic reported more than once (S1, S2, ...):
-  a pooled SD, √(Σ(nᵢ − 1)·SDᵢ² / Σ(nᵢ − 1)), when every arm reports its size, and the median and
-  range.
-
-For each number the plan needs, Opus recommends a candidate, lists alternatives worth considering
-(such as a more cautious SD), says why and how confident it is, and adds caveats and gaps (numbers
-the sources don't give, and where to look next). It writes candidates' keys rather than numbers
-(the SD is [S2]), and the page shows their values, so every number in the conclusion comes from
-the papers through code. If you change a decision afterwards, the page says the conclusion is out
-of date until you write it again.
+The summary has an overview of what was found and how close it is to the planned study; then, for
+each number the plan needs, the values that bear on it side by side, one row per study arm with a
+column per statistic (n, mean, SD, ...), whether each quote was found and which arms share
+participants, with Opus's note on how they compare: which match the planned measure, timepoint and population, how widely they vary, and
+which come from larger or better reported studies. Overlap, what to check before using the values,
+and what the sources don't give come last, with a table of every value kept. Opus writes values'
+keys rather than numbers (the SDs run from [V4] to [V9]), and the page shows the numbers as the
+papers print them. If you change a decision afterwards, the page says the summary is out of date
+until you write it again.
 
 ## Privacy
 
@@ -286,9 +286,10 @@ that server for others, serve it over HTTPS.
 
 ## Not yet
 
-- Converting values to a common effect size (a standardized mean difference from means and SDs, a
-  risk ratio from event counts) and a meta-analytic pooled effect; the conclusion pools only SDs.
-- Handing the recommended values to [Sample Size Calculator](https://github.com/hyungrok-do/sample-size-calc).
+- Combining studies: converting values to a common effect size (a standardized mean difference from
+  means and SDs, a risk ratio from event counts), pooling SDs or effects across studies, and
+  handing the result to [Sample Size Calculator](https://github.com/hyungrok-do/sample-size-calc).
+  The summary lays the values side by side for you to decide.
 - Paywalled full text: only open-access text, abstracts, and registry results are read.
 - Numbers shown only in figures: figure captions are kept, figure images are not read.
 - The Message Batches API (half price, slower) for screening large searches; screening uses direct

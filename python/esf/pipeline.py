@@ -157,7 +157,7 @@ class Pipeline:
             try:
                 self._progress(project_id, "checking for overlap")
                 self.check_overlap(project_id)
-            except Exception as exc:  # the extractions stand without it; the conclusion tries again
+            except Exception as exc:  # the extractions stand without it; the summary tries again
                 log.exception("the overlap check failed")
                 self.store.update_project(project_id, overlap={"error": describe_error(exc)})
         except Exception as exc:
@@ -377,7 +377,7 @@ class Pipeline:
                 done += 1
                 self._progress(project_id, "extracting", done, len(queue))
 
-    # -- across papers: overlap and the conclusion ------------------------------
+    # -- across papers: overlap and the summary ---------------------------------
 
     def check_overlap(self, project_id: str) -> None:
         """Opus looks across the extracted records for reports that would be counted twice."""
@@ -390,10 +390,10 @@ class Pipeline:
             report = self.llm.check_overlap(spec, records, self._sink(project_id)).model_dump()
         self.store.update_project(project_id, overlap={"report": report, "records": [r["key"] for r in records]})
 
-    def conclude(self, project_id: str) -> None:
-        """Opus recommends, for each number the plan needs, one of the candidate values computed from
-        the results the investigator kept."""
-        self.store.update_project(project_id, conclusion={"status": "running"})
+    def summarize(self, project_id: str) -> None:
+        """Opus describes, for each number the plan needs, the values the investigator kept: how they
+        compare and where they share participants. It does not combine them or recommend one."""
+        self.store.update_project(project_id, summary={"status": "running"})
         try:
             project = self.store.project(project_id)
             assert project is not None
@@ -406,15 +406,15 @@ class Pipeline:
             decisions = self.store.decisions(project_id)
             evidence = build_evidence(papers, decisions, overlap["report"])
             if not evidence["values"]:
-                raise ValueError("There is nothing to conclude from: no extracted result is kept.")
-            result = self.llm.conclude(spec, overlap["report"], evidence, self._sink(project_id))
-            self.store.update_project(project_id, conclusion={
+                raise ValueError("There is nothing to summarize: no extracted result is kept.")
+            result = self.llm.summarize(spec, overlap["report"], evidence, self._sink(project_id))
+            self.store.update_project(project_id, summary={
                 "status": "done", "result": result.model_dump(), "evidence": evidence,
                 "basis": decisions_basis(papers, decisions),
             })
         except Exception as exc:
-            log.exception("the conclusion failed")
-            self.store.update_project(project_id, conclusion={"status": "error", "error": describe_error(exc)})
+            log.exception("the summary failed")
+            self.store.update_project(project_id, summary={"status": "error", "error": describe_error(exc)})
 
     # -- one paper ------------------------------------------------------------
 

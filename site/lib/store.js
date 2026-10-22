@@ -95,8 +95,8 @@ export class Store extends EventTarget {
       if (RUNNING.has(p.status)) {
         await this.updateProject(p.id, { status: 'interrupted', error: 'The page was closed or reloaded while this was running.' });
       }
-      if (p.conclusion?.status === 'running') {
-        await this.updateProject(p.id, { conclusion: { status: 'error', error: 'The page was closed or reloaded while the conclusion was being written.' } });
+      if (p.summary?.status === 'running') {
+        await this.updateProject(p.id, { summary: { status: 'error', error: 'The page was closed or reloaded while the summary was being written.' } });
       }
     }
     // Papers cut off mid-extraction go back to where they were, so Continue picks them up again.

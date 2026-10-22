@@ -10,12 +10,12 @@ from urllib.parse import parse_qs
 import httpx
 
 from esf.schemas import (
-    Answer,
     Comparator,
-    Conclusion,
     Criterion,
+    EvidenceSummary,
     Intervention,
     NeededStatistic,
+    NeedSummary,
     Outcome,
     OverlapGroup,
     OverlapReport,
@@ -520,17 +520,24 @@ class FakeLLM:
                                            evidence="The review cites these trials.", use=""))
         return OverlapReport(groups=groups, notes="")
 
-    def conclude(self, spec, overlap, evidence, sink=None):
-        self.calls.append("conclude")
+    def summarize(self, spec, overlap, evidence, sink=None):
+        """Lists, for each number to find, the values of the statistics it names, and names the
+        smallest and largest SD by key, as the real summary would."""
+        self.calls.append("summarize")
         self.evidence = evidence
-        pooled = next((s for s in evidence["summaries"] if s["method"] == "pooled_sd"), None)
-        mean = next((v for v in evidence["values"] if v["statistic"] == "mean"), None)
-        return Conclusion(
-            summary=f"Similar trials give an SD of [{pooled['key']}]." if pooled else "Too little to pool.",
-            answers=[Answer(need=need.purpose, candidate=pooled["key"] if pooled else (mean["key"] if mean else ""),
-                            alternatives=[mean["key"]] if mean else [], reasoning="Same outcome and timepoint.", confidence="medium")
-                     for need in spec.statistics_needed],
-            overlap_handling="The registry record was not counted again.",
+        direct_sds = sorted((v for v in evidence["values"] if v["statistic"] == "sd" and v["relevance"] == "direct"),
+                            key=lambda v: v["value"])
+        needs = []
+        for need in spec.statistics_needed:
+            keys = [v["key"] for v in evidence["values"] if v["statistic"] in need.statistics and v["relevance"] == "direct"]
+            sds = sorted((v for v in evidence["values"] if v["key"] in keys and v["statistic"] == "sd"), key=lambda v: v["value"])
+            comparison = f"The SDs run from [{sds[0]['key']}] to [{sds[-1]['key']}]." if sds else "No SD is reported."
+            needs.append(NeedSummary(need=need.purpose, values=keys, comparison=comparison))
+        return EvidenceSummary(
+            overview=f"{len(evidence['records'])} records report PHQ-9 in students; the largest SD is [{direct_sds[-1]['key']}]."
+            if direct_sds else f"{len(evidence['records'])} records report PHQ-9 in students.",
+            needs=needs,
+            overlap="The registry record reports the same participants as its paper.",
             caveats=["Check whether the SDs are of change scores."],
             gaps=["No dropout rates."],
         )

@@ -159,7 +159,7 @@ export class Pipeline {
       try {
         await this.progress(projectId, 'checking for overlap');
         await this.checkOverlap(projectId);
-      } catch (error) { // the extractions stand without it; the conclusion tries again
+      } catch (error) { // the extractions stand without it; the summary tries again
         await this.store.updateProject(projectId, { overlap: { error: describeError(error) } });
       }
     } catch (error) {
@@ -380,7 +380,7 @@ export class Pipeline {
       () => this.progress(projectId, 'extracting', ++done, queue.length));
   }
 
-  // -- across papers: overlap and the conclusion ------------------------------------
+  // -- across papers: overlap and the summary ---------------------------------------
 
   // Opus looks across the extracted records for reports that would be counted twice.
   async checkOverlap(projectId) {
@@ -400,10 +400,10 @@ export class Pipeline {
     await this.store.updateProject(projectId, { overlap: { report, records: records.map((r) => r.key) } });
   }
 
-  // Opus recommends, for each number the plan needs, one of the candidate values computed from the
-  // results the investigator kept.
-  async conclude(projectId) {
-    await this.store.updateProject(projectId, { conclusion: { status: 'running' } });
+  // Opus describes, for each number the plan needs, the values the investigator kept: how they
+  // compare and where they share participants. It does not combine them or recommend one.
+  async summarize(projectId) {
+    await this.store.updateProject(projectId, { summary: { status: 'running' } });
     try {
       const papers = await this.store.papers(projectId);
       let overlap = (await this.store.project(projectId)).overlap || {};
@@ -415,23 +415,25 @@ export class Pipeline {
       const project = await this.store.project(projectId);
       const decisions = await this.store.decisions(projectId);
       const evidence = buildEvidence(papers, decisions, overlap.report);
-      if (!evidence.values.length) throw new Error('There is nothing to conclude from: no extracted result is kept.');
+      if (!evidence.values.length) throw new Error('There is nothing to summarize: no extracted result is kept.');
       const result = await this.activity.track(
-        { agent: 'opus', step: 'conclude', text: `Writing the conclusion from ${plural(evidence.values.length, 'value')}` },
-        (step) => this.claude.conclude(project.spec, overlap.report, evidence, { sink: step.meter(this.sink(projectId)) }),
-        (c) => {
-          // Keys shown with their values, as on the page: "an SD of 4.205 [S2]".
-          const values = new Map([...evidence.summaries, ...evidence.values].map((x) => [x.key, Number(x.value.toPrecision(4))]));
-          const shown = (text) => text.replace(/\[((?:S|V)\d+)\]/g, (key, k) => (values.has(k) ? `${values.get(k)} ${key}` : key));
-          const answer = (a) => `${a.need}: ${a.candidate ? shown(`[${a.candidate}]`) : 'nothing fits'} (${a.confidence})`;
-          return [shown(c.summary), ...c.answers.map(answer)].join('\n');
+        {
+          agent: 'opus', step: 'summarize',
+          text: `Summarizing ${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')}`,
+        },
+        (step) => this.claude.summarize(project.spec, overlap.report, evidence, { sink: step.meter(this.sink(projectId)) }),
+        (r) => {
+          // Keys shown with their values, as on the page: "SDs of 4.2 [V4] to 4.5 [V8]".
+          const values = new Map(evidence.values.map((v) => [v.key, v.value]));
+          const shown = (text) => text.replace(/\[(V\d+)\]/g, (key, k) => (values.has(k) ? `${values.get(k)} ${key}` : key));
+          return [shown(r.overview), ...r.needs.map((n) => `${n.need}: ${plural(n.values.length, 'value')}`)].join('\n');
         },
       );
       await this.store.updateProject(projectId, {
-        conclusion: { status: 'done', result, evidence, basis: decisionsBasis(papers, decisions) },
+        summary: { status: 'done', result, evidence, basis: decisionsBasis(papers, decisions) },
       });
     } catch (error) {
-      await this.store.updateProject(projectId, { conclusion: { status: 'error', error: describeError(error) } });
+      await this.store.updateProject(projectId, { summary: { status: 'error', error: describeError(error) } });
     }
   }
 

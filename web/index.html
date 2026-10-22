@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Effect Size Finder</title>
-<meta name="description" content="Describe a planned study; Claude searches PubMed, Europe PMC and ClinicalTrials.gov, extracts the statistics papers report, each with its quote, for you to include or exclude, and concludes which values to use.">
+<meta name="description" content="Describe a planned study; Claude searches PubMed, Europe PMC and ClinicalTrials.gov, extracts the statistics papers report, each with its quote, for you to include or exclude, and summarizes what the papers you kept report.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232457c5' stroke-width='2.5' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/lib/spec-panel.css">
 <link rel="stylesheet" href="/lib/review.css">
@@ -262,7 +262,7 @@
 
 <section class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published numbers a study plan needs</h2>
-  <p class="lede">Describe the study you are planning. Claude searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and Opus concludes which values to use.</p>
+  <p class="lede">Describe the study you are planning. Claude searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and Opus summarizes what the papers you kept report.</p>
   <ul class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
@@ -274,7 +274,7 @@
     </li>
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>You decide</h3>
-      <p>Review the papers one at a time, including or excluding each result. Opus checks for studies counted twice and recommends values from what you kept.</p>
+      <p>Review the papers one at a time, including or excluding each result. Opus checks for studies counted twice and summarizes what you kept, number by number.</p>
     </li>
   </ul>
   <p class="notice">Your paragraph and the text of the papers are sent to Anthropic's API to be read. Don't paste anything you can't share with it.</p>
@@ -367,16 +367,16 @@
       </details>
     </section>
 
-    <section id="conclusion" class="card" aria-labelledby="conclusion-title" hidden>
+    <section id="summary" class="card" aria-labelledby="summary-title" hidden>
       <p class="eyebrow">Step 5</p>
-      <h2 id="conclusion-title">Conclusion</h2>
-      <p class="summary">Opus weighs the results you kept, avoids counting a study twice, and recommends a value for each number the plan needs. Every number here is computed from the papers by code; Opus only chooses among them.</p>
+      <h2 id="summary-title">Summary</h2>
+      <p class="summary">Opus describes what the papers you kept report for each number the plan needs: the values side by side, how closely each matches your study, how much they vary, and which share participants. It does not combine studies or pick a value; that is for you. Every number here comes from the papers; Opus refers to them by key.</p>
       <div class="actions">
-        <button id="conclude" type="button" class="primary">Write the conclusion</button>
-        <span id="conclude-status" class="muted small" aria-live="polite"></span>
+        <button id="summarize" type="button" class="primary">Write the summary</button>
+        <span id="summarize-status" class="muted small" aria-live="polite"></span>
       </div>
-      <div id="conclusion-error" class="error" role="alert" hidden></div>
-      <div id="conclusion-body"></div>
+      <div id="summary-error" class="error" role="alert" hidden></div>
+      <div id="summary-body"></div>
     </section>
   </main>
 </div>

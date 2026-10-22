@@ -1,4 +1,4 @@
-/* The review navigator, the overlap notes and the conclusion (review-view.js). Uses the page's color tokens. */
+/* The review navigator, the overlap notes and the summary (review-view.js). Uses the page's color tokens. */
 
 /* Review, one paper at a time. */
 .review-nav { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
@@ -20,12 +20,16 @@
 .overlap-note strong { color: var(--warn); }
 .overlap-note ul { margin: 4px 0 0; padding-left: 18px; }
 
-/* The conclusion. */
-.conclusion-summary { margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: var(--accent-soft); font-size: 15.5px; line-height: 1.5; }
+/* The summary. */
+.summary-overview { margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: var(--accent-soft); font-size: 15.5px; line-height: 1.5; }
 .cand { display: inline-block; padding: 0 6px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); font-weight: 600; font-variant-numeric: tabular-nums; cursor: help; }
-.conclusion-block { margin-top: 18px; }
-.conclusion-block h3 { font-size: 15.5px; margin-bottom: 8px; }
-.conclusion-block ul { margin: 0; padding-left: 20px; font-size: 14px; }
-.answers td .value { font-weight: 600; }
-.answers td .label, .answers td .alt { display: block; color: var(--ink-2); font-size: 12.5px; }
+.cand-src { font-weight: 400; font-size: 0.8em; color: var(--muted); }
+.summary-block { margin-top: 18px; }
+.summary-block h3 { font-size: 15.5px; margin-bottom: 6px; }
+.summary-block > p { margin: 0 0 8px; font-size: 14.5px; line-height: 1.5; }
+.summary-block ul { margin: 0; padding-left: 20px; font-size: 14px; }
+.summary-block.need { padding-top: 14px; border-top: 1px solid var(--line); }
+.value-table { font-size: 13.5px; }
+.value-table td .sub { display: block; color: var(--ink-2); font-size: 12.5px; }
+.value-table .unchecked { text-decoration: underline wavy var(--warn); text-underline-offset: 3px; }
 .stale { margin-top: 12px; }

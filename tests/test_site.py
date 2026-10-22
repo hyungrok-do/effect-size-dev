@@ -10,7 +10,6 @@ import functools
 import glob
 import io
 import json
-import math
 import os
 import re
 import threading
@@ -174,9 +173,9 @@ class Network:
             return SPEC.model_dump()
         if system.startswith(prompts.OVERLAP):
             return self.llm.check_overlap(None, json.loads(content[0]["text"].split("\n", 1)[1])).model_dump()
-        if system.startswith(prompts.CONCLUDE):
+        if system.startswith(prompts.SUMMARIZE):
             data = json.loads(content[0]["text"].split("\n", 1)[1])
-            return self.llm.conclude(SPEC, data["overlap"], data).model_dump()
+            return self.llm.summarize(SPEC, data["overlap"], data).model_dump()
         if system.startswith(prompts.SCREEN):
             return self.llm.screen(None, content).model_dump()
         if system.startswith(prompts.EXTRACT):
@@ -287,14 +286,13 @@ def test_browser_ports_match_python(browser, site_url):
     assert result["evidence"] == build_evidence(EVIDENCE_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP)
     assert result["basis"] == decisions_basis(EVIDENCE_PAPERS, EVIDENCE_DECISIONS)
     # What the evidence holds: the excluded result and paper are gone, the overlapping record is kept
-    # but left out of the summaries, and the PHQ-9 SDs pool across arms with their sizes.
+    # and marked as the same participants as the record to use, and nothing is combined.
     evidence = result["evidence"]
+    assert set(evidence) == {"records", "values"}
     assert not any(v["outcome"] == "GAD-7" for v in evidence["values"]) and not any(v["record"] == "R6" for v in evidence["values"])
-    assert all(v["dropped_for_overlap"] for v in evidence["values"] if v["record"] == "R5")
-    pooled = [x for x in evidence["summaries"] if x["method"] == "pooled_sd"]
-    assert pooled == [] or pooled[0]["records"] == ["R1", "R2", "R3"]
-    sd_median = next(x for x in evidence["summaries"] if x["statistic"] == "sd" and x["method"] == "median")
-    assert (sd_median["count"], sd_median["min"], sd_median["max"], sd_median["value"]) == (5, 3.9, 4.5, 4.2)
+    assert [r["key"] for r in evidence["records"]] == sorted({v["record"] for v in evidence["values"]}, key=lambda k: int(k[1:]))
+    assert all(v["same_participants_as"] == ("R2" if v["record"] == "R5" else None) for v in evidence["values"])
+    assert [v["key"] for v in evidence["values"]] == [f"V{i}" for i in range(1, len(evidence["values"]) + 1)]
     assert result["overlapRecords"][2]["cited_by"] == ["R4"] and result["overlapRecords"][3]["cited_by"] == []
     assert result["europepmc"] == [
         [europepmc_pmid(r), None if europepmc_pmid(r) else asdict(europepmc_record(r)), europepmc_url(str(r["id"]))]
@@ -367,7 +365,8 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert page.input_value("#spec-population-description") == "University students"
     page.fill("#spec-population-description", "Undergraduate students")
     page.press("#spec-population-description", "Enter")  # finishes the edit; doesn't start the search
-    assert page.locator("#spec-population-description").count() == 0 and "Undergraduate students" in comparison.inner_text()
+    comparison.get_by_text("Undergraduate students").wait_for()
+    assert page.locator("#spec-population-description").count() == 0
     assert page.is_visible("#spec") and page.get_attribute("#tab-spec", "aria-selected") == "true"
     page.wait_for_function("""async () => {
         const { Store } = await import('/lib/store.js');
@@ -421,11 +420,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert review.locator(".badge", has_text="Reviews search").count() == 1
     assert "A review and the studies it pools" in review.locator(".overlap-note").inner_text()
     trial = open_paper(page, "A mindfulness app for depressive")
-    assert "Same study as" in trial.locator(".overlap-note").inner_text() and "Use this record." in trial.locator(".overlap-note").inner_text()
+    assert "Same study as" in trial.locator(".overlap-note").inner_text() and "Use this record’s numbers." in trial.locator(".overlap-note").inner_text()
     page.click("#source-switch button:has-text('ClinicalTrials.gov')")
     registry = page.locator("#papers .paper")
     assert registry.inner_text().startswith("A Randomized Trial of a Mindfulness App")
-    assert "this record is left out of the conclusion" in registry.locator(".overlap-note").inner_text()
+    assert "instead." in registry.locator(".overlap-note").inner_text()
     page.click("#source-switch button:has-text('Papers')")
 
     # The search, level by level from the top down: found, kept after screening, extracted.
@@ -504,26 +503,39 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.wait_for_selector("#source-text mark")
     page.click("#source-close")
 
-    # The conclusion: Opus picks among values code computed; the pooled SD leaves out the registry
-    # record (the same study as a paper) and is the number shown.
-    page.click("#tab-conclusion")
-    page.click("#conclude")
-    page.wait_for_selector("#conclusion-body .conclusion-summary", timeout=15000)
-    arms = [(4.2, 100), (4.5, 100), (3.8, 20), (4.1, 21), (4.1, 40), (3.9, 30), (4.2, 30), (4.0, 75), (4.3, 74)]
-    expected = math.sqrt(math.fsum((n - 1) * sd * sd for sd, n in arms) / math.fsum(n - 1 for _, n in arms))
-    shown = float(page.inner_text(".conclusion-summary .cand"))
-    assert abs(shown - expected) < 0.001, (shown, expected)
-    answer = page.locator(".answers tbody tr").first.locator("td").all_inner_texts()
-    assert answer[0] == "The difference and its SD" and "Pooled SD of PHQ-9 at 12 weeks, 9 arms in 5 studies (n = 490)" in answer[1]
-    assert "Also: 8.1 Mean of PHQ-9 at 12 weeks, Mindfulness App (n = 98)" in answer[1]
-    assert "one study reported more than once" in page.inner_text("#conclusion-body") and "No dropout rates." in page.inner_text("#conclusion-body")
-    # The agent panel shows the same number, not the bare key.
-    assert f"Similar trials give an SD of {float(f'{expected:.4g}')} [S" in page.inner_text("#activity")
-    # A decision made after the conclusion marks it out of date.
+    # The summary: for each number to find, the values side by side, described by Opus by key and
+    # shown as printed. Nothing is pooled or recommended.
+    page.click("#tab-summary")
+    page.click("#summarize")
+    page.wait_for_selector("#summary-body .summary-overview", timeout=15000)
+    body = page.inner_text("#summary-body")
+    assert "Pooled" not in body and "Recommended" not in body
+    need = page.locator("#summary-body .summary-block.need").first
+    assert need.locator("h3").inner_text() == "The difference and its SD"
+    # The SDs as printed, smallest and largest, each with the record it came from.
+    chips = need.locator("p .cand").all_inner_texts()
+    assert [c.split()[0] for c in chips] == ["3.8", "4.5"] and all(c.split()[1].startswith("R") for c in chips)
+    # One row per study arm, a column per statistic.
+    arms = page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        const { summary } = await new Store().project(location.hash.slice(1));
+        const values = new Map(summary.evidence.values.map((v) => [v.key, v]));
+        return new Set(summary.result.needs[0].values.map((k) => values.get(k)).map((v) => JSON.stringify([v.record, v.outcome, v.timepoint, v.group]))).size;
+    }""")
+    assert need.locator("tbody tr").count() == arms
+    assert need.locator("thead th").all_inner_texts() == ["Study", "Outcome", "Group", "n", "Mean", "SD", "Check"]
+    # The registry record's values are listed, marked as the same participants as its paper.
+    registry_rows = need.locator("tbody tr", has_text="same participants as")
+    assert registry_rows.count() > 0 and all("Mindfulness App" in t for t in registry_rows.all_inner_texts())
+    assert "one study reported more than once" in body and "No dropout rates." in body
+    assert page.locator("#summary-body details summary").inner_text().startswith("Every value kept (")
+    # The agent panel shows the number with its key, not the bare key.
+    assert "the largest SD is 4.5 [V" in page.inner_text("#activity")
+    # A decision made after the summary marks it out of date.
     page.click("#tab-review")
     open_paper(page, "Brief mindfulness training").locator(".result").first.locator("button.exclude").click()
-    page.click("#tab-conclusion")
-    page.wait_for_selector("#conclusion-body .stale")
+    page.click("#tab-summary")
+    page.wait_for_selector("#summary-body .stale")
     page.click("#tab-review")
 
     # Requests to Anthropic: each model with its settings, straight from the page with the user's key.
@@ -533,11 +545,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     steps = {}
     for headers, body in calls:
         system = (body.get("system") or [{"text": ""}])[0]["text"]
-        step = next((s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "CONCLUDE")
+        step = next((s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "SUMMARIZE")
                      if system.startswith(getattr(prompts, s))), "FETCH")
         steps.setdefault(step, (headers, body))
-    assert set(steps) == {"SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "CONCLUDE", "FETCH"}
-    expected = {"SPEC": (OPUS, "high"), "SEARCH": (OPUS, "high"), "ADJUDICATE": (OPUS, "xhigh"), "OVERLAP": (OPUS, "high"), "CONCLUDE": (OPUS, "high"),
+    assert set(steps) == {"SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "SUMMARIZE", "FETCH"}
+    expected = {"SPEC": (OPUS, "high"), "SEARCH": (OPUS, "high"), "ADJUDICATE": (OPUS, "xhigh"), "OVERLAP": (OPUS, "high"), "SUMMARIZE": (OPUS, "high"),
                 "FETCH": (SONNET, "low"), "SCREEN": (HAIKU, "low"), "EXTRACT": (HAIKU, "medium")}
     for step, (model, effort) in expected.items():
         headers, body = steps[step]

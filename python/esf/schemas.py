@@ -272,17 +272,20 @@ class OverlapReport(BaseModel):
     notes: str = Field(description="Anything else about double counting; empty if nothing.")
 
 
-class Answer(BaseModel):
-    need: str = Field(description="The row of numbers to find this answers, as the specification describes it.")
-    candidate: str = Field(description="The key of the recommended candidate (S… or V…), or empty if none fits.")
-    alternatives: list[str] = Field(description="Keys of other candidates worth considering, e.g. a more cautious one.")
-    reasoning: str = Field(description="Why: how closely it matches, how good the sources are, how overlap was handled.")
-    confidence: Literal["high", "medium", "low"]
+class NeedSummary(BaseModel):
+    need: str = Field(description="The row of numbers to find, as the specification describes it.")
+    values: list[str] = Field(
+        description="Keys of the reported values that bear on it (V3, V7), the most directly relevant first; empty if none."
+    )
+    comparison: str = Field(
+        description="How these values compare: how closely each matches the plan, how much they vary, the size and "
+        "reporting of their studies, shared participants. Values by key in brackets, e.g. [V3]."
+    )
 
 
-class Conclusion(BaseModel):
-    summary: str = Field(description="Two to four sentences on what the literature supports for the planned calculation.")
-    answers: list[Answer] = Field(description="One per row of numbers to find, in the specification's order.")
-    overlap_handling: str = Field(description="How double counting was avoided; empty if there was none.")
-    caveats: list[str]
-    gaps: list[str] = Field(description="Numbers the plan needs that the sources don't supply, and where to look next.")
+class EvidenceSummary(BaseModel):
+    overview: str = Field(description="Two to four sentences on what was found and how close it is to the planned study.")
+    needs: list[NeedSummary] = Field(description="One per row of numbers to find, in the specification's order.")
+    overlap: str = Field(description="Which values come from the same participants, and why; empty if none.")
+    caveats: list[str] = Field(description="What to check before using the values.")
+    gaps: list[str] = Field(description="Numbers the plan needs that the sources don't give, and where to look next.")

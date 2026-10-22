@@ -7,7 +7,7 @@ import { download, exportRows, PAPER, toCsv } from './lib/export.js';
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
 import { europepmcUrl, Sources } from './lib/sources.js';
-import { conclusionView, overlapNote, reviewKeys, reviewNav } from './lib/review-view.js';
+import { overlapNote, reviewKeys, reviewNav, summaryView } from './lib/review-view.js';
 import { SpecPanel, STATISTICS } from './lib/spec-panel.js';
 import { RUNNING, Store } from './lib/store.js';
 
@@ -33,8 +33,8 @@ const TABS = [
   ['pending', 'In progress'],
   ['excluded', 'Screened out'],
 ];
-const STEPS = ['setup', 'problem', 'spec', 'progress', 'review', 'conclusion'];
-const PANELS = { setup: '#setup', problem: '#problem', spec: '#spec', progress: '#progress-card', review: '#review', conclusion: '#conclusion' };
+const STEPS = ['setup', 'problem', 'spec', 'progress', 'review', 'summary'];
+const PANELS = { setup: '#setup', problem: '#problem', spec: '#spec', progress: '#progress-card', review: '#review', summary: '#summary' };
 // Papers (from PubMed and Europe PMC) and registry records are reviewed separately.
 const SOURCES = [['papers', 'Papers'], ['clinicaltrials', 'ClinicalTrials.gov']];
 const kindOf = (paper) => (paper.source === 'clinicaltrials' ? 'clinicaltrials' : 'papers');
@@ -63,7 +63,7 @@ const jobs = new Set(); // projects and papers with work running in this tab
 const state = {
   id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
   uploadFor: null, step: 'setup', stepChosen: false, source: 'papers', filter: 'all',
-  available: { setup: true, problem: true, spec: false, progress: false, review: false, conclusion: false },
+  available: { setup: true, problem: true, spec: false, progress: false, review: false, summary: false },
   reviewAt: {}, // `${source}:${tab}` -> the paper id shown there
 };
 
@@ -253,7 +253,7 @@ function newSearch() {
   Object.assign(state, {
     id: null, project: null, papers: [], decisions: {}, usage: [], events: [], specKey: '', papersKey: '',
     step: apiKey() ? 'problem' : 'setup', stepChosen: false,
-    available: { setup: true, problem: true, spec: false, progress: false, review: false, conclusion: false },
+    available: { setup: true, problem: true, spec: false, progress: false, review: false, summary: false },
   });
   history.replaceState(null, '', location.pathname);
   const paragraph = $('#paragraph');
@@ -323,8 +323,8 @@ async function refresh() {
       renderProgress(project);
       state.available.review = state.papers.length > 0;
       if (state.available.review) renderReview();
-      state.available.conclusion = state.papers.some((p) => p.status === 'extracted') || Boolean(project.conclusion);
-      renderConclusion(project);
+      state.available.summary = state.papers.some((p) => p.status === 'extracted') || Boolean(project.summary);
+      renderSummary(project);
       followTheWork(project);
       renderTabs();
       renderActivity();
@@ -418,7 +418,7 @@ function tabKeys(event) {
 // -- agent activity --------------------------------------------------------------------
 
 const STEP_AGENT = {
-  spec: 'opus', search: 'opus', adjudicate: 'opus', overlap: 'opus', conclude: 'opus', fetch: 'sonnet', screen: 'haiku', extract: 'haiku',
+  spec: 'opus', search: 'opus', adjudicate: 'opus', overlap: 'opus', summarize: 'opus', fetch: 'sonnet', screen: 'haiku', extract: 'haiku',
 };
 const seconds = (since) => `${Math.max(0, Math.round((Date.now() - since) / 1000))} s`;
 const duration = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
@@ -773,26 +773,26 @@ function showPaper(paperId) {
   $('#papers .paper h3')?.scrollIntoView({ block: 'nearest' });
 }
 
-// -- step 6: the conclusion -------------------------------------------------------------
+// -- step 6: the summary -----------------------------------------------------------------
 
-function renderConclusion(project) {
-  const c = project.conclusion;
-  const running = c?.status === 'running' || jobs.has(`conclusion-${project.id}`);
-  $('#conclude').disabled = running || jobs.has(project.id);
-  $('#conclude').textContent = c?.status === 'done' ? 'Write the conclusion again' : 'Write the conclusion';
-  $('#conclude-status').textContent = running ? 'Opus is checking for overlap and writing the conclusion…'
+function renderSummary(project) {
+  const summary = project.summary;
+  const running = summary?.status === 'running' || jobs.has(`summary-${project.id}`);
+  $('#summarize').disabled = running || jobs.has(project.id);
+  $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
+  $('#summarize-status').textContent = running ? 'Opus is checking for overlap and writing the summary…'
     : jobs.has(project.id) ? 'Wait until the search finishes.' : '';
-  showError($('#conclusion-error'), c?.status === 'error' ? c.error : '');
-  $('#conclusion-body').replaceChildren(...(c?.status === 'done'
-    ? conclusionView({ conclusion: c, overlap: project.overlap?.report, papers: state.papers, decisions: state.decisions })
+  showError($('#summary-error'), summary?.status === 'error' ? summary.error : '');
+  $('#summary-body').replaceChildren(...(summary?.status === 'done'
+    ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions: state.decisions })
     : running ? [] : [h('p', { class: 'muted' },
-      'Review the papers first: the conclusion uses every result you included or left undecided, and none you excluded.')]));
+      'Review the papers first: the summary uses every result you included or left undecided, and none you excluded.')]));
 }
 
-function writeConclusion() {
+function writeSummary() {
   if (!haveKey() || !state.id) return;
   const id = state.id;
-  startJob(`conclusion-${id}`, () => pipeline(id).conclude(id));
+  startJob(`summary-${id}`, () => pipeline(id).summarize(id));
   refresh();
 }
 
@@ -1031,9 +1031,9 @@ function exportCsv(includedOnly) {
 }
 
 async function exportJson() {
-  const { id, created_at, paragraph, spec, search_plan, search_log, overlap, conclusion } = state.project;
+  const { id, created_at, paragraph, spec, search_plan, search_log, overlap, summary } = state.project;
   const papers = state.papers.map((p) => ({ ...p, decisions: state.decisions[p.id] || {}, links: links(p) }));
-  const body = { project: { id, created_at, paragraph, spec, search_plan, search_log, overlap, conclusion }, papers, usage: state.usage };
+  const body = { project: { id, created_at, paragraph, spec, search_plan, search_log, overlap, summary }, papers, usage: state.usage };
   download(`effect-sizes-${id}.json`, JSON.stringify(body, null, 2), 'application/json');
 }
 
@@ -1056,7 +1056,7 @@ async function start() {
   $('#export-included').addEventListener('click', () => exportCsv(true));
   $('#export-all').addEventListener('click', () => exportCsv(false));
   $('#export-json').addEventListener('click', exportJson);
-  $('#conclude').addEventListener('click', writeConclusion);
+  $('#summarize').addEventListener('click', writeSummary);
   document.addEventListener('keydown', reviewKeys);
   for (const step of STEPS) {
     $(`#tab-${step}`).addEventListener('click', () => selectStep(step));
