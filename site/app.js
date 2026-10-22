@@ -8,6 +8,7 @@ import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
 import { europepmcUrl, Sources } from './lib/sources.js';
 import { overlapNote, reviewKeys, reviewNav, summaryView } from './lib/review-view.js';
+import { searchMap } from './lib/search-map.js';
 import { SpecPanel, STATISTICS } from './lib/spec-panel.js';
 import { RUNNING, Store } from './lib/store.js';
 
@@ -20,12 +21,6 @@ const POPULATIONS = {
 const EXCLUDE_REASONS = [
   'Different outcome', 'Different timepoint', 'Different population', 'Different comparison',
   'Same trial as another record', 'Numbers look wrong', 'Other',
-];
-const STAGES = [
-  ['searching', 'Plan and run the search'],
-  ['screening', 'Screen titles and abstracts'],
-  ['extracting', 'Read and extract'],
-  ['done', 'Ready for review'],
 ];
 const TABS = [
   ['extracted', 'Extracted'],
@@ -653,11 +648,7 @@ function renderProgress(project) {
   state.available.progress = Boolean(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
   if (!state.available.progress) return;
 
-  const order = STAGES.map(([s]) => s);
-  const current = project.status === 'done' ? 3 : order.indexOf(project.status);
-  $('#stages').replaceChildren(...STAGES.map(([key, label], i) => h('li', {
-    'data-state': i < current || project.status === 'done' ? 'done' : i === current ? 'active' : null,
-  }, label)));
+  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running }));
 
   const progress = project.progress || {};
   const bar = $('#progress');

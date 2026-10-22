@@ -1,6 +1,7 @@
 // Effect Size Finder: the page. Talks to the JSON API in python/esf/server.py.
 
 import { overlapNote, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
+import { searchMap } from '/lib/search-map.js';
 import { SpecPanel, STATISTICS } from '/lib/spec-panel.js';
 
 const RUNNING = new Set(['reading', 'searching', 'screening', 'extracting']);
@@ -13,12 +14,6 @@ const POPULATIONS = {
 const EXCLUDE_REASONS = [
   'Different outcome', 'Different timepoint', 'Different population', 'Different comparison',
   'Same trial as another record', 'Numbers look wrong', 'Other',
-];
-const STAGES = [
-  ['searching', 'Plan and run the search'],
-  ['screening', 'Screen titles and abstracts'],
-  ['extracting', 'Read and extract'],
-  ['done', 'Ready for review'],
 ];
 const TABS = [
   ['extracted', 'Extracted'],
@@ -197,15 +192,14 @@ async function refresh() {
   if (id !== state.id) return;
   const wasRunning = state.project && RUNNING.has(state.project.status);
   state.project = project;
+  const hasPapers = Object.keys(project.counts || {}).length > 0;
+  if (hasPapers) state.papers = await api(`/api/projects/${id}/papers`);
+  if (id !== state.id) return;
   renderProblem(project);
   renderSpec(project);
   renderProgress(project);
-  if (Object.keys(project.counts || {}).length) {
-    state.papers = await api(`/api/projects/${id}/papers`);
-    renderReview();
-  } else {
-    $('#review').hidden = true;
-  }
+  if (hasPapers) renderReview();
+  else $('#review').hidden = true;
   renderSummary(project);
   const extracting = state.papers.some((p) => p.status === 'fetching' || p.status === 'extracting');
   if (RUNNING.has(project.status) || extracting || project.summary?.status === 'running') {
@@ -310,11 +304,7 @@ function renderProgress(project) {
   card.hidden = !(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
   if (card.hidden) return;
 
-  const order = STAGES.map(([s]) => s);
-  const current = project.status === 'done' ? 3 : order.indexOf(project.status);
-  $('#stages').replaceChildren(...STAGES.map(([key, label], i) => h('li', {
-    'data-state': i < current || project.status === 'done' ? 'done' : i === current ? 'active' : null,
-  }, label)));
+  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running: RUNNING.has(project.status) }));
 
   const progress = project.progress || {};
   const bar = $('#progress');

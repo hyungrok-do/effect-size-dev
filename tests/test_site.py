@@ -390,6 +390,10 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     opus_jobs = page.locator("#agents [data-agent='opus'] .job .what").all_inner_texts()
     assert opus_jobs[0] == "Planning the search" and opus_jobs[1].startswith("Counts 2 PubMed queries"), opus_jobs
     assert "at work" in page.inner_text("#agents [data-agent='opus'] .state")
+    # The search map shows Opus planning, and every later stage still to come.
+    states = page.evaluate("[...document.querySelectorAll('#map-body .map-stage')].map((li) => [li.dataset.stage, li.dataset.state])")
+    assert states == [["plan", "active"], ["search", "pending"], ["screen", "pending"], ["follow", "pending"],
+                      ["extract", "pending"], ["overlap", "pending"], ["ready", "pending"]], states
     # The page shows the search while it runs and moves on to the review when it finishes (it only
     # does that when the search tab is the one open, so this also shows the search tab was followed).
     page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
@@ -437,6 +441,21 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     funnel = page.inner_text("#funnel")
     assert "1 hit; the top 1 taken" in funnel and "4 hits; the top 4 taken" in funnel and "4 hits; the top 3 taken" in funnel
     assert "References of 1 review: 3 in PubMed, 1 already found, 1 not studies" in funnel
+    # The search map: every stage done, each level with what its search returned, and the outcomes.
+    stages = page.locator("#map-body .map-stage")
+    assert stages.count() == 7 and page.locator("#map-body .map-stage[data-state='done']").count() == 7
+    levels = page.evaluate("""[...document.querySelectorAll('#map-body .map-level')].map((li) =>
+        [li.dataset.level, li.dataset.state, li.querySelector('.map-result').textContent])""")
+    assert levels == [["reviews", "done", "1 hit → top 1 taken → 1 new"], ["primary", "done", "4 hits → top 4 taken → 4 new"],
+                      ["full_text", "done", "4 hits → top 3 taken → 2 new"], ["registry", "done", "1 hit → top 1 taken → 1 new"]], levels
+    screen = page.inner_text("#map-body [data-stage='screen']")
+    assert "Included 8" in screen and "Excluded 1" in screen and "1 review among those included" in screen
+    assert "1 review followed" in page.inner_text("#map-body [data-stage='follow']")
+    extract = page.inner_text("#map-body [data-stage='extract']")
+    assert "Extracted 8" in extract and "downloaded by Sonnet" in extract and "re-extracted by Opus" in extract
+    assert "1 study reported more than once" in page.inner_text("#map-body [data-stage='overlap']")
+    assert [x.get_attribute("data-agent") for x in page.locator("#map-body [data-stage='extract'] .map-agent").all()] == [
+        "code", "sonnet", "haiku", "opus"]
     page.click("#plan-details summary")
     strategy = page.locator("#plan-queries li").all_inner_texts()
     assert strategy[0].startswith("Reviews and meta-analyses · Pooled effects.") and strategy[1].startswith("Studies in the target population")

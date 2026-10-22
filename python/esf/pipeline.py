@@ -216,6 +216,8 @@ class Pipeline:
                 failed.append(f"{label} ({exc})")
                 entry["error"] = str(exc)
             entries.append(entry)
+            # Saved as each search returns, so the page can show the levels filling in.
+            self.store.update_project(project_id, search_log=entries)
         if failed:
             if len(failed) == len(queries):
                 raise SourceError("Every search query failed: " + "; ".join(failed))

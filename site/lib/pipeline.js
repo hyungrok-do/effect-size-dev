@@ -225,6 +225,8 @@ export class Pipeline {
         entry.error = describeError(error);
       }
       entries.push(entry);
+      // Saved as each search returns, so the page can show the levels filling in.
+      await this.store.updateProject(projectId, { search_log: entries.map((e) => ({ ...e })) });
     }
     if (failed.length && failed.length === queries.length) throw new Error(`Every search query failed: ${failed.join('; ')}`);
     if (failed.length) await this.store.updateProject(projectId, { search_plan: { ...plan, failed_queries: failed } });

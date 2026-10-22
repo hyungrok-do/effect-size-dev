@@ -1,0 +1,66 @@
+/* The search map (search-map.js). Uses the page's color tokens, with the agents' colors as fallbacks. */
+
+.search-map { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.search-map > h3 { font-size: 16px; margin: 0; }
+.search-map > .map-intro { margin: 4px 0 0; color: var(--ink-2); font-size: 14px; }
+.map-stages { list-style: none; margin: 12px 0 0; padding: 0; position: relative; }
+.map-stage { position: relative; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; padding-bottom: 12px; }
+/* The line joining the stages. */
+.map-stage:not(:last-child)::before { content: ''; position: absolute; left: 14px; top: 30px; bottom: 0; width: 2px; background: var(--line); }
+.map-stage[data-state="done"]:not(:last-child)::before { background: var(--ok); }
+.map-dot { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--field-line);
+  background: var(--surface); color: var(--muted); font-size: 13px; font-weight: 700; z-index: 1; }
+.map-stage[data-state="done"] .map-dot { border-color: var(--ok); background: var(--ok); color: var(--surface); }
+.map-stage[data-state="active"] .map-dot { border-color: var(--accent); color: var(--accent); animation: map-pulse 1.6s ease-in-out infinite; }
+.map-stage[data-state="stopped"] .map-dot { border-color: var(--warn); color: var(--warn); }
+@keyframes map-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } 50% { box-shadow: 0 0 0 6px transparent; } }
+@media (prefers-reduced-motion: reduce) { .map-stage[data-state="active"] .map-dot { animation: none; } }
+.map-card { min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.map-stage[data-state="pending"] .map-card { background: transparent; }
+.map-stage[data-state="pending"] h4 { color: var(--ink-2); }
+.map-stage[data-state="active"] .map-card { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.map-stage[data-state="stopped"] .map-card { border-color: var(--warn); }
+.map-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.map-head h4 { margin: 0; font-size: 15px; }
+.map-agents { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.map-agent { --agent: var(--code, #6f6f68); padding: 0 7px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
+  color: var(--agent); border: 1px solid color-mix(in srgb, var(--agent) 45%, transparent); }
+.map-agent[data-agent="opus"] { --agent: var(--opus, #2457c5); }
+.map-agent[data-agent="sonnet"] { --agent: var(--sonnet, #7445b8); }
+.map-agent[data-agent="haiku"] { --agent: var(--haiku, #1d7a4a); }
+.map-state { margin-left: auto; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.map-stage[data-state="active"] .map-state { color: var(--accent); font-weight: 600; }
+.map-stage[data-state="stopped"] .map-state { color: var(--warn); font-weight: 600; }
+.map-stage[data-state="done"] .map-state { color: var(--ok); }
+.map-how { margin: 4px 0 0; color: var(--ink-2); font-size: 13.5px; line-height: 1.45; }
+.map-note { margin: 8px 0 0; font-size: 13.5px; color: var(--ink-2); }
+.map-facts { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.map-total { margin: 8px 0 0; font-size: 13.5px; font-weight: 600; }
+
+/* The levels of the search, from the top down. */
+.map-levels { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.map-level { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.map-level-mark { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--surface-2); font-size: 12px; font-weight: 700; }
+.map-level[data-state="done"] .map-level-mark { background: var(--ok-soft); color: var(--ok); }
+.map-level[data-state="active"] { border-color: var(--accent); }
+.map-level[data-state="active"] .map-level-mark { background: var(--accent); color: var(--accent-ink); }
+.map-level[data-state="error"] { border-color: var(--error); }
+.map-level[data-state="pending"] { opacity: .7; }
+.map-level-body { min-width: 0; }
+.map-level-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font-size: 13.5px; }
+.map-source { color: var(--muted); font-size: 12px; }
+.map-level code { display: block; margin-top: 2px; font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+.map-result { display: block; margin-top: 3px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.map-level[data-state="error"] .map-result { color: var(--error); }
+
+/* A bar split by outcome, with its legend. */
+.map-bar-wrap { margin-top: 8px; }
+.map-bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--line); }
+.map-bar span { min-width: 3px; }
+.map-bar [data-kind="include"], .map-legend [data-kind="include"]::before { background: var(--ok); }
+.map-bar [data-kind="unsure"], .map-legend [data-kind="unsure"]::before { background: var(--warn); }
+.map-bar [data-kind="exclude"], .map-legend [data-kind="exclude"]::before { background: var(--muted); }
+.map-bar [data-kind="active"], .map-legend [data-kind="active"]::before { background: var(--accent); }
+.map-bar [data-kind="waiting"], .map-legend [data-kind="waiting"]::before { background: var(--field-line); opacity: .45; }
+.map-legend { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.map-legend li::before { content: ''; display: inline-block; width: 9px; height: 9px; margin-right: 5px; border-radius: 2px; vertical-align: baseline; }

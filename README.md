@@ -213,6 +213,13 @@ was structured are converted when they are opened. It moves to the next tab when
 meantime. Papers from PubMed and ClinicalTrials.gov records are counted and reviewed separately,
 and each paper says how it was found (as a review, in the target population, cited by a review…).
 
+The **Search** tab opens with a **search map** of how the search works, which fills in as it runs:
+each stage (plan, the levels from the top down, screening, the reviews' references, reading and
+extracting, the overlap check) with the agents that do it, a line on its logic, whether it is done,
+running (with how far it has got) or stopped, and what it found: each level's query, hits, records
+taken and new records; how screening and extraction came out; the references followed. The local
+server's page shows the same map.
+
 The **Agent activity** panel lists every job each agent is doing right now (Opus 5.5 managing,
 Sonnet 5.5 fetching, Haiku 5.5 screening and reading, and the page's own code searching and
 checking): which paper or query, how long it has run and the tokens it has used so far, with the
