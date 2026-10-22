@@ -698,7 +698,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.wait_for_selector("#source-text mark")
     page.click("#source-close")
 
-    # The summary: for each number to find, the values side by side, described by Opus by key and
+    # The summary: for each effect size to find, the values side by side, described by Opus by key and
     # shown as printed. Nothing is pooled or recommended.
     page.click("#tab-summary")
     page.click("#summarize")

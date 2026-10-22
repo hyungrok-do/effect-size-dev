@@ -403,7 +403,7 @@ class Pipeline:
         self.store.update_project(project_id, overlap={"report": report, "records": [r["key"] for r in records], "input": records})
 
     def summarize(self, project_id: str) -> None:
-        """Opus describes, for each number the plan needs, the values the investigator kept: how they
+        """Opus describes, for each effect size the plan needs, the values the investigator kept: how they
         compare and where they share participants. It does not combine them or recommend one. If writing
         it again fails, the previous summary stays, with the error."""
         previous = previous_summary((self.store.project(project_id) or {}).get("summary"))

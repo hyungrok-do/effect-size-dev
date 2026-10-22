@@ -444,7 +444,7 @@ function withValues(text, values, study) {
   });
 }
 
-// The values for one number to find, one row per study arm (record, outcome, timepoint and group)
+// The values for one effect size to find, one row per study arm (record, outcome, timepoint and group)
 // and a column per statistic, in the order the summary lists them. A value whose quote was not found
 // is marked in its cell and in the row's check.
 function armTable(list, study) {
@@ -491,7 +491,7 @@ function valueTable(list, study) {
         v.same_participants_as && [' ', badge(`same participants as ${v.same_participants_as}`, 'warn')]))))));
 }
 
-// The summary: an overview, then for each number the plan needs the values that bear on it side by
+// The summary: an overview, then for each effect size the plan needs the values that bear on it side by
 // side with how they compare, then overlap, caveats and gaps. Nothing is combined or recommended.
 // Each study is linked to its page through `linksOf(paper)`, {label: url}. `decisions` is
 // {paperId: {resultIndex: {decision}}}, to tell when the summary is out of date.

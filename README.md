@@ -4,7 +4,7 @@ Describe a study you are planning in a short paragraph. Effect Size Finder searc
 PMC and ClinicalTrials.gov, reads the papers it can open, and extracts the statistics they report (group
 sizes, means, SDs, event counts, CIs, hazard ratios, and so on), each with the sentence or table
 row it came from. You review the papers one at a time, including or excluding each result; Opus
-checks the studies for overlap and summarizes, for each number your plan needs, what the studies
+checks the studies for overlap and summarizes, for each effect size your plan needs, what the studies
 you kept report.
 
 It **searches for relevant papers**, **extracts the reported numbers** and **summarizes them**. It
@@ -31,7 +31,7 @@ reader and registry formatting are ports of the Python ones, and the tests requi
 ```
 paragraph
   ▼
-OPUS    Read the problem → structured specification (PICO parts, outcomes, numbers to find, rules, terms)
+OPUS    Read the problem → structured specification (PICO parts, outcomes, effect sizes to find, rules, terms)
 YOU     Check and edit the specification
 OPUS    Plan the search from the top down: concept blocks, hit counts, then one query per level
 CODE    Run the levels in order (reviews → target population → full text → wider), then ClinicalTrials.gov
@@ -44,7 +44,7 @@ CODE    Check each quote is in the source and each number is in its quote; plaus
 OPUS    Re-extract anything that failed a check, was flagged, or fell in the random audit sample
 OPUS    Check the extracted records for overlap: one study reported twice, reviews pooling studies in the set
 YOU     Review one paper at a time: include or exclude each result; export CSV or JSON
-OPUS    Summarize: for each number the plan needs, the values that bear on it and how they compare
+OPUS    Summarize: for each effect size the plan needs, the values that bear on it and how they compare
 ```
 
 Claude reads and quotes; it never computes or converts a number. Every value is checked by code
@@ -205,7 +205,7 @@ it has a key. **Validate** shows how Opus read your paragraph, as a structured s
 question in one sentence, anything worth deciding before the search, then one table per part: the
 comparison (population with its condition, age and setting; intervention with its delivery, dose
 and duration; the comparator and its kind; the design), the outcomes (role, measure, type, when),
-the numbers to find (outcome, statistics, per arm or between groups, when, and what each is for),
+the effect sizes to find (outcome, statistics, per arm or between groups, when, and what each is for),
 the values your paragraph states, the screening rules (include or exclude, and what each is about)
 and the search terms grouped by concept, which Opus starts its concept blocks from. Click any item to change it where it is (Enter or clicking
 away keeps the change, Escape drops it; tables have **+ Add** and × for rows); each change is kept
@@ -290,7 +290,7 @@ was found. Opus is told to describe, not decide: it does not combine studies, av
 values, convert between statistics, or recommend a value.
 
 The summary has an overview of what was found and how close it is to the planned study; then, for
-each number the plan needs, the values that bear on it side by side, one row per study arm with a
+each effect size the plan needs, the values that bear on it side by side, one row per study arm with a
 column per statistic (n, mean, SD, ...), whether each quote was found and which arms share
 participants, with Opus's note on how they compare: which match the planned measure, timepoint and population, how widely they vary, and
 which come from larger or better reported studies. Overlap, what to check before using the values,

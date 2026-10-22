@@ -273,7 +273,7 @@ class OverlapReport(BaseModel):
 
 
 class NeedSummary(BaseModel):
-    need: str = Field(description="The row of numbers to find, as the specification describes it.")
+    need: str = Field(description="The effect size to find, as the specification describes it.")
     values: list[str] = Field(
         description="Keys of the reported values that bear on it (V3, V7), the most directly relevant first; empty if none."
     )
@@ -285,7 +285,7 @@ class NeedSummary(BaseModel):
 
 class EvidenceSummary(BaseModel):
     overview: str = Field(description="Two to four sentences on what was found and how close it is to the planned study.")
-    needs: list[NeedSummary] = Field(description="One per row of numbers to find, in the specification's order.")
+    needs: list[NeedSummary] = Field(description="One per effect size to find, in the specification's order.")
     overlap: str = Field(description="Which values come from the same participants, and why; empty if none.")
     caveats: list[str] = Field(description="What to check before using the values.")
-    gaps: list[str] = Field(description="Numbers the plan needs that the sources don't give, and where to look next.")
+    gaps: list[str] = Field(description="Effect sizes the plan needs that the sources don't give, and where to look next.")

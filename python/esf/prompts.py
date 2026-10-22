@@ -151,11 +151,11 @@ something from, the overlap check, and every reported value they kept, each with
 ...), its record, group, group size and how well it was checked.
 
 Describe; do not decide. Do not combine studies, average or pool values, convert between \
-statistics, recommend a value or estimate an effect size: the statistician will do that.
+statistics, recommend a value or estimate a pooled effect: the statistician will do that.
 
 Write an overview of what kinds of studies were found and how close they are to the planned study \
-(population, intervention, comparator, outcome measure, timepoint, design). Then, for each row of \
-numbers to find in the specification, list the keys of the values that bear on it, the most \
+(population, intervention, comparator, outcome measure, timepoint, design). Then, for each effect \
+size to find in the specification (each row of statistics_needed), list the keys of the values that bear on it, the most \
 directly relevant first, and say how they compare: which match the planned measure, timepoint and \
 population and which differ, how widely they vary, and which come from larger or better reported \
 studies. Say which values come from the same participants, as the overlap check found. List what \

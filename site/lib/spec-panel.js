@@ -181,7 +181,7 @@ const PARTS = {
     ], { noun: 'outcome', empty: 'No outcomes yet.' }),
   },
   numbers: {
-    title: 'Numbers to find',
+    title: 'Effect sizes to find',
     view: (spec, panel) => [
       // The outcome field suggests the outcomes listed above.
       h('datalist', { id: 'spec-outcome-names' }, spec.outcomes.map((o) => h('option', { value: o.name }))),
@@ -191,7 +191,7 @@ const PARTS = {
         { key: 'per', ...choice('For', PER) },
         { key: 'timepoint', ...text('When', { placeholder: 'Any' }) },
         { key: 'purpose', ...text('Purpose') },
-      ], { noun: 'row', empty: 'Nothing listed yet.' }),
+      ], { noun: 'effect size', empty: 'Nothing listed yet.' }),
     ],
   },
   stated: {

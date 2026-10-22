@@ -414,7 +414,7 @@ export class Pipeline {
     await this.store.updateProject(projectId, { overlap: { report, records: records.map((r) => r.key), input: records } });
   }
 
-  // Opus describes, for each number the plan needs, the values the investigator kept: how they
+  // Opus describes, for each effect size the plan needs, the values the investigator kept: how they
   // compare and where they share participants. It does not combine them or recommend one.
   async summarize(projectId) {
     const previous = previousSummary((await this.store.project(projectId)).summary);

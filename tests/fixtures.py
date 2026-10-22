@@ -537,7 +537,7 @@ class FakeLLM:
         return OverlapReport(groups=groups, notes="")
 
     def summarize(self, spec, overlap, evidence, sink=None):
-        """Lists, for each number to find, the values of the statistics it names, and names the
+        """Lists, for each effect size to find, the values of the statistics it names, and names the
         smallest and largest SD by key, as the real summary would."""
         self.calls.append("summarize")
         self.evidence = evidence
