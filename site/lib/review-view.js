@@ -112,6 +112,39 @@ export function overlapNote(paper, report, papers) {
   }));
 }
 
+// -- a paper's citation ----------------------------------------------------------------
+
+// The paper as cited, for the review: its title (linked to where it was found), its key, authors,
+// year and venue, then its identifiers, each linked: PMID, PMCID, DOI, the Europe PMC ID of a record
+// PubMed does not have, and trial registrations. `links` is the record's {label: url}; `warnings`
+// are badges to show after the identifiers.
+export function paperHeader(paper, links, warnings = []) {
+  const url = sourceUrl(paper, links);
+  const title = paper.title || paper.ext_id;
+  const venue = paper.source === 'clinicaltrials' ? 'ClinicalTrials.gov'
+    : paper.journal || (paper.ext_id.startsWith('PPR') ? 'Preprint' : '');
+  const id = (label, value, href) => h('span', { class: 'id' }, label && `${label} `,
+    href ? h('a', { href, target: '_blank', rel: 'noopener' }, value) : value);
+  const trials = [...new Set([...(paper.source === 'clinicaltrials' ? [paper.ext_id] : []), ...(paper.nct_ids || [])])];
+  const ids = [
+    paper.pmid && id('PMID', paper.pmid, links.PubMed),
+    paper.pmcid && id('PMCID', paper.pmcid, links.PMC),
+    paper.doi && id('DOI', paper.doi, links.DOI),
+    paper.source === 'europepmc' && !paper.pmid && paper.ext_id !== paper.pmcid && id('Europe PMC', paper.ext_id, links['Europe PMC']),
+    ...trials.map((nct) => id('', nct, links[nct] || `https://clinicaltrials.gov/study/${nct}`)),
+  ].filter(Boolean);
+  const shown = warnings.filter(Boolean);
+  return [
+    h('h3', {}, url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, title) : title),
+    h('div', { class: 'meta cite' },
+      badge(`R${paper.id}`, 'accent'),
+      paper.authors && h('span', {}, paper.authors),
+      paper.year && h('span', {}, paper.year),
+      venue && h('span', { class: 'venue' }, venue)),
+    (ids.length > 0 || shown.length > 0) && h('div', { class: 'meta ids' }, ids, shown),
+  ];
+}
+
 // -- a result in a line per group ----------------------------------------------------
 
 const EFFECTS = {

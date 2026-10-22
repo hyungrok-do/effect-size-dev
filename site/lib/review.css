@@ -51,3 +51,9 @@
 .paper h3 a:hover { text-decoration-color: currentColor; }
 .paper-details { margin-top: 10px; }
 .paper-details summary { font-size: 13px; color: var(--muted); }
+
+/* A paper's citation: authors, year and venue, then its identifiers. */
+.paper .cite .venue { font-style: italic; }
+.paper .ids { margin-top: 3px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.paper .ids .id { color: var(--muted); }
+.paper .ids .id a { color: var(--ink-2); overflow-wrap: anywhere; }

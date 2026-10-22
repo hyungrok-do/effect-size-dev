@@ -446,10 +446,12 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     # Papers only Europe PMC has: one from PubMed Central, and a preprint marked as one.
     pmc = open_paper(page, "Mindfulness app use and depressive symptoms")
     assert pmc.locator(".badge", has_text="Europe PMC").count() == 1 and pmc.locator(".badge", has_text="Full-text search").count() == 1
-    assert pmc.locator("a", has_text="Europe PMC").get_attribute("href") == f"https://europepmc.org/article/PMC/{PMC_ONLY}"
+    assert pmc.locator("h3 a").get_attribute("href") == f"https://europepmc.org/article/PMC/{PMC_ONLY}"
+    assert pmc.locator(".ids .id").all_inner_texts() == [f"PMCID {PMC_ONLY}"]
     assert pmc.locator(".meta").first.inner_text().startswith("R") and "Ahmed N, Brown T, Clark R, et al." in pmc.inner_text()
     preprint = open_paper(page, "A smartphone mindfulness programme")
     assert preprint.locator(".badge", has_text="Preprint, not peer reviewed").count() == 1
+    assert preprint.locator(".ids .id").first.inner_text().startswith("DOI 10.1101/") and "Europe PMC PPR" in preprint.locator(".ids").inner_text()
     # Each paper says how the search found it, and what the overlap check found about it.
     assert open_paper(page, "Smartphone mindfulness").locator(".badge", has_text="Cited by a review").count() == 1
     review = open_paper(page, "Mindfulness apps for depressive symptoms: a systematic review")
@@ -534,6 +536,14 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert [" ".join(a.split()) for a in arms][:2] == ["App 8.1 ± 4.2 n = 100", "Waitlist 10.3 ± 4.5 n = 100"], arms
     assert not trial.locator(".result details.quotes table").first.is_visible()
     assert trial.locator("h3 a").get_attribute("href") == "https://pubmed.ncbi.nlm.nih.gov/11111111/"
+    # It is cited in full for credibility: authors, year and venue, then each identifier, linked.
+    cite = " ".join(trial.locator(".cite").inner_text().split())
+    assert cite.startswith("R") and "Kim J, Lee S, Park H, et al. 2021 Journal of Student Mental Health" in cite, cite
+    ids = trial.locator(".ids .id").all_inner_texts()
+    assert ids == ["PMID 11111111", "PMCID PMC9000001", "DOI 10.1000/rct1", "NCT01234567"], ids
+    assert trial.locator(".ids a").evaluate_all("links => links.map((a) => a.href)") == [
+        "https://pubmed.ncbi.nlm.nih.gov/11111111/", "https://pmc.ncbi.nlm.nih.gov/articles/PMC9000001/",
+        "https://doi.org/10.1000/rct1", "https://clinicaltrials.gov/study/NCT01234567"]
     open_paper(page, "A mindfulness app for depressive").locator(".result").first.locator("button.include").click()
     page.wait_for_selector(".result[data-decision='include']")
     # Every result of this paper is decided: it counts as reviewed, and Next is the button to press.

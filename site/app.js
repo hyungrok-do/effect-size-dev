@@ -7,7 +7,7 @@ import { csvOf, download, exportRows, LOG_COLUMNS, logRows, PAPER, toCsv } from 
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
 import { europepmcUrl, Sources } from './lib/sources.js';
-import { overlapNote, resultBox, reviewKeys, reviewNav, sourceUrl, summaryView } from './lib/review-view.js';
+import { overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from './lib/review-view.js';
 import { searchMap } from './lib/search-map.js';
 import { SpecPanel } from './lib/spec-panel.js';
 import { RUNNING, Store } from './lib/store.js';
@@ -829,21 +829,16 @@ function paperCard(paper, trials) {
   const sharedTrial = (paper.nct_ids || []).find((nct) => trials.get(nct) > 1);
   const busy = jobs.has(state.id) || jobs.has(`paper-${paper.id}`);
   const extracted = paper.status === 'extracted' && paper.extraction;
-  const url = sourceUrl(paper, links(paper));
-  const title = paper.title || paper.ext_id;
   const overlap = overlapNote(paper, state.project?.overlap?.report, state.papers);
   const differs = extracted && !paper.extraction.matches_spec && paper.extraction.mismatch_reasons.length > 0;
 
   const head = [
-    h('h3', {}, url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, title) : title),
-    h('div', { class: 'meta' },
-      badge(`R${paper.id}`, 'accent'),
-      paper.authors && h('span', {}, paper.authors),
-      paper.year && h('span', {}, paper.year),
+    ...paperHeader(paper, links(paper), [
       paper.ext_id.startsWith('PPR') && badge('Preprint, not peer reviewed', 'warn'),
       paper.fulltext_kind === 'abstract' && badge('Abstract only', 'warn'),
       differs && badge('Differs from the plan', 'warn'),
-      !overlap && sharedTrial && badge(`Another record shares ${sharedTrial}`, 'warn')),
+      !overlap && sharedTrial && badge(`Another record shares ${sharedTrial}`, 'warn'),
+    ]),
     overlap,
   ];
 
@@ -851,7 +846,6 @@ function paperCard(paper, trials) {
   const reasons = paper.escalation?.reasons || [];
   const details = h('details', { class: 'paper-details' }, h('summary', {}, 'Details'),
     h('div', { class: 'meta' },
-      paper.journal && h('span', {}, paper.journal),
       badge({ clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed' }[paper.source] || 'Europe PMC'),
       paper.source !== 'clinicaltrials' && LEVEL_SHORT[paper.found_in?.[0]]
         && h('span', { class: 'badge', title: (paper.found_by || []).join('\n') }, LEVEL_SHORT[paper.found_in[0]]),
@@ -859,8 +853,7 @@ function paperCard(paper, trials) {
       paper.fetched_by === 'sonnet' && badge('Fetched by Sonnet'),
       paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
       paper.extracted_by === 'worker' && badge('Extracted by Haiku'),
-      paper.escalation?.audit && badge('Audit sample'),
-      ...Object.entries(links(paper)).map(([label, href]) => h('a', { href, target: '_blank', rel: 'noopener' }, label))),
+      paper.escalation?.audit && badge('Audit sample')),
     extracted && screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
     reasons.length > 0 && h('p', { class: 'reason' }, `Why Opus reviewed it: ${reasons.join('; ')}`),
     differs && h('p', { class: 'reason' }, `Differs from the plan: ${paper.extraction.mismatch_reasons.join('; ')}`),
