@@ -16,9 +16,16 @@
 .pager button.ready { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 
 /* Overlap. */
-.overlap-note { margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); font-size: 14px; color: var(--ink); }
-.overlap-note strong { color: var(--warn); }
-.overlap-note ul { margin: 4px 0 0; padding-left: 18px; }
+.overlap-note { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13.5px; color: var(--ink-2); }
+.overlap-note li { padding-left: 20px; position: relative; cursor: help; }
+.overlap-note li::before { content: '⇄'; position: absolute; left: 0; color: var(--warn); font-weight: 700; }
+
+/* A result in a line per group. */
+.arms { width: auto; margin: 6px 14px 10px; border-collapse: collapse; font-size: 15px; }
+.arms th, .arms td { padding: 3px 18px 3px 0; border: 0; text-align: left; vertical-align: baseline; }
+.arms th { font-weight: 500; color: var(--ink-2); white-space: normal; }
+.arms .est { font-weight: 600; font-variant-numeric: tabular-nums; }
+.arms .n { color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* The summary. */
 .summary-overview { margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: var(--accent-soft); font-size: 15.5px; line-height: 1.5; }
@@ -33,3 +40,14 @@
 .value-table td .sub { display: block; color: var(--ink-2); font-size: 12.5px; }
 .value-table .unchecked { text-decoration: underline wavy var(--warn); text-underline-offset: 3px; }
 .stale { margin-top: 12px; }
+
+/* The result box's warnings and folded quotes, and the paper's folded details. */
+.result .flags { margin: 0; padding: 6px 14px; font-size: 13px; color: var(--warn); background: var(--warn-soft); }
+.result .flags::before { content: '⚠ '; }
+.result-head .when { font-weight: 400; color: var(--ink-2); }
+.result details.quotes { margin: 0; padding: 6px 14px 10px; border-top: 1px solid var(--line); }
+.result details.quotes summary { font-size: 13px; color: var(--muted); }
+.paper h3 a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 3px; }
+.paper h3 a:hover { text-decoration-color: currentColor; }
+.paper-details { margin-top: 10px; }
+.paper-details summary { font-size: 13px; color: var(--muted); }

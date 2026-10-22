@@ -244,11 +244,16 @@ numbered chip per paper, colored once its results are decided, let you jump to a
 **Previous** and **Next** (or the arrow keys) step through them, and **Next not yet reviewed** skips
 to the first paper still open. Next is highlighted once every result of the paper is decided.
 
-Each paper has a key (R12) that the overlap check and the summary refer to, its authors, where
-its text came from (registry results, PMC full text, open-access PDF, or abstract only), which
-model produced the extraction, why Opus reviewed it if it did, and a warning when another record
-shares its trial registration number. Each result lists its values with their quotes and the
-outcome of the checks; **Show source text** opens the text with the quotes highlighted.
+Each paper is kept short: its title, linked to its PubMed, Europe PMC or ClinicalTrials.gov page;
+its key (R12, which the overlap check and the summary refer to), authors and year; a warning only
+when there is something to watch (a preprint, abstract only, a result that differs from the plan,
+an overlap with another record); and each result in a box with Include and Exclude. A result reads
+as a line per group in the usual shorthand, as printed: `App  8.1 ± 4.2  n = 100`, `median 7 [4–11]`,
+`12/100 events (12%)`, `MD -2.2 (95% CI -3.4 to -1) · p = 0.001`. A result is flagged only when a
+quote did not check out, the match to the plan is partial, confidence is low, or the extraction
+raised a concern (an SD that may be an SE). **Quotes** opens each value with its quote, location
+and check; **Show source text** opens the text with the quotes highlighted; **Details** has how the
+paper was found, the text used, which model extracted it and why, screening notes and the links.
 
 A decision on a result overrides one made for its whole paper. **CSV: included results** exports
 one row per value of the results you included, with its quote, location, check outcome, concerns,

@@ -21,6 +21,7 @@ function h(tag, attrs = {}, ...children) {
   for (const [key, value] of Object.entries(attrs)) {
     if (value == null || value === false) continue;
     if (key === 'class') el.className = value;
+    else if (key.startsWith('on')) el.addEventListener(key.slice(2), value);
     else el.setAttribute(key, value === true ? '' : value);
   }
   for (const child of children.flat()) {
@@ -93,23 +94,164 @@ export function reviewKeys(event) {
 
 // -- overlap and the summary ----------------------------------------------------------
 
-// What the overlap check found about one paper: each group it is in, the others in it, and which to use.
+// What the overlap check found about one paper, a line per group it is in: the others in it, by key,
+// and which record's numbers to use. Their titles and the evidence show on hover.
 export function overlapNote(paper, report, papers) {
   const mine = `R${paper.id}`;
   const groups = (report?.groups || []).filter((g) => g.records.includes(mine));
   if (!groups.length) return null;
-  const name = (key) => {
+  const titleOf = (key) => {
     const other = papers.find((p) => `R${p.id}` === key);
-    return other ? `${key} “${short(other.title || other.ext_id, 60)}”` : key;
+    return other ? `${key}: ${other.title || other.ext_id}` : key;
   };
-  return h('div', { class: 'overlap-note' }, h('strong', {}, 'Overlap'), h('ul', {}, groups.map((g) => h('li', {},
-    `${RELATIONS[g.relation]?.[0] || g.relation}: ${g.records.filter((r) => r !== mine).map(name).join('; ')}. ${g.evidence} `,
-    g.use === mine ? 'Use this record’s numbers.' : g.use ? `Use the numbers of ${name(g.use)} instead.` : ''))));
+  return h('ul', { class: 'overlap-note' }, groups.map((g) => {
+    const others = g.records.filter((r) => r !== mine);
+    return h('li', { title: [g.evidence, ...others.map(titleOf)].join('\n') },
+      `${RELATIONS[g.relation]?.[0] || g.relation}: ${others.join(', ')}. `,
+      g.use === mine ? 'Use this record’s numbers.' : g.use ? `Use the numbers of ${g.use} instead.` : '');
+  }));
+}
+
+// -- a result in a line per group ----------------------------------------------------
+
+const EFFECTS = {
+  mean_difference: 'MD', standardized_mean_difference: 'SMD', odds_ratio: 'OR', risk_ratio: 'RR', hazard_ratio: 'HR',
+  risk_difference: 'RD', icc: 'ICC', correlation: 'r',
+};
+
+// One group's numbers in the usual shorthand, as printed: mean ± SD, median [Q1–Q3], events/n, an
+// effect with its 95% CI, p. Returns {text, n}; anything else is listed by name.
+export function groupLine(values) {
+  const left = [...values];
+  const has = (stat) => left.some((v) => v.statistic === stat);
+  const take = (stat) => {
+    const i = left.findIndex((v) => v.statistic === stat);
+    return i < 0 ? null : left.splice(i, 1)[0].value;
+  };
+  const ci = () => (has('ci_lower') && has('ci_upper') ? ` (95% CI ${take('ci_lower')} to ${take('ci_upper')})` : '');
+  const n = take('n');
+  const parts = [];
+  if (has('mean')) {
+    const mean = take('mean');
+    parts.push(has('sd') ? `${mean} ± ${take('sd')}` : has('se') ? `${mean} ± ${take('se')} (SE)` : `mean ${mean}${ci()}`);
+  }
+  if (has('mean_change')) {
+    const change = take('mean_change');
+    parts.push(has('sd_change') ? `change ${change} ± ${take('sd_change')}` : `change ${change}${ci()}`);
+  }
+  if (has('median')) {
+    const median = take('median');
+    parts.push(has('q1') && has('q3') ? `median ${median} [${take('q1')}–${take('q3')}]`
+      : has('min') && has('max') ? `median ${median} (${take('min')}–${take('max')})` : `median ${median}`);
+  }
+  if (has('events')) {
+    const events = take('events');
+    parts.push(`${events}${n != null ? `/${n}` : ''} events${has('percent') ? ` (${take('percent')}%)` : ''}`);
+  }
+  if (has('percent')) parts.push(`${take('percent')}%`);
+  for (const [stat, label] of Object.entries(EFFECTS)) while (has(stat)) parts.push(`${label} ${take(stat)}${ci()}`);
+  if (has('ci_lower') || has('ci_upper')) parts.push(`95% CI ${take('ci_lower') ?? '?'} to ${take('ci_upper') ?? '?'}`);
+  if (has('p_value')) parts.push(`p = ${take('p_value')}`);
+  for (const v of left) parts.push(`${STATISTICS[v.statistic] || v.statistic} ${v.value}`);
+  return { text: parts.join(' · '), n };
+}
+
+// A result as a line per group (arm, or contrast such as "A vs B"), in the order the paper gives them.
+export function resultLines(result) {
+  const groups = new Map();
+  for (const v of result.values) {
+    if (!groups.has(v.group)) groups.set(v.group, []);
+    groups.get(v.group).push(v);
+  }
+  return h('table', { class: 'arms' }, h('tbody', {}, [...groups].map(([group, values]) => {
+    const { text, n } = groupLine(values);
+    return h('tr', {}, h('th', { scope: 'row' }, group), h('td', { class: 'est' }, text || '—'), h('td', { class: 'n' }, n != null ? `n = ${n}` : ''));
+  })));
+}
+
+// How many of a result's values did not pass the quote check (`checks` from the verification).
+const toCheck = (checks) => checks.filter((c) => c && (!c.number_in_quote || c.quote !== 'exact')).length;
+
+const POPULATIONS = {
+  itt: 'ITT', modified_itt: 'Modified ITT', per_protocol: 'Per protocol', completers: 'Completers', unclear: 'Population unclear',
+};
+const EXCLUDE_REASONS = [
+  'Different outcome', 'Different timepoint', 'Different population', 'Different comparison',
+  'Same trial as another record', 'Numbers look wrong', 'Other',
+];
+
+function checkBadge(check) {
+  if (!check) return '';
+  if (!check.number_in_quote) return badge('number not in quote', 'err');
+  if (check.quote === 'exact') return badge('quote found', 'ok');
+  if (check.quote === 'approximate') return badge('near match', 'warn');
+  return check.number_in_source ? badge('number in text, quote not matched', 'warn') : badge('not found', 'err');
+}
+
+// A result for review: what was measured and when, Include and Exclude, a line per group (mean ± SD,
+// n), and a warning only when there is one; the quotes and their checks are folded away.
+// `decisions` is the paper's {resultIndex: {decision, reason}}; `decide(index, decision, reason)`
+// records one (a null decision clears it).
+export function resultBox(paper, result, index, decisions, decide) {
+  const own = decisions[index];
+  const decision = (own || decisions[PAPER])?.decision || '';
+  const checks = paper.verification?.values?.[index] || [];
+  const flags = (paper.verification?.flags || [])
+    .filter((f) => f.startsWith(`result ${index + 1} `))
+    .map((f) => f.replace(/^result \d+ \([^)]*\): /, ''));
+  const notes = [...result.concerns, ...flags];
+  const unchecked = toCheck(checks);
+
+  const reason = h('select', {
+    'aria-label': 'Reason for excluding', hidden: decision !== 'exclude' || null,
+    onchange: (e) => decide(index, 'exclude', e.target.value),
+  }, h('option', { value: '' }, 'Reason…'), EXCLUDE_REASONS.map((r) => h('option', { value: r }, r)));
+  reason.value = own?.reason || '';
+
+  const head = h('div', { class: 'result-head' },
+    h('div', {},
+      h('h4', {}, result.outcome_measure, result.timepoint && h('span', { class: 'when' }, ` · ${result.timepoint}`)),
+      (result.relevance !== 'direct' || result.confidence === 'low' || unchecked > 0) && h('div', { class: 'meta' },
+        result.relevance !== 'direct' && badge(`${result.relevance} match`, result.relevance === 'partial' ? 'warn' : 'err'),
+        result.confidence === 'low' && badge('low confidence', 'warn'),
+        unchecked > 0 && badge(`${unchecked} ${unchecked === 1 ? 'quote' : 'quotes'} to check`, 'warn'))),
+    h('div', { class: 'decide', role: 'group', 'aria-label': `Decision for ${result.outcome_measure}` },
+      h('button', {
+        type: 'button', class: 'secondary small include', 'aria-pressed': String(decision === 'include'),
+        onclick: () => decide(index, own?.decision === 'include' ? null : 'include', ''),
+      }, 'Include'),
+      h('button', {
+        type: 'button', class: 'secondary small exclude', 'aria-pressed': String(decision === 'exclude'),
+        onclick: () => decide(index, own?.decision === 'exclude' ? null : 'exclude', own?.reason || ''),
+      }, 'Exclude'),
+      reason));
+
+  const rows = result.values.map((v, j) => h('tr', {},
+    h('td', {}, v.group),
+    h('td', {}, STATISTICS[v.statistic] || v.statistic),
+    h('td', { class: 'num' }, String(v.value)),
+    h('td', { class: 'quote' }, h('q', {}, v.quote), h('span', {}, v.location)),
+    h('td', {}, checkBadge(checks[j]))));
+
+  return h('section', { class: 'result', 'data-decision': decision || null },
+    head,
+    resultLines(result),
+    notes.length > 0 && h('p', { class: 'flags' }, notes.join(' · ')),
+    h('details', { class: 'quotes' }, h('summary', {}, 'Quotes'),
+      h('p', { class: 'reason' }, [POPULATIONS[result.analysis_population] || result.analysis_population,
+        result.adjusted !== 'unclear' && result.adjusted, `${result.confidence} confidence`].filter(Boolean).join(' · ')),
+      h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Group', 'Statistic', 'Value', 'Quote', 'Check'].map((t) => h('th', { scope: 'col' }, t)))),
+        h('tbody', {}, rows)))));
 }
 
 // Where each source's records are linked: a paper to the database it was found in, a registry
-// record to its ClinicalTrials.gov page.
+// record to its ClinicalTrials.gov page. `links` is the record's {label: url}.
 const SOURCE_LINKS = { pubmed: 'PubMed', europepmc: 'Europe PMC' };
+export function sourceUrl(paper, links) {
+  return links[paper.source === 'clinicaltrials' ? paper.ext_id : SOURCE_LINKS[paper.source]]
+    || links.PubMed || links.PMC || links.DOI || Object.values(links)[0] || null;
+}
 
 // How the summary names and links records: by key, first author and year, linked to the record's
 // page. `linksOf(paper)` gives a paper's links, {label: url}, as its card in the review shows them.
@@ -119,11 +261,7 @@ function studies(papers, linksOf) {
     const p = byKey.get(record);
     return p ? `${record} ${(p.authors || '').split(',')[0] || short(p.title || '', 40)} ${p.year || ''}`.trim() : record;
   };
-  const url = (p) => {
-    const links = linksOf(p) || {};
-    return links[p.source === 'clinicaltrials' ? p.ext_id : SOURCE_LINKS[p.source]]
-      || links.PubMed || links.PMC || links.DOI || Object.values(links)[0] || null;
-  };
+  const url = (p) => sourceUrl(p, linksOf(p) || {});
   // A record as a link to its page, showing `text` (its name by default), with its title on hover.
   const link = (record, text = name(record)) => {
     const p = byKey.get(record);

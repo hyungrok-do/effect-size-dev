@@ -1,20 +1,13 @@
 // Effect Size Finder: the page. Talks to the JSON API in python/esf/server.py.
 
-import { overlapNote, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
+import { overlapNote, resultBox, reviewKeys, reviewNav, sourceUrl, summaryView } from '/lib/review-view.js';
 import { searchMap } from '/lib/search-map.js';
-import { SpecPanel, STATISTICS } from '/lib/spec-panel.js';
+import { SpecPanel } from '/lib/spec-panel.js';
 
 const RUNNING = new Set(['reading', 'searching', 'screening', 'extracting']);
 const TEXT_KIND = {
   registry: 'Registry results', pmc_xml: 'PMC full text', oa_pdf: 'Open-access PDF', abstract: 'Abstract only',
 };
-const POPULATIONS = {
-  itt: 'ITT', modified_itt: 'Modified ITT', per_protocol: 'Per protocol', completers: 'Completers', unclear: 'Population unclear',
-};
-const EXCLUDE_REASONS = [
-  'Different outcome', 'Different timepoint', 'Different population', 'Different comparison',
-  'Same trial as another record', 'Numbers look wrong', 'Other',
-];
 const TABS = [
   ['extracted', 'Extracted'],
   ['attention', 'Needs attention'],
@@ -409,43 +402,52 @@ function badge(text, kind = '') {
   return h('span', { class: `badge ${kind}`.trim() }, text);
 }
 
+// A paper for review, kept short: its title (linked to where it was found), key, authors and year,
+// warnings only when there is something to watch, and each result as a line per group. Everything
+// else (how it was found, the text used, which model extracted it and why) is under Details.
 function paperCard(paper, trials) {
   const decisions = paper.decisions || {};
   const paperDecision = decisions['-1']?.decision;
   const sharedTrial = (paper.nct_ids || []).find((nct) => trials.get(nct) > 1);
   const running = RUNNING.has(state.project.status);
+  const extracted = paper.status === 'extracted' && paper.extraction;
+  const url = sourceUrl(paper, paper.links || {});
+  const title = paper.title || paper.ext_id;
+  const overlap = overlapNote(paper, state.project.overlap?.report, state.papers);
+  const differs = extracted && !paper.extraction.matches_spec && paper.extraction.mismatch_reasons.length > 0;
 
-  const meta = h('div', { class: 'meta' },
-    badge(`R${paper.id}`, 'accent'),
-    paper.authors && h('span', {}, paper.authors),
-    paper.year && h('span', {}, paper.year),
-    paper.journal && h('span', {}, paper.journal),
-    badge({ clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed' }[paper.source]
-      || (paper.ext_id.startsWith('PPR') ? 'Preprint, not peer reviewed' : 'Europe PMC'), paper.ext_id.startsWith('PPR') ? 'warn' : ''),
-    paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind, paper.fulltext_kind === 'abstract' ? 'warn' : ''),
-    paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
-    paper.extracted_by === 'worker' && badge('Extracted by Haiku'),
-    paper.escalation?.audit && badge('Audit sample'),
-    sharedTrial && badge(`Another record shares ${sharedTrial}`, 'warn'),
-    ...Object.entries(paper.links || {}).map(([label, url]) => h('a', { href: url, target: '_blank', rel: 'noopener' }, label)),
-  );
-
-  const screen = paper.screen;
-  const children = [
-    h('h3', {}, paper.title || paper.ext_id),
-    meta,
-    overlapNote(paper, state.project.overlap?.report, state.papers),
-    screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
-    paper.error && h('p', { class: 'reason' }, badge('Note', 'warn'), ' ', paper.error),
+  const head = [
+    h('h3', {}, url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, title) : title),
+    h('div', { class: 'meta' },
+      badge(`R${paper.id}`, 'accent'),
+      paper.authors && h('span', {}, paper.authors),
+      paper.year && h('span', {}, paper.year),
+      paper.ext_id.startsWith('PPR') && badge('Preprint, not peer reviewed', 'warn'),
+      paper.fulltext_kind === 'abstract' && badge('Abstract only', 'warn'),
+      differs && badge('Differs from the plan', 'warn'),
+      !overlap && sharedTrial && badge(`Another record shares ${sharedTrial}`, 'warn')),
+    overlap,
   ];
 
-  if (paper.escalation?.reasons?.length) {
-    children.push(h('details', {}, h('summary', {}, 'Why Opus reviewed this paper'),
-      h('ul', {}, paper.escalation.reasons.map((r) => h('li', {}, r)))));
-  }
+  const screen = paper.screen;
+  const reasons = paper.escalation?.reasons || [];
+  const details = h('details', { class: 'paper-details' }, h('summary', {}, 'Details'),
+    h('div', { class: 'meta' },
+      paper.journal && h('span', {}, paper.journal),
+      badge({ clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed' }[paper.source] || 'Europe PMC'),
+      paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind),
+      paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
+      paper.extracted_by === 'worker' && badge('Extracted by Haiku'),
+      paper.escalation?.audit && badge('Audit sample'),
+      ...Object.entries(paper.links || {}).map(([label, href]) => h('a', { href, target: '_blank', rel: 'noopener' }, label))),
+    extracted && screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
+    reasons.length > 0 && h('p', { class: 'reason' }, `Why Opus reviewed it: ${reasons.join('; ')}`),
+    differs && h('p', { class: 'reason' }, `Differs from the plan: ${paper.extraction.mismatch_reasons.join('; ')}`),
+    extracted && paper.extraction.notes && h('p', { class: 'reason' }, `Notes: ${paper.extraction.notes}`));
 
+  // What to do with it: decide on an extracted paper; get the text of one that has none yet.
   const actions = h('div', { class: 'paper-actions' });
-  if (paper.status === 'extracted') {
+  if (extracted) {
     actions.append(h('button', {
       type: 'button', class: 'secondary small', 'aria-pressed': String(paperDecision === 'exclude'),
       onclick: () => decide(paper, -1, paperDecision === 'exclude' ? null : 'exclude', ''),
@@ -458,79 +460,18 @@ function paperCard(paper, trials) {
     actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => extractAnyway(paper) },
       paper.status === 'screened_out' ? 'Extract anyway' : 'Try extracting again'));
   }
-  if (actions.childElementCount) children.push(actions);
 
-  const extraction = paper.extraction;
-  if (paper.status === 'extracted' && extraction) {
-    if (!extraction.matches_spec && extraction.mismatch_reasons.length) {
-      children.push(h('p', { class: 'reason' }, badge('Differs from the plan', 'warn'), ' ', extraction.mismatch_reasons.join('; ')));
-    }
-    if (!extraction.results.length) children.push(h('p', { class: 'reason muted' }, 'No relevant results were reported.'));
-    extraction.results.forEach((result, i) => children.push(resultBlock(paper, result, i, decisions)));
-    if (extraction.notes) children.push(h('p', { class: 'reason small muted' }, `Notes: ${extraction.notes}`));
+  const body = [];
+  if (extracted) {
+    if (!paper.extraction.results.length) body.push(h('p', { class: 'reason muted' }, 'No relevant results were reported.'));
+    paper.extraction.results.forEach((result, i) => body.push(
+      resultBox(paper, result, i, decisions, (index, decision, reason) => decide(paper, index, decision, reason))));
+  } else {
+    // Not extracted: why, which is what matters here.
+    if (screen) body.push(h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`));
+    if (paper.error) body.push(h('p', { class: 'reason' }, badge('Note', 'warn'), ' ', paper.error));
   }
-  return h('article', { class: 'paper' }, children);
-}
-
-function checkBadge(check) {
-  if (!check) return '';
-  if (!check.number_in_quote) return badge('number not in quote', 'err');
-  if (check.quote === 'exact') return badge('quote found', 'ok');
-  if (check.quote === 'approximate') return badge('near match', 'warn');
-  return check.number_in_source ? badge('number in text, quote not matched', 'warn') : badge('not found', 'err');
-}
-
-function resultBlock(paper, result, index, decisions) {
-  const own = decisions[String(index)];
-  const effective = own || decisions['-1'];
-  const decision = effective?.decision || '';
-  const checks = paper.verification?.values?.[index] || [];
-  const flags = (paper.verification?.flags || [])
-    .filter((f) => f.startsWith(`result ${index + 1} `))
-    .map((f) => f.replace(/^result \d+ \([^)]*\): /, ''));
-  const notes = [...result.concerns, ...flags];
-
-  const relevanceKind = { direct: 'ok', partial: 'warn', indirect: 'err' }[result.relevance];
-  const reason = h('select', {
-    'aria-label': 'Reason for excluding', hidden: decision !== 'exclude' || null,
-    onchange: (e) => decide(paper, index, 'exclude', e.target.value),
-  }, h('option', { value: '' }, 'Reason…'), EXCLUDE_REASONS.map((r) => h('option', { value: r }, r)));
-  reason.value = own?.reason || '';
-
-  const head = h('div', { class: 'result-head' },
-    h('div', {},
-      h('h4', {}, result.outcome_measure),
-      h('div', { class: 'meta' },
-        result.timepoint && h('span', {}, result.timepoint),
-        h('span', {}, POPULATIONS[result.analysis_population] || result.analysis_population),
-        result.adjusted !== 'unclear' && h('span', {}, result.adjusted),
-        badge(`${result.relevance} match`, relevanceKind),
-        badge(`${result.confidence} confidence`, result.confidence === 'low' ? 'warn' : ''))),
-    h('div', { class: 'decide', role: 'group', 'aria-label': `Decision for ${result.outcome_measure}` },
-      h('button', {
-        type: 'button', class: 'secondary small include', 'aria-pressed': String(decision === 'include'),
-        onclick: () => decide(paper, index, own?.decision === 'include' ? null : 'include', ''),
-      }, 'Include'),
-      h('button', {
-        type: 'button', class: 'secondary small exclude', 'aria-pressed': String(decision === 'exclude'),
-        onclick: () => decide(paper, index, own?.decision === 'exclude' ? null : 'exclude', own?.reason || ''),
-      }, 'Exclude'),
-      reason));
-
-  const rows = result.values.map((v, j) => h('tr', {},
-    h('td', {}, v.group),
-    h('td', {}, STATISTICS[v.statistic] || v.statistic),
-    h('td', { class: 'num' }, String(v.value)),
-    h('td', {}, v.describes),
-    h('td', { class: 'quote' }, h('q', {}, v.quote), h('span', {}, v.location)),
-    h('td', {}, checkBadge(checks[j]))));
-
-  return h('section', { class: 'result', 'data-decision': decision || null },
-    head,
-    notes.length > 0 && h('ul', { class: 'flags' }, notes.map((n) => h('li', {}, n))),
-    h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Group', 'Statistic', 'Value', 'What it is', 'Quote', 'Check'].map((t) => h('th', { scope: 'col' }, t)))),
-      h('tbody', {}, rows))));
+  return h('article', { class: 'paper' }, head, body, actions.childElementCount ? actions : null, details);
 }
 
 async function decide(paper, resultIndex, decision, reason) {

@@ -300,6 +300,38 @@ def test_browser_ports_match_python(browser, site_url):
     ]
 
 
+def test_results_read_as_a_line_per_group(browser, site_url):
+    """The review shows each group's numbers in the usual shorthand, as printed, with n beside them."""
+    page = browser.new_page()
+    page.goto(site_url)
+    v = lambda group, statistic, value: {"group": group, "statistic": statistic, "value": value}  # noqa: E731
+    cases = [
+        [v("App", "n", 100), v("App", "mean", 8.1), v("App", "sd", 4.2)],
+        [v("A", "mean", -1.5), v("A", "se", 0.4)],
+        [v("A vs B", "mean_difference", -2.2), v("A vs B", "ci_lower", -3.4), v("A vs B", "ci_upper", -1.0), v("A vs B", "p_value", 0.001)],
+        [v("A", "events", 12), v("A", "n", 100), v("A", "percent", 12)],
+        [v("A", "median", 7), v("A", "q1", 4), v("A", "q3", 11), v("A", "n", 30)],
+        [v("A vs B", "hazard_ratio", 0.71), v("A vs B", "ci_lower", 0.55), v("A vs B", "ci_upper", 0.92)],
+        [v("A", "mean_change", -3.1), v("A", "sd_change", 5.0), v("A", "icc", 0.05)],
+        [v("A", "n", 98), v("A", "n", 100), v("A", "other", 3)],
+    ]
+    lines = page.evaluate("""async (cases) => {
+        const { groupLine } = await import('/lib/review-view.js');
+        return cases.map((values) => groupLine(values));
+    }""", cases)
+    assert lines == [
+        {"text": "8.1 ± 4.2", "n": 100},
+        {"text": "-1.5 ± 0.4 (SE)", "n": None},
+        {"text": "MD -2.2 (95% CI -3.4 to -1) · p = 0.001", "n": None},
+        {"text": "12/100 events (12%)", "n": 100},
+        {"text": "median 7 [4–11]", "n": 30},
+        {"text": "HR 0.71 (95% CI 0.55 to 0.92)", "n": None},
+        {"text": "change -3.1 ± 5 · ICC 0.05", "n": None},
+        {"text": "n 100 · Other 3", "n": 98},
+    ], lines
+    page.close()
+
+
 def test_a_blocked_api_is_fetched_through_claude(browser, site_url):
     page = browser.new_page()
     page.goto(site_url + "vendor/LICENSES.txt")
@@ -496,6 +528,12 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert pdf_paper.locator(".badge", has_text="quote found").count() == 4
     assert open_paper(page, "Mindfulness groups and depressive").locator(".badge", has_text="Reviewed by Opus").count() == 1
 
+    # A result reads as a line per group, mean ± SD with n; the quotes are folded away until asked for.
+    trial = open_paper(page, "A mindfulness app for depressive")
+    arms = trial.locator(".result").first.locator(".arms tr").all_inner_texts()
+    assert [" ".join(a.split()) for a in arms][:2] == ["App 8.1 ± 4.2 n = 100", "Waitlist 10.3 ± 4.5 n = 100"], arms
+    assert not trial.locator(".result details.quotes table").first.is_visible()
+    assert trial.locator("h3 a").get_attribute("href") == "https://pubmed.ncbi.nlm.nih.gov/11111111/"
     open_paper(page, "A mindfulness app for depressive").locator(".result").first.locator("button.include").click()
     page.wait_for_selector(".result[data-decision='include']")
     # Every result of this paper is decided: it counts as reviewed, and Next is the button to press.
