@@ -200,15 +200,16 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 ## The browser edition's page
 
 Each step has its own tab: **Setup** (your Anthropic API key, a contact email and an optional NCBI
-key), **Describe**, **What to look for**, **Search**, **Review** and **Summary**. The page opens at Setup until
-it has a key. **What to look for** shows how Opus read your paragraph, as a structured specification: the
+key), **Describe**, **Validate**, **Search**, **Review** and **Summary**. The page opens at Setup until
+it has a key. **Validate** shows how Opus read your paragraph, as a structured specification: the
 question in one sentence, anything worth deciding before the search, then one table per part: the
 comparison (population with its condition, age and setting; intervention with its delivery, dose
 and duration; the comparator and its kind; the design), the outcomes (role, measure, type, when),
 the numbers to find (outcome, statistics, per arm or between groups, when, and what each is for),
 the values your paragraph states, the screening rules (include or exclude, and what each is about)
-and the search terms grouped by concept, which Opus starts its concept blocks from. Each part has
-its own **Edit**, and an edit is kept with the search. Searches saved before the specification
+and the search terms grouped by concept, which Opus starts its concept blocks from. Click any item to change it where it is (Enter or clicking
+away keeps the change, Escape drops it; tables have **+ Add** and × for rows); each change is kept
+with the search. Searches saved before the specification
 was structured are converted when they are opened. It moves to the next tab when a step finishes, unless you have switched tabs in the
 meantime. Papers from PubMed and ClinicalTrials.gov records are counted and reviewed separately,
 and each paper says how it was found (as a review, in the target population, cited by a review…).

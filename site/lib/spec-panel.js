@@ -1,6 +1,7 @@
-// The search specification as structured tables: a readable view of each part, edited one part at a
-// time. Shared by the browser edition (site/app.js) and the local server's page (web/app.js); the
-// local server serves this folder at /lib. Styles are in spec-panel.css.
+// The search specification as structured tables, each item edited where it is: click it (or press
+// Enter on it) and it becomes a field; Enter or clicking away keeps the change, Escape drops it, and
+// each change is saved at once. Shared by the browser edition (site/app.js) and the local server's
+// page (web/app.js); the local server serves this folder at /lib. Styles are in spec-panel.css.
 
 export const DESIGNS = {
   parallel_rct: 'Parallel-group randomized trial',
@@ -89,9 +90,9 @@ export function upgradeSpec(spec) {
   };
 }
 
-// -- editors -------------------------------------------------------------------------
+// -- fields ----------------------------------------------------------------------------
 
-// One input for a field: {key, label, kind: 'text' | 'select' | 'list' | 'statistics', options}.
+// One input for a field: {label, kind: 'text' | 'select' | 'list' | 'statistics', options, list}.
 function fieldInput(field, value, attrs = {}) {
   if (field.kind === 'select') {
     const select = h('select', attrs, Object.entries(field.options).map(([key, label]) => h('option', { value: key }, label)));
@@ -121,119 +122,77 @@ function readInput(field, input) {
   return field.kind === 'select' ? input.value : input.value.trim();
 }
 
-// A list of records edited as cards, one per record: its fields with their labels, and Remove.
-// A field marked wide takes a whole line; `list` names a datalist of suggestions for a text field.
-function rowsEditor(rows, fields, blank, addLabel) {
-  const cards = h('div', { class: 'row-cards' });
-  const addRow = (row) => {
-    const inputs = fields.map((f) => fieldInput(f, row[f.key], { 'aria-label': f.label, list: f.list }));
-    const card = h('div', { class: 'row-card' },
-      h('div', { class: 'row-fields' }, fields.map((f, i) => h('label', { class: f.wide ? 'row-field wide' : 'row-field' },
-        h('span', {}, f.label), inputs[i]))),
-      h('button', { type: 'button', class: 'secondary small remove', onclick: () => card.remove() }, 'Remove'));
-    card.inputs = inputs;
-    cards.append(card);
-    return card;
-  };
-  rows.forEach(addRow);
-  const editor = h('div', { class: 'rows-editor' }, cards,
-    h('button', { type: 'button', class: 'secondary small add-row', onclick: () => addRow(blank()).inputs[0].focus() }, addLabel));
-  editor.read = () => [...cards.children].map((card) => Object.fromEntries(fields.map((f, i) => [f.key, readInput(f, card.inputs[i])])));
-  return editor;
+const text = (label, extra = {}) => ({ label, kind: 'text', ...extra });
+const choice = (label, options, extra = {}) => ({ label, kind: 'select', options, ...extra });
+
+// A value as shown when it is not being edited.
+function shown(field, value) {
+  if (field.show) return field.show(value);
+  if (field.kind === 'select') return field.options[value] || value;
+  if (field.kind === 'statistics') return value.map((k) => STATISTICS[k] || k).join(' · ');
+  return Array.isArray(value) ? value.join(', ') : value;
 }
 
-// Labeled fields for one record's parts, e.g. the population's description, condition, age and setting.
-function fieldsEditor(groups) {
-  const editor = h('div', { class: 'fields-editor' }, groups.map(({ id: group, title, fields, record }) => h('fieldset', {},
-    h('legend', {}, title),
-    h('div', { class: 'grid' }, fields.map((f) => {
-      const id = `spec-${group}-${f.key}`;
-      f.input = fieldInput(f, record[f.key], { id });
-      return h('div', { class: f.wide ? 'field wide' : 'field' }, h('label', { for: id }, f.label), f.input);
-    })))));
-  editor.read = () => groups.map(({ fields }) => Object.fromEntries(fields.map((f) => [f.key, readInput(f, f.input)])));
-  return editor;
-}
+const isEmpty = (value) => value == null || value === '' || (Array.isArray(value) && !value.length);
 
-// -- the panel -----------------------------------------------------------------------------
+// -- the parts -----------------------------------------------------------------------------
+// Each part draws itself with the panel's `edit(id, field, value, set)`, which makes one value
+// editable where it is, and `rows(...)`, which makes a table of records with a row per record.
+
+const ROW_PARTS = {
+  outcomes: { blank: () => ({ role: 'secondary', name: '', measure: '', type: 'continuous', timepoint: '' }), empty: (o) => !o.name && !o.measure },
+  numbers: {
+    blank: () => ({ outcome: '', statistics: [], per: 'each_arm', timepoint: '', purpose: '' }),
+    empty: (s) => !s.outcome && !s.statistics.length && !s.purpose,
+  },
+};
 
 const PARTS = {
   comparison: {
     title: 'The comparison',
-    view: (spec) => {
-      const facets = (pairs) => {
-        const shown = pairs.filter(([, v]) => v);
-        return shown.length ? h('span', { class: 'facets' }, shown.map(([k, v]) => h('span', {}, h('span', { class: 'k' }, k), ' ', v))) : null;
-      };
+    view: (spec, panel) => {
       const { population: p, intervention: i, comparator: c } = spec;
+      const facets = (prefix, record, pairs) => h('span', { class: 'facets' }, pairs.map(([key, label]) => h('span', {},
+        h('span', { class: 'k' }, label), ' ', panel.edit(`${prefix}.${key}`, text(label), record[key], (v) => { record[key] = v; }, '—'))));
       return h('table', { class: 'spec-table kv' }, h('tbody', {},
         h('tr', {}, h('th', { scope: 'row' }, 'Population'),
-          h('td', {}, h('strong', {}, p.description || missing()), facets([['Condition', p.condition], ['Age', p.age], ['Setting', p.setting]]))),
+          h('td', {}, h('strong', {}, panel.edit('population.description', text('Population'), p.description, (v) => { p.description = v; })),
+            facets('population', p, [['condition', 'Condition'], ['age', 'Age'], ['setting', 'Setting']]))),
         h('tr', {}, h('th', { scope: 'row' }, 'Intervention'),
-          h('td', {}, h('strong', {}, i.name || missing()), facets([['Delivery', i.delivery], ['Dose', i.dose], ['Duration', i.duration]]))),
+          h('td', {}, h('strong', {}, panel.edit('intervention.name', text('Intervention'), i.name, (v) => { i.name = v; })),
+            facets('intervention', i, [['delivery', 'Delivery'], ['dose', 'Dose'], ['duration', 'Duration']]))),
         h('tr', {}, h('th', { scope: 'row' }, 'Compared with'),
-          h('td', {}, h('strong', {}, c.name || missing('None')), ' ', badge(COMPARATOR_KINDS[c.kind] || c.kind))),
-        h('tr', {}, h('th', { scope: 'row' }, 'Design'), h('td', {}, DESIGNS[spec.design] || spec.design)),
+          h('td', {}, h('strong', {}, panel.edit('comparator.name', text('Compared with'), c.name, (v) => { c.name = v; }, 'None')), ' ',
+            panel.edit('comparator.kind', choice('Kind of comparator', COMPARATOR_KINDS, { show: (v) => badge(COMPARATOR_KINDS[v] || v) }),
+              c.kind, (v) => { c.kind = v; }))),
+        h('tr', {}, h('th', { scope: 'row' }, 'Design'),
+          h('td', {}, panel.edit('design', choice('Design', DESIGNS), spec.design, (v) => { spec.design = v; }))),
       ));
-    },
-    edit: (spec) => {
-      const editor = fieldsEditor([
-        { id: 'question', title: 'The question', record: spec, fields: [
-          { key: 'question', label: 'In one sentence', wide: true },
-          { key: 'design', label: 'Design', kind: 'select', options: DESIGNS },
-        ] },
-        { id: 'population', title: 'Population', record: spec.population, fields: [
-          { key: 'description', label: 'Who', wide: true }, { key: 'condition', label: 'Condition', wide: true },
-          { key: 'age', label: 'Age' }, { key: 'setting', label: 'Setting' },
-        ] },
-        { id: 'intervention', title: 'Intervention', record: spec.intervention, fields: [
-          { key: 'name', label: 'What', wide: true }, { key: 'delivery', label: 'Delivery' },
-          { key: 'dose', label: 'Dose' }, { key: 'duration', label: 'Duration' },
-        ] },
-        { id: 'comparator', title: 'Compared with', record: spec.comparator, fields: [
-          { key: 'name', label: 'What' }, { key: 'kind', label: 'Kind', kind: 'select', options: COMPARATOR_KINDS },
-        ] },
-      ]);
-      editor.apply = (draft) => {
-        const [question, population, intervention, comparator] = editor.read();
-        Object.assign(draft, question, { population, intervention, comparator });
-      };
-      return editor;
     },
   },
   outcomes: {
     title: 'Outcomes',
-    view: (spec) => table(['Role', 'Outcome', 'Measure', 'Type', 'When'], spec.outcomes.map((o) => [
-      o.role === 'primary' ? badge('Primary', 'accent') : ROLES[o.role] || o.role, h('strong', {}, o.name || missing()),
-      o.measure || missing(), OUTCOME_TYPES[o.type] || o.type, o.timepoint || missing(),
-    ]), 'No outcomes yet.'),
-    edit: (spec) => {
-      const editor = rowsEditor(spec.outcomes, [
-        { key: 'name', label: 'Outcome' }, { key: 'measure', label: 'Measure' },
-        { key: 'role', label: 'Role', kind: 'select', options: ROLES }, { key: 'type', label: 'Type', kind: 'select', options: OUTCOME_TYPES },
-        { key: 'timepoint', label: 'When' },
-      ], () => ({ role: 'secondary', name: '', measure: '', type: 'continuous', timepoint: '' }), 'Add an outcome');
-      editor.apply = (draft) => { draft.outcomes = editor.read().filter((o) => o.name || o.measure); };
-      return editor;
-    },
+    view: (spec, panel) => panel.rows('outcomes', spec.outcomes, [
+      { key: 'role', ...choice('Role', ROLES, { show: (v) => (v === 'primary' ? badge('Primary', 'accent') : ROLES[v] || v) }) },
+      { key: 'name', ...text('Outcome', { show: (v) => h('strong', {}, v), first: true }) },
+      { key: 'measure', ...text('Measure') },
+      { key: 'type', ...choice('Type', OUTCOME_TYPES) },
+      { key: 'timepoint', ...text('When') },
+    ], { noun: 'outcome', empty: 'No outcomes yet.' }),
   },
   numbers: {
     title: 'Numbers to find',
-    view: (spec) => table(['Outcome', 'Find', 'For', 'When', 'Purpose'], spec.statistics_needed.map((s) => [
-      h('strong', {}, s.outcome || missing('Any')), s.statistics.length ? s.statistics.map((k) => STATISTICS[k] || k).join(' · ') : missing('—'),
-      PER[s.per] || s.per, s.timepoint || missing('Any'), s.purpose,
-    ]), 'Nothing listed yet.'),
-    edit: (spec) => {
-      const editor = rowsEditor(spec.statistics_needed, [
-        { key: 'outcome', label: 'Outcome', list: 'spec-outcome-names' }, { key: 'statistics', label: 'Find', kind: 'statistics' },
-        { key: 'per', label: 'For', kind: 'select', options: PER }, { key: 'timepoint', label: 'When' },
-        { key: 'purpose', label: 'Purpose', wide: true },
-      ], () => ({ outcome: spec.outcomes[0]?.name || '', statistics: [], per: 'each_arm', timepoint: '', purpose: '' }), 'Add a row');
+    view: (spec, panel) => [
       // The outcome field suggests the outcomes listed above.
-      editor.prepend(h('datalist', { id: 'spec-outcome-names' }, spec.outcomes.map((o) => h('option', { value: o.name }))));
-      editor.apply = (draft) => { draft.statistics_needed = editor.read().filter((s) => s.outcome || s.statistics.length || s.purpose); };
-      return editor;
-    },
+      h('datalist', { id: 'spec-outcome-names' }, spec.outcomes.map((o) => h('option', { value: o.name }))),
+      panel.rows('numbers', spec.statistics_needed, [
+        { key: 'outcome', ...text('Outcome', { list: 'spec-outcome-names', show: (v) => h('strong', {}, v), placeholder: 'Any', first: true }) },
+        { key: 'statistics', label: 'Find', kind: 'statistics' },
+        { key: 'per', ...choice('For', PER) },
+        { key: 'timepoint', ...text('When', { placeholder: 'Any' }) },
+        { key: 'purpose', ...text('Purpose') },
+      ], { noun: 'row', empty: 'Nothing listed yet.' }),
+    ],
   },
   stated: {
     title: 'Values your paragraph states',
@@ -246,46 +205,36 @@ const PARTS = {
     folded: true,
     hint: 'How Haiku decides which titles and abstracts to keep.',
     count: (spec) => `${spec.inclusion_criteria.length} to include · ${spec.exclusion_criteria.length} to exclude`,
-    view: (spec) => table(['Keep or drop', 'About', 'Rule'], [
-      ...spec.inclusion_criteria.map((c) => [badge('Include', 'ok'), ELEMENTS[c.about] || c.about, c.rule]),
-      ...spec.exclusion_criteria.map((c) => [badge('Exclude', 'err'), ELEMENTS[c.about] || c.about, c.rule]),
-    ], 'No rules yet.'),
-    edit: (spec) => {
-      const rows = [
+    view: (spec, panel) => {
+      // One table of both lists; a rule moves between them when its first column changes.
+      const rules = [
         ...spec.inclusion_criteria.map((c) => ({ keep: 'include', ...c })),
         ...spec.exclusion_criteria.map((c) => ({ keep: 'exclude', ...c })),
       ];
-      const editor = rowsEditor(rows, [
-        { key: 'keep', label: 'Keep or drop', kind: 'select', options: KEEP },
-        { key: 'about', label: 'About', kind: 'select', options: ELEMENTS }, { key: 'rule', label: 'Rule', wide: true },
-      ], () => ({ keep: 'include', about: 'population', rule: '' }), 'Add a rule');
-      editor.apply = (draft) => {
-        const all = editor.read().filter((r) => r.rule);
-        draft.inclusion_criteria = all.filter((r) => r.keep === 'include').map(({ about, rule }) => ({ about, rule }));
-        draft.exclusion_criteria = all.filter((r) => r.keep === 'exclude').map(({ about, rule }) => ({ about, rule }));
+      const writeBack = (list) => {
+        spec.inclusion_criteria = list.filter((r) => r.keep === 'include').map(({ about, rule }) => ({ about, rule }));
+        spec.exclusion_criteria = list.filter((r) => r.keep === 'exclude').map(({ about, rule }) => ({ about, rule }));
       };
-      return editor;
+      return panel.rows('screening', rules, [
+        { key: 'keep', ...choice('Keep or drop', KEEP, { show: (v) => badge(KEEP[v] || v, v === 'include' ? 'ok' : 'err') }) },
+        { key: 'about', ...choice('About', ELEMENTS) },
+        { key: 'rule', ...text('Rule', { first: true }) },
+      ], { noun: 'rule', empty: 'No rules yet.', writeBack, blank: () => ({ keep: 'include', about: 'population', rule: '' }) });
     },
   },
   terms: {
     title: 'Search terms',
     folded: true,
-    hint: 'Synonyms, MeSH headings and instrument names, by concept. Opus builds the search from these.',
+    hint: 'Synonyms, MeSH headings and instrument names, by concept, separated by commas. Opus builds the search from these.',
     count: (spec) => `${spec.search_terms.reduce((n, g) => n + g.terms.length, 0)} in ${spec.search_terms.length} groups`,
-    view: (spec) => table(['Concept', 'Terms'], spec.search_terms.map((g) => [
-      h('strong', {}, CONCEPTS[g.concept] || g.concept), h('ul', { class: 'chips' }, g.terms.map((t) => h('li', {}, t))),
-    ]), 'None yet.'),
-    edit: (spec) => {
-      const editor = rowsEditor(spec.search_terms, [
-        { key: 'concept', label: 'Concept', kind: 'select', options: CONCEPTS },
-        { key: 'terms', label: 'Terms (separate with commas)', kind: 'list', wide: true },
-      ], () => ({ concept: 'outcome', terms: [] }), 'Add a group');
-      editor.apply = (draft) => { draft.search_terms = editor.read().filter((g) => g.terms.length); };
-      return editor;
-    },
+    view: (spec, panel) => panel.rows('terms', spec.search_terms, [
+      { key: 'concept', ...choice('Concept', CONCEPTS, { show: (v) => h('strong', {}, CONCEPTS[v] || v) }) },
+      { key: 'terms', ...text('Terms', { kind: 'list', show: (v) => h('ul', { class: 'chips' }, v.map((t) => h('li', {}, t))), first: true }) },
+    ], { noun: 'group', empty: 'None yet.', blank: () => ({ concept: 'outcome', terms: [] }) }),
   },
 };
 
+// A table that is read, not edited (the values the paragraph states).
 function table(head, rows, empty) {
   if (!rows.length) return h('p', { class: 'muted small empty' }, empty);
   return h('div', { class: 'table-wrap' }, h('table', { class: 'spec-table' },
@@ -294,77 +243,186 @@ function table(head, rows, empty) {
 }
 
 export class SpecPanel {
-  // onSave(spec) keeps an edit; it is called when a part's Done is pressed.
+  // onSave(spec) keeps a change; it is called after every change.
   constructor(root, { onSave }) {
     this.root = root;
     this.onSave = onSave;
     this.draft = null;
-    this.editors = new Map(); // part -> its open editor
+    this.active = null; // the field being edited: {id, finish(nextId), cancel()}
+    this.openers = new Map(); // id -> opens that value's field (rebuilt on every draw)
     this.folded = new Map(); // part -> open or not, for the parts that fold
     this.isDisabled = false;
   }
 
   show(spec) {
-    this.draft = structuredClone(upgradeSpec(spec));
-    this.editors.clear();
+    const next = upgradeSpec(spec);
+    if (this.draft && JSON.stringify(next) === JSON.stringify(this.draft)) return; // already shown
+    this.active = null;
+    this.draft = structuredClone(next);
     this.render();
   }
 
   set disabled(value) {
     this.isDisabled = value;
+    this.root.classList.toggle('is-disabled', value);
     for (const el of this.root.querySelectorAll('button, input, select')) el.disabled = value;
+    for (const el of this.root.querySelectorAll('.editable')) {
+      el.tabIndex = value ? -1 : 0;
+      el.setAttribute('aria-disabled', String(value));
+    }
   }
 
-  // The specification with any open editor applied, or null when an editor has a value to fix.
+  // The specification with the field being edited kept, or null when it has a value to fix.
   collect() {
-    const open = [...this.editors.keys()];
-    const failed = open.find((part) => !this.apply(part));
-    if (open.length) this.render();
-    if (failed) {
-      this.invalid(this.editors.get(failed))?.reportValidity();
-      return null;
-    }
+    if (this.active && !this.active.finish()) return null;
+    this.tidy();
     return structuredClone(this.draft);
   }
 
-  invalid(editor) {
-    for (const input of editor.querySelectorAll('input[data-kind="statistics"]')) checkStatistics(input);
-    return [...editor.querySelectorAll('input')].find((input) => !input.checkValidity());
+  // Rows left with nothing in them (added and never filled) are dropped.
+  tidy() {
+    const spec = this.draft;
+    spec.outcomes = spec.outcomes.filter((o) => !ROW_PARTS.outcomes.empty(o));
+    spec.statistics_needed = spec.statistics_needed.filter((s) => !ROW_PARTS.numbers.empty(s));
+    spec.inclusion_criteria = spec.inclusion_criteria.filter((c) => c.rule);
+    spec.exclusion_criteria = spec.exclusion_criteria.filter((c) => c.rule);
+    spec.search_terms = spec.search_terms.filter((g) => g.terms.length);
   }
 
-  // Apply a part's editor to the draft and close it; false (and the editor stays) when a value needs fixing.
-  apply(part) {
-    const editor = this.editors.get(part);
-    const bad = this.invalid(editor);
-    if (bad) {
-      bad.focus();
-      bad.reportValidity();
-      return false;
-    }
-    editor.apply(this.draft);
-    this.editors.delete(part);
-    return true;
-  }
-
-  async done(part) {
-    if (!this.apply(part)) return;
+  changed() {
+    this.tidy();
     this.render();
-    this.root.querySelector(`[data-part="${part}"] .edit-box`)?.focus();
-    await this.onSave(structuredClone(this.draft));
+    this.onSave(structuredClone(this.draft));
   }
 
-  edit(part) {
-    this.editors.set(part, PARTS[part].edit(this.draft));
-    this.render();
-    this.editors.get(part).querySelector('input, select')?.focus();
+  // Focus a value (by its id) or one of the panel's buttons (by its key) after a redraw.
+  focus(id) {
+    this.root.querySelector(`[data-edit="${CSS.escape(id)}"], [data-key="${CSS.escape(id)}"]`)?.focus();
+  }
+
+  // One value, shown as it reads, that becomes a field when clicked (or Enter or Space on it).
+  edit(id, field, value, set, placeholder = 'Not stated') {
+    const content = isEmpty(value) ? missing(field.placeholder || placeholder) : shown(field, value);
+    const span = h('span', {
+      class: 'editable', role: 'button', tabindex: this.isDisabled ? '-1' : '0', 'data-edit': id,
+      title: `Click to change ${field.label.toLowerCase()}`,
+    }, content);
+    span.setAttribute('aria-label', `${field.label}: ${isEmpty(value) ? 'not stated' : span.textContent}. Change`);
+    const open = () => this.start(span, id, field, value, set);
+    this.openers.set(id, open);
+    // Clicking another value while one is being edited keeps the first and opens the second.
+    span.addEventListener('mousedown', (event) => {
+      if (!this.active || this.isDisabled) return;
+      event.preventDefault();
+      this.active.finish(id);
+    });
+    span.addEventListener('click', () => { if (!this.active && !this.isDisabled) open(); });
+    span.addEventListener('keydown', (event) => {
+      if ((event.key === 'Enter' || event.key === ' ') && !this.isDisabled) {
+        event.preventDefault();
+        open();
+      }
+    });
+    return span;
+  }
+
+  start(span, id, field, value, set) {
+    if (this.isDisabled || !span.isConnected) return;
+    const input = fieldInput(field, value, { 'aria-label': field.label, class: 'inline-input', id: `spec-${id.replaceAll('.', '-')}`, list: field.list });
+    const box = span.closest('.spec-box');
+    span.replaceWith(input);
+    box?.setAttribute('data-editing', 'true');
+    let done = false;
+    // After the change is kept: open the value clicked next, or put the focus where Tab sent it (left
+    // alone when it went outside the panel), or back on this value.
+    const close = (next, how) => {
+      done = true;
+      this.active = null;
+      this.tidy();
+      this.render();
+      if (how === 'open' && next && this.openers.has(next)) this.openers.get(next)();
+      else if (how === 'focus') { if (next) this.focus(next); } else if (how !== 'away') this.focus(id);
+    };
+    const finish = (next = null, how = next ? 'open' : 'self') => {
+      if (done) return true;
+      if (field.kind === 'statistics' && !checkStatistics(input)) {
+        input.focus();
+        input.reportValidity();
+        return false;
+      }
+      const updated = readInput(field, input);
+      const changed = JSON.stringify(updated) !== JSON.stringify(value);
+      if (changed) set(updated);
+      close(next, how);
+      if (changed) this.onSave(structuredClone(this.draft));
+      return true;
+    };
+    const cancel = () => {
+      if (!done) close(null, 'self');
+    };
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault(); // keeps the change rather than starting the search
+        finish();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        cancel();
+      }
+    });
+    input.addEventListener('blur', (event) => {
+      if (done) return;
+      const to = event.relatedTarget;
+      if (to && !this.root.contains(to)) finish(null, 'away');
+      else finish(to?.dataset?.edit || to?.dataset?.key || null, 'focus');
+    });
+    if (field.kind === 'select') input.addEventListener('change', () => finish());
+    this.active = { id, finish, cancel };
+    input.focus();
+    if (input.select) input.select();
+  }
+
+  // Records as a table, a row per record and each cell editable, with × to remove a row and a
+  // button to add one. `writeBack(rows)` stores the rows when they are a copy (the screening rules).
+  rows(part, rows, columns, { noun, empty, writeBack = () => {}, blank = ROW_PARTS[part]?.blank }) {
+    const first = (columns.find((c) => c.first) || columns[0]).key;
+    // A button that keeps the field being edited before it acts.
+    const action = (label, attrs, act) => {
+      const button = h('button', { type: 'button', 'data-key': attrs.key, ...attrs, key: null }, label);
+      button.addEventListener('mousedown', (event) => { if (this.active) event.preventDefault(); });
+      button.addEventListener('click', () => {
+        if (this.active && !this.active.finish()) return;
+        act();
+      });
+      return button;
+    };
+    const add = action(`+ Add ${/^[aeiou]/.test(noun) ? 'an' : 'a'} ${noun}`, { class: 'secondary small add-row', key: `${part}.add` }, () => {
+      rows.push(blank());
+      writeBack(rows);
+      this.render();
+      this.openers.get(`${part}.${rows.length - 1}.${first}`)?.();
+    });
+    if (!rows.length) return [h('p', { class: 'muted small empty' }, empty), add];
+    return [h('div', { class: 'table-wrap' }, h('table', { class: 'spec-table' },
+      h('thead', {}, h('tr', {}, columns.map((c) => h('th', { scope: 'col' }, c.label)), h('th', { class: 'row-remove' }, h('span', { class: 'visually-hidden' }, 'Remove')))),
+      h('tbody', {}, rows.map((row, i) => h('tr', {},
+        columns.map((c) => h('td', { 'data-label': c.label },
+          this.edit(`${part}.${i}.${c.key}`, c, row[c.key], (v) => { row[c.key] = v; writeBack(rows); }, '—'))),
+        h('td', { class: 'row-remove' }, action('×', { class: 'remove', key: `${part}.${i}.remove`, 'aria-label': `Remove ${noun} ${i + 1}`, title: `Remove this ${noun}` }, () => {
+          rows.splice(i, 1);
+          writeBack(rows);
+          this.changed();
+        }))))))), add];
   }
 
   render() {
+    this.openers.clear();
     const spec = this.draft;
     const primary = spec.outcomes.find((o) => o.role === 'primary') || spec.outcomes[0];
     const nodes = [
+      h('p', { class: 'muted small edit-hint' }, 'Enter or clicking away keeps a change; Escape drops it.'),
       h('div', { class: 'spec-question' },
-        h('p', { class: 'question', id: 'spec-question' }, spec.question || missing('No question yet.')),
+        h('p', { class: 'question', id: 'spec-question' },
+          this.edit('question', text('The question'), spec.question, (v) => { spec.question = v; }, 'No question yet.')),
         h('p', { class: 'tags' }, badge(DESIGNS[spec.design] || spec.design, 'accent'),
           primary && badge(`${OUTCOME_TYPES[primary.type] || primary.type} primary outcome`, 'accent'))),
       spec.open_questions.length > 0 && h('div', { class: 'callout warn', 'data-part': 'questions' },
@@ -372,33 +430,19 @@ export class SpecPanel {
     ];
     for (const [part, def] of Object.entries(PARTS)) {
       if (part === 'stated' && !spec.stated_values.length) continue;
-      const editor = this.editors.get(part);
-      const button = def.edit && h('button', {
-        type: 'button', class: 'secondary small edit-box', 'aria-expanded': String(Boolean(editor)),
-        onclick: () => (editor ? this.done(part) : this.edit(part)),
-      }, editor ? 'Done' : 'Edit');
-      const body = editor || def.view(spec);
-      if (editor) {
-        // Enter in a one-line field finishes the edit rather than starting the search.
-        editor.onkeydown = (event) => {
-          if (event.key === 'Enter' && event.target.matches('input')) {
-            event.preventDefault();
-            this.done(part);
-          }
-        };
-      }
+      const body = [def.view(spec, this)].flat(Infinity);
       const titleId = `spec-part-${part}`;
       if (def.folded) {
-        const details = h('details', { class: 'spec-box', 'data-part': part, 'data-editing': String(Boolean(editor)) },
+        const details = h('details', { class: 'spec-box', 'data-part': part },
           h('summary', {}, h('span', { id: titleId }, def.title), h('span', { class: 'muted small' }, def.count(spec))),
-          h('div', { class: 'box-head' }, h('p', { class: 'muted small' }, def.hint), button),
+          h('p', { class: 'muted small hint' }, def.hint),
           body);
-        details.open = Boolean(editor) || Boolean(this.folded.get(part));
+        details.open = Boolean(this.folded.get(part));
         details.addEventListener('toggle', () => this.folded.set(part, details.open));
         nodes.push(details);
       } else {
-        nodes.push(h('section', { class: 'spec-box', 'data-part': part, 'data-editing': String(Boolean(editor)), 'aria-labelledby': titleId },
-          h('div', { class: 'box-head' }, h('h3', { id: titleId }, def.title), button),
+        nodes.push(h('section', { class: 'spec-box', 'data-part': part, 'aria-labelledby': titleId },
+          h('div', { class: 'box-head' }, h('h3', { id: titleId }, def.title)),
           body));
       }
     }

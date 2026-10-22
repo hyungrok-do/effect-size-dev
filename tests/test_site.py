@@ -449,16 +449,18 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert page.get_attribute("#tab-problem", "aria-selected") == "true"
     page.click("#read")
     page.wait_for_selector("#spec:not([hidden])")
-    # What to look for: the specification as structured tables, each part edited in place.
+    # Validate: the specification as structured tables, each item changed by clicking it.
+    assert page.inner_text("#tab-spec").endswith("Validate")
     assert page.inner_text("#spec-question") == SPEC.question
     comparison = page.locator("[data-part='comparison']")
     assert "University students" in comparison.inner_text() and "Setting Universities" in " ".join(comparison.inner_text().split())
     numbers = page.locator("[data-part='numbers'] tbody tr").first.locator("td").all_inner_texts()
-    assert numbers == ["Depressive symptoms", "Mean · SD · n", "Each arm", "12 weeks", "The difference and its SD"], numbers
-    comparison.locator(".edit-box").click()
+    assert numbers == ["Depressive symptoms", "Mean · SD · n", "Each arm", "12 weeks", "The difference and its SD", "×"], numbers
+    assert page.locator("#spec-panel .edit-box").count() == 0  # no Edit buttons: the items themselves are clicked
+    comparison.locator("[data-edit='population.description']").click()
     assert page.input_value("#spec-population-description") == "University students"
     page.fill("#spec-population-description", "Undergraduate students")
-    page.press("#spec-population-description", "Enter")  # finishes the edit; doesn't start the search
+    page.press("#spec-population-description", "Enter")  # keeps the change; doesn't start the search
     comparison.get_by_text("Undergraduate students").wait_for()
     assert page.locator("#spec-population-description").count() == 0
     assert page.is_visible("#spec") and page.get_attribute("#tab-spec", "aria-selected") == "true"
@@ -466,15 +468,37 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
         const { Store } = await import('/lib/store.js');
         return (await new Store().project(location.hash.slice(1))).spec.population.description === 'Undergraduate students';
     }""")
-    # A statistic the tool doesn't know keeps the editor open until it is fixed.
-    page.locator("[data-part='numbers'] .edit-box").click()
-    find = page.locator("[data-part='numbers'] input[aria-label='Find']").first
+    # Escape drops a change; a choice is a select, kept as soon as it is chosen.
+    comparison.locator("[data-edit='intervention.delivery']").click()
+    page.fill("#spec-intervention-delivery", "Website")
+    page.press("#spec-intervention-delivery", "Escape")
+    assert "Smartphone app" in comparison.inner_text() and "Website" not in comparison.inner_text()
+    comparison.locator("[data-edit='design']").click()
+    page.select_option("#spec-design", "cluster_rct")
+    comparison.get_by_text("Cluster randomized trial").wait_for()
+    comparison.locator("[data-edit='design']").click()
+    page.select_option("#spec-design", "parallel_rct")
+    comparison.get_by_text("Parallel-group randomized trial").wait_for()
+    # A statistic the tool doesn't know keeps its field open until it is fixed.
+    page.locator("[data-edit='numbers.0.statistics']").click()
+    find = page.locator("#spec-numbers-0-statistics")
     find.fill("Mean, SD, n, wobble")
-    page.locator("[data-part='numbers'] .edit-box").click()
-    assert page.get_attribute("[data-part='numbers']", "data-editing") == "true"
+    find.press("Enter")
+    assert find.is_visible() and page.get_attribute("[data-part='numbers']", "data-editing") == "true"
     find.fill("Mean, SD, n, Mean difference")
-    page.locator("[data-part='numbers'] .edit-box").click()
+    find.press("Enter")
     assert "Mean · SD · n · Mean difference" in page.inner_text("[data-part='numbers']")
+    # Rows: + Add opens the new row's first field; × removes a row; a row added and left empty is dropped.
+    outcomes = page.locator("[data-part='outcomes']")
+    outcomes.locator(".add-row").click()
+    page.fill("#spec-outcomes-1-name", "Anxiety")
+    page.press("#spec-outcomes-1-name", "Enter")
+    assert outcomes.locator("tbody tr").count() == 2 and "Anxiety" in outcomes.inner_text()
+    outcomes.locator("[aria-label='Remove outcome 2']").click()
+    assert outcomes.locator("tbody tr").count() == 1
+    outcomes.locator(".add-row").click()
+    page.press("#spec-outcomes-1-name", "Escape")
+    assert outcomes.locator("tbody tr").count() == 1
     page.click("[data-part='screening'] summary")
     assert "Animal studies" in page.inner_text("[data-part='screening']")
     assert "1 to include · 1 to exclude" in page.inner_text("[data-part='screening'] summary")

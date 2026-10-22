@@ -1,5 +1,5 @@
 /* The specification panel (spec-panel.js): a readable summary first, then one box per part, each a
-   table that is edited in place. Uses the page's color tokens. */
+   table whose items are edited where they are, by clicking them. Uses the page's color tokens. */
 
 .spec-question { margin-top: 14px; padding: 14px 16px; border-radius: 12px; background: var(--accent-soft); }
 .spec-question .question { margin: 0; font-size: 17px; font-weight: 600; color: var(--ink); line-height: 1.4; }
@@ -45,19 +45,27 @@ details.spec-box summary > span:first-of-type { white-space: nowrap; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .chips li { padding: 1px 9px; border-radius: 999px; background: var(--surface-2); font-size: 13px; }
 
-/* Editors. */
-.fields-editor fieldset { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; }
-.fields-editor legend { padding: 0; margin-bottom: 6px; font-size: 12.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
-.rows-editor { margin-top: 10px; }
-.row-cards { display: grid; gap: 8px; }
-.row-card { display: flex; gap: 10px; align-items: flex-end; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
-.row-fields { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 10px; }
-.row-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 12.5px; font-weight: 400; color: var(--ink-2); }
-.row-field.wide { grid-column: 1 / -1; }
-.row-field input, .row-field select { font-size: 14px; padding: 6px 8px; background: var(--bg); }
-.row-card .remove { flex: none; }
-.rows-editor .add-row { margin-top: 8px; }
+/* Editing in place: each item shows it can be clicked, and becomes a field of its own size. */
+.edit-hint { margin: 10px 0 0; }
+.editable { cursor: text; border-radius: 4px; padding: 0 2px; box-decoration-break: clone; }
+.editable:hover { background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent-soft); }
+.editable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.editable .missing { text-decoration: underline dotted; text-underline-offset: 3px; }
+.is-disabled .editable { cursor: default; }
+.is-disabled .editable:hover { background: none; box-shadow: none; }
+.inline-input { box-sizing: border-box; font: inherit; font-size: 14px; width: 100%; max-width: 100%; min-width: min(8em, 100%); padding: 3px 6px;
+  border: 1px solid var(--accent); border-radius: 6px;
+  background: var(--bg); color: var(--ink); }
+.spec-question .inline-input { font-size: 16px; font-weight: 600; }
+.facets .inline-input { width: auto; min-width: 10em; }
 .spec-box input:invalid { border-color: var(--error); }
+.spec-table th.row-remove, .spec-table td.row-remove { width: 1%; padding-left: 0; padding-right: 0; }
+.spec-table .remove { font: inherit; font-size: 16px; line-height: 1; padding: 2px 6px; border: 0; border-radius: 6px; background: none;
+  color: var(--muted); cursor: pointer; }
+.spec-table .remove:hover { color: var(--error); background: var(--error-soft); }
+.spec-box .add-row { margin-top: 8px; }
+details.spec-box > .hint { margin: 10px 0 0; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* On a phone each row becomes a small card of labeled lines. */
 @media (max-width: 800px) {
@@ -69,6 +77,5 @@ details.spec-box summary > span:first-of-type { white-space: nowrap; }
   /* Label and value side by side. */
   .spec-table td[data-label] { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 10px; align-items: baseline; white-space: normal; }
   .spec-table td[data-label]::before { content: attr(data-label); font-size: 12px; color: var(--muted); }
-  .row-card { flex-direction: column; align-items: stretch; }
-  .row-card .remove { align-self: flex-end; }
+  .spec-table td.row-remove { width: auto; text-align: right; }
 }
