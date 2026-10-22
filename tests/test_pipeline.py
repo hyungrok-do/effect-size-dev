@@ -260,3 +260,17 @@ def test_nothing_kept_means_no_summary(tmp_path):
     summary = store.project(project_id)["summary"]
     assert summary["status"] == "error" and "nothing to summarize" in summary["error"]
     assert "summarize" not in llm.calls
+
+
+def test_a_record_stored_without_its_authors_gets_them_from_its_source(tmp_path):
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    papers = {p["ext_id"]: p for p in store.papers(project_id)}
+    trial = papers["11111111"]
+    assert trial["author_list"][0] == {"name": "Jisoo Kim", "affiliation": "Department of Psychiatry, Seoul National University, Seoul, Korea."}
+    # Stored before authors were kept: fetched from PubMed when asked for, then kept.
+    store.update_paper(trial["id"], author_list=None)
+    assert pipeline.author_list(trial["id"])[1]["name"] == "Sun Lee"
+    assert store.paper(trial["id"])["author_list"][1]["name"] == "Sun Lee"
+    registry = papers["NCT01234567"]
+    store.update_paper(registry["id"], author_list=None)
+    assert pipeline.author_list(registry["id"]) == [{"name": "Jane Doe, MD", "affiliation": "University of Example", "role": "Principal investigator"}]

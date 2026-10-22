@@ -244,10 +244,14 @@ numbered chip per paper, colored once its results are decided, let you jump to a
 **Previous** and **Next** (or the arrow keys) step through them, and **Next not yet reviewed** skips
 to the first paper still open. Next is highlighted once every result of the paper is decided.
 
-Each paper is kept short and cited in full: its title, linked to its PubMed, Europe PMC or
-ClinicalTrials.gov page; its key (R12, which the overlap check and the summary refer to), authors,
-year and venue; its identifiers, each linked (PMID, PMCID, DOI, the Europe PMC ID of a record PubMed
-does not have, and trial registration numbers); a warning only when there is something to watch (a preprint, abstract only, a result that differs from the plan,
+Each paper is kept short and cited in full: its title, linked to its free full text in PubMed
+Central when there is one (else its PubMed, Europe PMC or ClinicalTrials.gov page), with **Exclude
+the whole paper** beside it; its key (R12, which the overlap check and the summary refer to), year,
+venue and authors, which open a table of every author and their affiliations (for a registry record,
+the investigators and their roles); its identifiers, each linked, free full text first (PMCID,
+PMID, DOI, the Europe PMC ID of a record PubMed does not have, and trial registration numbers). A
+record saved before authors were kept fetches them from its source when the table opens. Then a
+warning only when there is something to watch (a preprint, abstract only, a result that differs from the plan,
 an overlap with another record); and each result in a box with Include and Exclude. A result reads
 as a line per group in the usual shorthand, as printed: `App  8.1 ± 4.2  n = 100`, `median 7 [4–11]`,
 `12/100 events (12%)`, `MD -2.2 (95% CI -3.4 to -1) · p = 0.001`. A result is flagged only when a

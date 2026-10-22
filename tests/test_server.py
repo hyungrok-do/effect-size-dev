@@ -157,5 +157,9 @@ def test_the_summary_over_http(tmp_path):
     assert client.get(f"/api/projects/{project_id}/export.json").json()["project"]["summary"]["status"] == "done"
 
     assert client.post("/api/projects/nope/summary").status_code == 404
+    # A paper's authors with their affiliations.
+    trial = next(p for p in client.get(f"/api/projects/{project_id}/papers").json() if p["ext_id"] == "11111111")
+    authors = client.get(f"/api/projects/{project_id}/papers/{trial['id']}/authors").json()["authors"]
+    assert authors[0]["name"] == "Jisoo Kim" and "Seoul National University" in authors[0]["affiliation"]
     # The page's shared modules are served next to it.
     assert client.get("/lib/review-view.js").status_code == 200 and client.get("/lib/evidence.js").status_code == 200

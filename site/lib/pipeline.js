@@ -441,6 +441,34 @@ export class Pipeline {
 
   // -- one paper ------------------------------------------------------------------
 
+  // A paper's authors with their affiliations. A record stored before they were kept gets them from
+  // its source now (PubMed, Europe PMC or ClinicalTrials.gov); an empty list if it can't.
+  async authorList(paperId) {
+    const paper = await this.store.paper(paperId);
+    if (paper.author_list?.length) return paper.author_list;
+    let record = null;
+    try {
+      if (paper.source === 'clinicaltrials') {
+        const study = await this.sources.trials.study(paper.ext_id);
+        record = study ? trialRecord(study) : null;
+      } else if (paper.pmid) {
+        record = (await this.sources.pubmed.fetch([paper.pmid]))[0] || null;
+      } else {
+        const kind = paper.ext_id.startsWith('PPR') ? 'PPR' : 'PMC';
+        const [, results] = await this.sources.europepmc.search(`EXT_ID:${paper.ext_id} AND SRC:${kind}`, 5);
+        const found = results.find((r) => String(r.id) === paper.ext_id);
+        record = found ? europepmcRecord(found) : null;
+      }
+    } catch (error) {
+      console.warn('Could not fetch the authors:', error);
+    }
+    if (!record?.author_list?.length) return [];
+    await this.store.updatePaper(paperId, { author_list: record.author_list, authors: paper.authors || record.authors });
+    return record.author_list;
+  }
+
+  // -- one paper: text and extraction -----------------------------------------------
+
   async fullText(paper) {
     const sources = this.sources;
     if (paper.source === 'clinicaltrials') {

@@ -10,7 +10,9 @@ export class SourceError extends Error {}
 const MAX_PDF_BYTES = 20 * 1024 * 1024; // base64 adds a third; a Claude API request may be 32 MB
 const PROXY_URL_LIMIT = 250; // the longest URL the web fetch tool accepts
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const clean = (text) => (text || '').split(/\s+/).filter(Boolean).join(' ');
+const clean = (text) => String(text ?? '').split(/\s+/).filter(Boolean).join(' ');
+// Python's str.capitalize: the first letter upper case, the rest lower.
+const capitalize = (s) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : '');
 
 export function base64ToBytes(b64) {
   const bin = atob(b64);
@@ -101,6 +103,9 @@ export function shortAuthors(names) {
 export function makeRecord(fields) {
   return {
     title: '', authors: '', year: '', journal: '', pubtypes: [], abstract: '', doi: null, pmid: null, pmcid: null, nct_ids: [],
+    // Every author with their affiliations ("; "-joined), and for a registry record the officials with
+    // their roles: {name, affiliation, role?}. Shown in the review's author table.
+    author_list: [],
     ...fields,
   };
 }
@@ -210,10 +215,18 @@ export function parsePubmedXml(xml) {
     const ids = Object.fromEntries(kids(at(article, 'PubmedData', 'ArticleIdList'), 'ArticleId').map((a) => [a.getAttribute('IdType'), text(a)]));
     let doi = ids.doi;
     if (!doi) doi = kids(art, 'ELocationID').filter((e) => e.getAttribute('EIdType') === 'doi').map(text)[0];
-    const names = kids(kid(art, 'AuthorList'), 'Author').map((author) => {
+    const authorEls = kids(kid(art, 'AuthorList'), 'Author');
+    const names = authorEls.map((author) => {
       const last = text(kid(author, 'LastName'));
       return last ? `${last} ${text(kid(author, 'Initials'))}`.trim() : text(kid(author, 'CollectiveName'));
     });
+    const authorList = authorEls.map((author) => {
+      const last = text(kid(author, 'LastName'));
+      const first = text(kid(author, 'ForeName')) || text(kid(author, 'Initials'));
+      const name = last ? `${first} ${last}`.trim() : text(kid(author, 'CollectiveName'));
+      const affiliations = kids(author, 'AffiliationInfo').flatMap((info) => kids(info, 'Affiliation')).map(text).filter(Boolean);
+      return { name, affiliation: affiliations.join('; ') };
+    }).filter((a) => a.name);
     const nctIds = kids(kid(art, 'DataBankList'), 'DataBank')
       .filter((bank) => text(kid(bank, 'DataBankName')) === 'ClinicalTrials.gov')
       .flatMap((bank) => kids(kid(bank, 'AccessionNumberList'), 'AccessionNumber').map(text))
@@ -222,7 +235,7 @@ export function parsePubmedXml(xml) {
       source: 'pubmed', ext_id: pmid, pmid, title: text(kid(art, 'ArticleTitle')), authors: shortAuthors(names), year,
       journal: text(at(art, 'Journal', 'Title')) || text(at(art, 'Journal', 'ISOAbbreviation')),
       pubtypes: kids(kid(art, 'PublicationTypeList'), 'PublicationType').map(text),
-      abstract: parts.join('\n'), doi: doi || null, pmcid: ids.pmc || null, nct_ids: nctIds,
+      abstract: parts.join('\n'), doi: doi || null, pmcid: ids.pmc || null, nct_ids: nctIds, author_list: authorList,
     }));
   }
   return records;
@@ -283,10 +296,13 @@ export function trialRecord(study) {
   if (summary) lines.push(`Summary: ${clean(summary)}`);
   const pmids = (protocol.referencesModule?.references || []).filter((r) => r.pmid && r.type === 'RESULT').map((r) => r.pmid);
   if (pmids.length) lines.push(`Result publications (PMID): ${pmids.join(', ')}`);
+  const officials = (protocol.contactsLocationsModule?.overallOfficials || [])
+    .map((o) => ({ name: clean(o.name), affiliation: clean(o.affiliation), role: capitalize(String(o.role || '').replaceAll('_', ' ')) }))
+    .filter((o) => o.name);
   return makeRecord({
     source: 'clinicaltrials', ext_id: nct, title: ident.officialTitle || ident.briefTitle || '',
-    year: yearOf(status.startDateStruct?.date), journal: 'ClinicalTrials.gov',
-    pubtypes: design.studyType ? [design.studyType] : [], abstract: lines.join('\n'), nct_ids: [nct],
+    authors: shortAuthors(officials.map((o) => o.name)), year: yearOf(status.startDateStruct?.date), journal: 'ClinicalTrials.gov',
+    pubtypes: design.studyType ? [design.studyType] : [], abstract: lines.join('\n'), nct_ids: [nct], author_list: officials,
   });
 }
 
@@ -341,16 +357,31 @@ const plain = (html) => clean(String(html || '').replace(/<[^>]+>/g, ' '));
 
 export const europepmcPmid = (result) => String(result.pmid || (result.source === 'MED' ? result.id : '')) || null;
 
+const europepmcNames = (result) => String(result.authorString || '').split(',').map((n) => clean(n).replace(/\.+$/, '')).filter(Boolean);
+
+// A Europe PMC result's authors with their affiliations; from the names alone when the result has no
+// author list (a "lite" result).
+export function europepmcAuthors(result) {
+  const out = [];
+  for (const a of result.authorList?.author || []) {
+    const name = clean(`${a.firstName || ''} ${a.lastName || ''}`) || clean(a.fullName) || clean(a.collectiveName);
+    let affiliations = (a.authorAffiliationDetailsList?.authorAffiliation || []).map((d) => clean(d.affiliation)).filter(Boolean);
+    if (!affiliations.length && clean(a.affiliation)) affiliations = [clean(a.affiliation)];
+    if (name) out.push({ name, affiliation: affiliations.join('; ') });
+  }
+  return out.length ? out : europepmcNames(result).map((name) => ({ name, affiliation: '' }));
+}
+
 // A Europe PMC result that is not in PubMed, as a record.
 export function europepmcRecord(result) {
   const types = result.pubTypeList?.pubType || [];
   return makeRecord({
     source: 'europepmc', ext_id: String(result.id), title: plain(result.title),
-    authors: shortAuthors(String(result.authorString || '').split(',').map((n) => n.trim().replace(/\.$/, ''))),
+    authors: shortAuthors(europepmcNames(result)),
     year: yearOf(String(result.pubYear ?? '')),
     journal: result.journalInfo?.journal?.title || result.bookOrReportDetails?.publisher || '',
     pubtypes: typeof types === 'string' ? [types] : [...types], abstract: plain(result.abstractText),
-    doi: result.doi ?? null, pmcid: result.pmcid ?? null,
+    doi: result.doi ?? null, pmcid: result.pmcid ?? null, author_list: europepmcAuthors(result),
   });
 }
 

@@ -183,6 +183,9 @@ function haveKey() {
 }
 
 // A pipeline wired to the settings as they are when a job starts.
+// The literature sources alone, for work that needs no model (an older record's authors).
+const literature = () => new Sources({ email: $('#contact-email').value.trim(), ncbiApiKey: $('#ncbi-key').value.trim() });
+
 function pipeline(projectId) {
   const claude = new Claude({ apiKey: apiKey() });
   const activity = new Activity(store, projectId);
@@ -832,13 +835,22 @@ function paperCard(paper, trials) {
   const overlap = overlapNote(paper, state.project?.overlap?.report, state.papers);
   const differs = extracted && !paper.extraction.matches_spec && paper.extraction.mismatch_reasons.length > 0;
 
+  // Excluding the whole paper sits beside its title.
+  const exclude = extracted && h('button', {
+    type: 'button', class: 'secondary small exclude-paper', 'aria-pressed': String(paperDecision === 'exclude'),
+    onclick: () => decide(paper, PAPER, paperDecision === 'exclude' ? null : 'exclude', ''),
+  }, paperDecision === 'exclude' ? 'Undo excluding the paper' : 'Exclude the whole paper');
   const head = [
-    ...paperHeader(paper, links(paper), [
-      paper.ext_id.startsWith('PPR') && badge('Preprint, not peer reviewed', 'warn'),
-      paper.fulltext_kind === 'abstract' && badge('Abstract only', 'warn'),
-      differs && badge('Differs from the plan', 'warn'),
-      !overlap && sharedTrial && badge(`Another record shares ${sharedTrial}`, 'warn'),
-    ]),
+    ...paperHeader(paper, links(paper), {
+      action: exclude,
+      loadAuthors: (p) => new Pipeline({ store, claude: null, sources: literature() }).authorList(p.id),
+      warnings: [
+        paper.ext_id.startsWith('PPR') && badge('Preprint, not peer reviewed', 'warn'),
+        paper.fulltext_kind === 'abstract' && badge('Abstract only', 'warn'),
+        differs && badge('Differs from the plan', 'warn'),
+        !overlap && sharedTrial && badge(`Another record shares ${sharedTrial}`, 'warn'),
+      ],
+    }),
     overlap,
   ];
 
@@ -861,14 +873,8 @@ function paperCard(paper, trials) {
     extracted && !busy && paper.source !== 'clinicaltrials' && h('div', { class: 'paper-actions' },
       h('button', { type: 'button', class: 'secondary small', onclick: () => chooseUpload(paper) }, 'Re-extract from your PDF')));
 
-  // What to do with it: decide on an extracted paper; get the text of one that has none yet.
+  // What else to do with it: read its text; get the text of one that has none yet.
   const actions = h('div', { class: 'paper-actions' });
-  if (extracted) {
-    actions.append(h('button', {
-      type: 'button', class: 'secondary small', 'aria-pressed': String(paperDecision === 'exclude'),
-      onclick: () => decide(paper, PAPER, paperDecision === 'exclude' ? null : 'exclude', ''),
-    }, paperDecision === 'exclude' ? 'Undo excluding the paper' : 'Exclude the whole paper'));
-  }
   if (paper.fulltext_kind) {
     actions.append(h('button', { type: 'button', class: 'secondary small', onclick: () => showSource(paper) }, 'Show source text'));
   }

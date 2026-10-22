@@ -40,7 +40,12 @@ PUBMED_XML = """<?xml version="1.0" ?>
       <Journal><JournalIssue CitedMedium="Internet"><PubDate><Year>2021</Year><Month>Mar</Month></PubDate></JournalIssue>
         <Title>Journal of Student Mental Health</Title><ISOAbbreviation>J Stud Ment Health</ISOAbbreviation></Journal>
       <ArticleTitle>A mindfulness app for depressive symptoms in university students: a randomized controlled trial.</ArticleTitle>
-      <AuthorList CompleteYN="Y"><Author><LastName>Kim</LastName><Initials>J</Initials></Author><Author><LastName>Lee</LastName><Initials>S</Initials></Author>
+      <AuthorList CompleteYN="Y"><Author><LastName>Kim</LastName><ForeName>Jisoo</ForeName><Initials>J</Initials>
+        <AffiliationInfo><Affiliation>Department of Psychiatry, Seoul National
+          University, Seoul, Korea.</Affiliation></AffiliationInfo></Author>
+        <Author><LastName>Lee</LastName><ForeName>Sun</ForeName><Initials>S</Initials>
+        <AffiliationInfo><Affiliation>College of Nursing, Yonsei University, Seoul, Korea.</Affiliation></AffiliationInfo>
+        <AffiliationInfo><Affiliation>Mind Health Institute, Seoul, Korea.</Affiliation></AffiliationInfo></Author>
         <Author><LastName>Park</LastName><Initials>H</Initials></Author><Author><LastName>Choi</LastName><Initials>Y</Initials></Author></AuthorList>
       <ELocationID EIdType="doi" ValidYN="Y">10.1000/rct1</ELocationID>
       <Abstract>
@@ -155,6 +160,12 @@ EUROPEPMC = {
         {"id": PMC_ONLY, "source": "PMC", "pmcid": PMC_ONLY,
          "title": "Mindfulness app use and depressive symptoms in <i>nursing</i> students: a randomised trial",
          "authorString": "Ahmed N, Brown T, Clark R, Davis P.",
+         "authorList": {"author": [
+             {"fullName": "Ahmed N", "firstName": "Nadia", "lastName": "Ahmed", "initials": "N",
+              "authorAffiliationDetailsList": {"authorAffiliation": [{"affiliation": "School of Nursing, Example University, Leeds, UK."}]}},
+             {"fullName": "Brown T", "firstName": "Tom", "lastName": "Brown", "initials": "T", "affiliation": "Leeds Teaching Hospitals, Leeds, UK."},
+             {"fullName": "Clark R", "lastName": "Clark", "initials": "R"},
+             {"fullName": "Davis P", "firstName": "Pat", "lastName": "Davis", "initials": "P"}]},
          "pubYear": "2023", "journalInfo": {"journal": {"title": "Nursing Education Trials"}},
          "pubTypeList": {"pubType": ["research-article", "Journal Article"]}, "pubType": "research-article; journal article",
          "abstractText": f"<h4>Results</h4><p>{PMC_ONLY_LINE}</p>"},
@@ -228,6 +239,8 @@ TRIAL = {
         "armsInterventionsModule": {"interventions": [{"name": "Mindfulness app"}]},
         "outcomesModule": {"primaryOutcomes": [{"measure": "PHQ-9", "timeFrame": "12 weeks"}]},
         "referencesModule": {"references": [{"pmid": "11111111", "type": "RESULT", "citation": "..."}]},
+        "contactsLocationsModule": {"overallOfficials": [
+            {"name": "Jane  Doe, MD", "affiliation": "University of Example", "role": "PRINCIPAL_INVESTIGATOR"}]},
     },
     "resultsSection": {
         "outcomeMeasuresModule": {

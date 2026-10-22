@@ -28,6 +28,14 @@ def test_parse_pubmed_xml():
     assert first.authors == "Kim J, Lee S, Park H, et al."
     assert records["22222222"].authors == "Mindful Students Trial Group"
     assert records["33333333"].authors == ""
+    # Every author with their affiliations, for the review's author table.
+    assert first.author_list == [
+        {"name": "Jisoo Kim", "affiliation": "Department of Psychiatry, Seoul National University, Seoul, Korea."},
+        {"name": "Sun Lee", "affiliation": "College of Nursing, Yonsei University, Seoul, Korea.; Mind Health Institute, Seoul, Korea."},
+        {"name": "H Park", "affiliation": ""}, {"name": "Y Choi", "affiliation": ""},
+    ]
+    assert records["22222222"].author_list == [{"name": "Mindful Students Trial Group", "affiliation": ""}]
+    assert records["33333333"].author_list == []
     assert records["22222222"].year == "2019"  # from <MedlineDate>
     assert records["22222222"].pmcid is None
 
@@ -50,6 +58,8 @@ def test_trial_results_text_keeps_labels_with_numbers():
     assert record.ext_id == "NCT01234567"
     assert record.year == "2019"
     assert "Result publications (PMID): 11111111" in record.abstract
+    assert record.author_list == [{"name": "Jane Doe, MD", "affiliation": "University of Example", "role": "Principal investigator"}]
+    assert record.authors == "Jane Doe, MD"
     text = trial_results_text(TRIAL)
     assert "## Outcome measure (primary): PHQ-9 Total Score" in text
     assert "Analyzed (participants): Mindfulness App: 98 | Waitlist: 97" in text
@@ -116,6 +126,14 @@ def test_europe_pmc_search_keeps_papers_and_preprints():
     assert (record.source, record.ext_id, record.pmcid, record.journal) == ("europepmc", PMC_ONLY, PMC_ONLY, "Nursing Education Trials")
     assert record.title == "Mindfulness app use and depressive symptoms in nursing students: a randomised trial"
     assert record.authors == "Ahmed N, Brown T, Clark R, et al."
+    assert record.author_list == [
+        {"name": "Nadia Ahmed", "affiliation": "School of Nursing, Example University, Leeds, UK."},
+        {"name": "Tom Brown", "affiliation": "Leeds Teaching Hospitals, Leeds, UK."},
+        {"name": "Clark", "affiliation": ""}, {"name": "Pat Davis", "affiliation": ""},
+    ]
+    # A result without an author list (a "lite" one) still gives the names.
+    assert europepmc_record({"id": "PPR1", "source": "PPR", "authorString": "Ng A, Ode B."}).author_list == [
+        {"name": "Ng A", "affiliation": ""}, {"name": "Ode B", "affiliation": ""}]
     assert europepmc_record(results[2]).pubtypes == ["Preprint"]
     assert europepmc_url(PREPRINT) == f"https://europepmc.org/article/PPR/{PREPRINT}"
     assert EUROPEPMC["resultList"]["result"][3]["source"] == "PAT"

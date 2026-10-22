@@ -446,8 +446,8 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     # Papers only Europe PMC has: one from PubMed Central, and a preprint marked as one.
     pmc = open_paper(page, "Mindfulness app use and depressive symptoms")
     assert pmc.locator(".badge", has_text="Europe PMC").count() == 1 and pmc.locator(".badge", has_text="Full-text search").count() == 1
-    assert pmc.locator("h3 a").get_attribute("href") == f"https://europepmc.org/article/PMC/{PMC_ONLY}"
-    assert pmc.locator(".ids .id").all_inner_texts() == [f"PMCID {PMC_ONLY}"]
+    assert pmc.locator("h3 a").get_attribute("href") == f"https://pmc.ncbi.nlm.nih.gov/articles/{PMC_ONLY}/"  # free full text first
+    assert [" ".join(x.split()) for x in pmc.locator(".ids .id").all_inner_texts()] == [f"PMCID {PMC_ONLY} free full text"]
     assert pmc.locator(".meta").first.inner_text().startswith("R") and "Ahmed N, Brown T, Clark R, et al." in pmc.inner_text()
     preprint = open_paper(page, "A smartphone mindfulness programme")
     assert preprint.locator(".badge", has_text="Preprint, not peer reviewed").count() == 1
@@ -463,6 +463,13 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     registry = page.locator("#papers .paper")
     assert registry.inner_text().startswith("A Randomized Trial of a Mindfulness App")
     assert "instead." in registry.locator(".overlap-note").inner_text()
+    # A registry record lists its investigators, with their roles.
+    registry.locator(".authors-btn").click()
+    officials = page.locator(".authors-pop:popover-open")
+    officials.locator("tbody tr").first.wait_for()
+    assert officials.locator("strong").inner_text() == "Investigators (1)"
+    assert officials.locator("tbody tr").first.inner_text().split("\t") == ["1", "Jane Doe, MD", "Principal investigator", "University of Example"]
+    page.keyboard.press("Escape")
     page.click("#source-switch button:has-text('Papers')")
 
     # The search, level by level from the top down: found, kept after screening, extracted.
@@ -535,15 +542,28 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     arms = trial.locator(".result").first.locator(".arms tr").all_inner_texts()
     assert [" ".join(a.split()) for a in arms][:2] == ["App 8.1 ± 4.2 n = 100", "Waitlist 10.3 ± 4.5 n = 100"], arms
     assert not trial.locator(".result details.quotes table").first.is_visible()
-    assert trial.locator("h3 a").get_attribute("href") == "https://pubmed.ncbi.nlm.nih.gov/11111111/"
-    # It is cited in full for credibility: authors, year and venue, then each identifier, linked.
+    # Its free full text in PubMed Central comes first: the title links there, and its PMCID leads.
+    assert trial.locator("h3 a").get_attribute("href") == "https://pmc.ncbi.nlm.nih.gov/articles/PMC9000001/"
+    # It is cited in full for credibility: year, venue and authors, then each identifier, linked.
     cite = " ".join(trial.locator(".cite").inner_text().split())
-    assert cite.startswith("R") and "Kim J, Lee S, Park H, et al. 2021 Journal of Student Mental Health" in cite, cite
-    ids = trial.locator(".ids .id").all_inner_texts()
-    assert ids == ["PMID 11111111", "PMCID PMC9000001", "DOI 10.1000/rct1", "NCT01234567"], ids
+    assert cite.startswith("R") and "2021 Journal of Student Mental Health Kim J, Lee S, Park H, et al." in cite, cite
+    ids = [" ".join(x.split()) for x in trial.locator(".ids .id").all_inner_texts()]
+    assert ids == ["PMCID PMC9000001 free full text", "PMID 11111111", "DOI 10.1000/rct1", "NCT01234567"], ids
     assert trial.locator(".ids a").evaluate_all("links => links.map((a) => a.href)") == [
-        "https://pubmed.ncbi.nlm.nih.gov/11111111/", "https://pmc.ncbi.nlm.nih.gov/articles/PMC9000001/",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC9000001/", "https://pubmed.ncbi.nlm.nih.gov/11111111/",
         "https://doi.org/10.1000/rct1", "https://clinicaltrials.gov/study/NCT01234567"]
+    # Excluding the whole paper sits beside the title.
+    assert trial.locator(".paper-title button.exclude-paper").inner_text() == "Exclude the whole paper"
+    # The authors open a table of every author and affiliation.
+    trial.locator(".authors-btn").click()
+    table = page.locator(".authors-pop:popover-open")
+    table.locator("tbody tr").first.wait_for()
+    assert table.locator("strong").inner_text() == "Authors (4)"
+    rows = [r.split("\t") for r in table.locator("tbody tr").all_inner_texts()]
+    assert rows[0] == ["1", "Jisoo Kim", "Department of Psychiatry, Seoul National University, Seoul, Korea."], rows
+    assert rows[1][2] == "College of Nursing, Yonsei University, Seoul, Korea.; Mind Health Institute, Seoul, Korea." and rows[3][2] == "—"
+    page.keyboard.press("Escape")
+    assert page.locator(".authors-pop:popover-open").count() == 0
     open_paper(page, "A mindfulness app for depressive").locator(".result").first.locator("button.include").click()
     page.wait_for_selector(".result[data-decision='include']")
     # Every result of this paper is decided: it counts as reviewed, and Next is the button to press.
@@ -557,8 +577,24 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert len(rows) == 6 and {r["id"] for r in rows} == {"11111111"} and rows[0]["quote_check"] == "exact"
 
     # Everything is in this browser's storage: a reload brings the search and the decision back.
+    # A record stored before authors were kept gets them from PubMed when its table opens.
+    page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        const store = new Store();
+        const paper = (await store.papers(location.hash.slice(1))).find((p) => p.ext_id === '22222222');
+        await store.updatePaper(paper.id, { author_list: null });
+    }""")
     page.reload()
     page.wait_for_selector("#review:not([hidden]) .paper")
+    open_paper(page, "Brief mindfulness training").locator(".authors-btn").click()
+    fetched = page.locator(".authors-pop:popover-open")
+    fetched.locator("tbody tr").first.wait_for()
+    assert fetched.locator("tbody tr").first.inner_text().split("\t") == ["1", "Mindful Students Trial Group", "—"]
+    page.keyboard.press("Escape")
+    assert page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().papers(location.hash.slice(1))).find((p) => p.ext_id === '22222222').author_list[0].name;
+    }""") == "Mindful Students Trial Group"
     assert open_paper(page, "A mindfulness app for depressive").locator(".result[data-decision='include']").count() == 1
     assert page.input_value("#api-key") == KEY
     assert page.evaluate("""async () => {
@@ -599,7 +635,8 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert studies.count() == arms
     hrefs = studies.evaluate_all("links => links.map((a) => [a.textContent, a.href, a.target])")
     assert all(target == "_blank" for _, _, target in hrefs)
-    assert all(href.startswith(("https://pubmed.ncbi.nlm.nih.gov/", "https://europepmc.org/", "https://clinicaltrials.gov/study/NCT"))
+    assert all(href.startswith(("https://pmc.ncbi.nlm.nih.gov/articles/PMC", "https://pubmed.ncbi.nlm.nih.gov/", "https://europepmc.org/",
+                                "https://clinicaltrials.gov/study/NCT"))
                for _, href, _ in hrefs), hrefs
     assert registry_rows.first.locator("a").get_attribute("href") == "https://clinicaltrials.gov/study/NCT01234567"
     # Records the text names by key are linked too, and so are those in the overlap list.

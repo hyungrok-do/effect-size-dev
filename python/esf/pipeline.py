@@ -330,6 +330,7 @@ class Pipeline:
                 nct_ids=record.nct_ids,
                 title=record.title,
                 authors=record.authors,
+                author_list=record.author_list,
                 year=record.year,
                 journal=record.journal,
                 pubtypes=record.pubtypes,
@@ -419,6 +420,32 @@ class Pipeline:
             self.store.update_project(project_id, summary={"status": "error", "error": describe_error(exc)})
 
     # -- one paper ------------------------------------------------------------
+
+    def author_list(self, paper_id: int) -> list[dict]:
+        """A paper's authors with their affiliations. A record stored before they were kept gets them
+        from its source now (PubMed, Europe PMC or ClinicalTrials.gov); an empty list if it can't."""
+        paper = self.store.paper(paper_id)
+        assert paper is not None
+        if paper.get("author_list"):
+            return paper["author_list"]
+        record: Record | None = None
+        try:
+            if paper["source"] == "clinicaltrials":
+                study = self.sources.trials.study(paper["ext_id"])
+                record = trial_record(study) if study else None
+            elif paper.get("pmid"):
+                record = next(iter(self.sources.pubmed.fetch([paper["pmid"]])), None)
+            else:
+                kind = "PPR" if paper["ext_id"].startswith("PPR") else "PMC"
+                _, results = self.sources.europepmc.search(f"EXT_ID:{paper['ext_id']} AND SRC:{kind}", 5)
+                found = next((r for r in results if str(r.get("id")) == paper["ext_id"]), None)
+                record = europepmc_record(found) if found else None
+        except SourceError:
+            log.exception("could not fetch the authors of paper %s", paper_id)
+        if record is None or not record.author_list:
+            return []
+        self.store.update_paper(paper_id, author_list=record.author_list, authors=paper.get("authors") or record.authors)
+        return record.author_list
 
     def extract_paper(self, project_id: str, spec: SearchSpec, paper_id: int) -> None:
         try:

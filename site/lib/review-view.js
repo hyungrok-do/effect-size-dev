@@ -114,34 +114,86 @@ export function overlapNote(paper, report, papers) {
 
 // -- a paper's citation ----------------------------------------------------------------
 
-// The paper as cited, for the review: its title (linked to where it was found), its key, authors,
-// year and venue, then its identifiers, each linked: PMID, PMCID, DOI, the Europe PMC ID of a record
-// PubMed does not have, and trial registrations. `links` is the record's {label: url}; `warnings`
-// are badges to show after the identifiers.
-export function paperHeader(paper, links, warnings = []) {
+// The paper as cited, for the review: its title (linked to its free full text in PubMed Central
+// when there is one, else to where it was found) with `action` beside it; its key, year, venue and
+// authors, which open a table of every author and affiliation; then its identifiers, each linked,
+// free full text first: PMCID, PMID, DOI, the Europe PMC ID of a record PubMed does not have, and
+// trial registrations. `links` is the record's {label: url}; `warnings` are badges shown after the
+// identifiers; `loadAuthors(paper)` fetches the authors of a record stored before they were kept.
+export function paperHeader(paper, links, { warnings = [], action = null, loadAuthors = null } = {}) {
   const url = sourceUrl(paper, links);
   const title = paper.title || paper.ext_id;
   const venue = paper.source === 'clinicaltrials' ? 'ClinicalTrials.gov'
     : paper.journal || (paper.ext_id.startsWith('PPR') ? 'Preprint' : '');
-  const id = (label, value, href) => h('span', { class: 'id' }, label && `${label} `,
-    href ? h('a', { href, target: '_blank', rel: 'noopener' }, value) : value);
+  const id = (label, value, href, ...extra) => h('span', { class: 'id' }, label && `${label} `,
+    href ? h('a', { href, target: '_blank', rel: 'noopener' }, value) : value, extra);
   const trials = [...new Set([...(paper.source === 'clinicaltrials' ? [paper.ext_id] : []), ...(paper.nct_ids || [])])];
   const ids = [
+    paper.pmcid && id('PMCID', paper.pmcid, links.PMC, ' ', h('span', { class: 'free' }, 'free full text')),
     paper.pmid && id('PMID', paper.pmid, links.PubMed),
-    paper.pmcid && id('PMCID', paper.pmcid, links.PMC),
     paper.doi && id('DOI', paper.doi, links.DOI),
     paper.source === 'europepmc' && !paper.pmid && paper.ext_id !== paper.pmcid && id('Europe PMC', paper.ext_id, links['Europe PMC']),
     ...trials.map((nct) => id('', nct, links[nct] || `https://clinicaltrials.gov/study/${nct}`)),
   ].filter(Boolean);
   const shown = warnings.filter(Boolean);
   return [
-    h('h3', {}, url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, title) : title),
+    h('div', { class: 'paper-title' },
+      h('h3', {}, url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, title) : title),
+      action),
     h('div', { class: 'meta cite' },
       badge(`R${paper.id}`, 'accent'),
-      paper.authors && h('span', {}, paper.authors),
       paper.year && h('span', {}, paper.year),
-      venue && h('span', { class: 'venue' }, venue)),
+      venue && h('span', { class: 'venue' }, venue),
+      authorsButton(paper, loadAuthors)),
     (ids.length > 0 || shown.length > 0) && h('div', { class: 'meta ids' }, ids, shown),
+  ];
+}
+
+// The authors, as a button that opens a table of every author with their affiliations (for a registry
+// record, the officials with their roles).
+function authorsButton(paper, loadAuthors) {
+  const popId = `authors-${paper.id}`;
+  const body = h('div', { class: 'authors-body' });
+  const heading = h('strong', { id: `${popId}-title` }, paper.source === 'clinicaltrials' ? 'Investigators' : 'Authors');
+  const fill = (list) => {
+    if (!list.length) {
+      body.replaceChildren(h('p', { class: 'muted' }, paper.authors
+        ? `${paper.authors} (affiliations are not available for this record).` : 'No authors are recorded for this record.'));
+      return;
+    }
+    heading.textContent = `${paper.source === 'clinicaltrials' ? 'Investigators' : 'Authors'} (${list.length})`;
+    const roles = list.some((a) => a.role);
+    body.replaceChildren(h('div', { class: 'table-wrap' }, h('table', { class: 'authors-table' },
+      h('thead', {}, h('tr', {}, ['#', 'Name', ...(roles ? ['Role'] : []), 'Affiliation'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, list.map((a, i) => h('tr', {},
+        h('td', { class: 'num' }, String(i + 1)), h('td', {}, a.name),
+        roles && h('td', {}, a.role || ''), h('td', {}, a.affiliation || '—')))))));
+  };
+  const open = async () => {
+    let list = paper.author_list || [];
+    if (!list.length && loadAuthors) {
+      body.replaceChildren(h('p', { class: 'muted' }, 'Fetching the authors…'));
+      try {
+        list = await loadAuthors(paper);
+      } catch {
+        list = [];
+      }
+      paper.author_list = list;
+    }
+    fill(list);
+  };
+  const pop = h('div', {
+    id: popId, popover: 'auto', class: 'authors-pop', role: 'dialog', 'aria-labelledby': `${popId}-title`,
+    ontoggle: (e) => { if (e.newState === 'open') open(); },
+  },
+  h('div', { class: 'authors-head' }, heading,
+    h('button', { type: 'button', class: 'secondary small', popovertarget: popId, popovertargetaction: 'hide' }, 'Close')),
+  body);
+  const label = paper.authors || (paper.source === 'clinicaltrials' ? 'Investigators' : 'Authors');
+  return [
+    h('button', { type: 'button', class: 'authors-btn', popovertarget: popId, 'aria-haspopup': 'dialog', title: 'Authors and affiliations' },
+      label, h('span', { 'aria-hidden': 'true' }, ' ▾')),
+    pop,
   ];
 }
 
@@ -278,10 +330,13 @@ export function resultBox(paper, result, index, decisions, decide) {
         h('tbody', {}, rows)))));
 }
 
-// Where each source's records are linked: a paper to the database it was found in, a registry
-// record to its ClinicalTrials.gov page. `links` is the record's {label: url}.
+// Where each source's records are linked: a paper to its free full text in PubMed Central if it has
+// one, else to the database it was found in; a registry record to its ClinicalTrials.gov page.
+// `links` is the record's {label: url}.
 const SOURCE_LINKS = { pubmed: 'PubMed', europepmc: 'Europe PMC' };
+// A paper's free full text in PubMed Central comes first, when there is one.
 export function sourceUrl(paper, links) {
+  if (paper.source !== 'clinicaltrials' && links.PMC) return links.PMC;
   return links[paper.source === 'clinicaltrials' ? paper.ext_id : SOURCE_LINKS[paper.source]]
     || links.PubMed || links.PMC || links.DOI || Object.values(links)[0] || null;
 }

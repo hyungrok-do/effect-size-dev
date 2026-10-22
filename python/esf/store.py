@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS papers (
     nct_ids TEXT,
     title TEXT,
     authors TEXT,
+    author_list TEXT,
     year TEXT,
     journal TEXT,
     pubtypes TEXT,
@@ -87,6 +88,7 @@ JSON_COLUMNS = {
     "found_by",
     "found_in",
     "cited_by",
+    "author_list",
     "screen",
     "extraction",
     "verification",
@@ -130,7 +132,7 @@ class Store:
             # Columns added since the first version; CREATE TABLE IF NOT EXISTS leaves old tables as they were.
             for table, column in (
                 ("projects", "search_log"), ("projects", "overlap"), ("projects", "summary"),
-                ("papers", "found_in"), ("papers", "authors"), ("papers", "cited_by"),
+                ("papers", "found_in"), ("papers", "authors"), ("papers", "cited_by"), ("papers", "author_list"),
             ):
                 if column not in {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}:
                     self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")

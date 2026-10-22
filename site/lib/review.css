@@ -52,8 +52,22 @@
 .paper-details { margin-top: 10px; }
 .paper-details summary { font-size: 13px; color: var(--muted); }
 
-/* A paper's citation: authors, year and venue, then its identifiers. */
+/* A paper's citation: the title with its action, year, venue and authors, then its identifiers. */
+.paper-title { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 14px; }
+.paper-title h3 { flex: 1 1 320px; min-width: 0; }
+.paper-title > button { flex: none; }
 .paper .cite .venue { font-style: italic; }
 .paper .ids { margin-top: 3px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .paper .ids .id { color: var(--muted); }
 .paper .ids .id a { color: var(--ink-2); overflow-wrap: anywhere; }
+.paper .ids .free { color: var(--ok); font-weight: 600; }
+.authors-btn { font: inherit; color: var(--ink-2); background: none; border: 0; padding: 0; cursor: pointer; text-align: left;
+  text-decoration: underline dotted; text-underline-offset: 3px; }
+.authors-btn:hover { color: var(--ink); }
+.authors-pop { width: min(720px, calc(100vw - 32px)); max-height: min(70vh, 640px); overflow: auto; padding: 14px 16px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: 0 12px 40px rgb(0 0 0 / .25); }
+.authors-pop::backdrop { background: rgb(0 0 0 / .2); }
+.authors-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.authors-table { font-size: 13.5px; }
+.authors-table td.num { width: 2.5em; color: var(--muted); }
+.authors-table td:nth-child(2) { min-width: 11em; }

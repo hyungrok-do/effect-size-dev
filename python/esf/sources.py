@@ -34,6 +34,9 @@ class Record:
     pmid: str | None = None
     pmcid: str | None = None
     nct_ids: list[str] = field(default_factory=list)
+    # Every author with their affiliations ("; "-joined), and for a registry record the officials
+    # with their roles: {"name", "affiliation", "role"?}. Shown in the review's author table.
+    author_list: list[dict] = field(default_factory=list)
 
 
 class SourceError(RuntimeError):
@@ -162,6 +165,10 @@ def _text(el: Any) -> str:
     return " ".join("".join(el.itertext()).split()) if el is not None else ""
 
 
+def _clean(text: Any) -> str:
+    return " ".join(str(text or "").split())
+
+
 def short_authors(names: list[str]) -> str:
     """The first three authors, then "et al."; how the overlap check tells reports of one study apart."""
     names = [n for n in names if n]
@@ -201,9 +208,16 @@ def parse_pubmed_xml(xml: bytes | str) -> list[Record]:
                 if loc.get("EIdType") == "doi":
                     doi = (loc.text or "").strip()
         names = []
+        author_list = []
         for author in art.findall("AuthorList/Author"):
             last = (author.findtext("LastName") or "").strip()
-            names.append(f"{last} {(author.findtext('Initials') or '').strip()}".strip() if last else _text(author.find("CollectiveName")))
+            collective = _text(author.find("CollectiveName"))
+            names.append(f"{last} {(author.findtext('Initials') or '').strip()}".strip() if last else collective)
+            first = _text(author.find("ForeName")) or _text(author.find("Initials"))
+            name = f"{first} {_text(author.find('LastName'))}".strip() if last else collective
+            affiliations = [a for a in (_text(x) for x in author.findall("AffiliationInfo/Affiliation")) if a]
+            if name:
+                author_list.append({"name": name, "affiliation": "; ".join(affiliations)})
         nct_ids = []
         for bank in art.findall("DataBankList/DataBank"):
             if (bank.findtext("DataBankName") or "").strip() == "ClinicalTrials.gov":
@@ -222,6 +236,7 @@ def parse_pubmed_xml(xml: bytes | str) -> list[Record]:
                 doi=doi or None,
                 pmcid=ids.get("pmc") or None,
                 nct_ids=[n for n in nct_ids if n],
+                author_list=author_list,
             )
         )
     return records
@@ -300,15 +315,23 @@ def trial_record(study: dict) -> Record:
     ]
     if pmids:
         lines.append("Result publications (PMID): " + ", ".join(pmids))
+    officials = [
+        {"name": _clean(o.get("name")), "affiliation": _clean(o.get("affiliation")),
+         "role": (o.get("role") or "").replace("_", " ").capitalize()}
+        for o in protocol.get("contactsLocationsModule", {}).get("overallOfficials", [])
+        if _clean(o.get("name"))
+    ]
     return Record(
         source="clinicaltrials",
         ext_id=nct_id,
         title=ident.get("officialTitle") or ident.get("briefTitle", ""),
+        authors=short_authors([o["name"] for o in officials]),
         year=_year(status.get("startDateStruct", {}).get("date")),
         journal="ClinicalTrials.gov",
         pubtypes=[design.get("studyType", "")] if design.get("studyType") else [],
         abstract="\n".join(lines),
         nct_ids=[nct_id],
+        author_list=officials,
     )
 
 
@@ -416,6 +439,27 @@ def europepmc_pmid(result: dict) -> str | None:
     return str(result.get("pmid") or (result["id"] if result.get("source") == "MED" else "")) or None
 
 
+def europepmc_authors(result: dict) -> list[dict]:
+    """A Europe PMC result's authors with their affiliations; from the names alone when the result
+    has no author list (a "lite" result)."""
+    out = []
+    for a in (result.get("authorList") or {}).get("author") or []:
+        name = _clean(f"{a.get('firstName') or ''} {a.get('lastName') or ''}") or _clean(a.get("fullName")) or _clean(a.get("collectiveName"))
+        details = (a.get("authorAffiliationDetailsList") or {}).get("authorAffiliation") or []
+        affiliations = [_clean(d.get("affiliation")) for d in details if _clean(d.get("affiliation"))]
+        if not affiliations and _clean(a.get("affiliation")):
+            affiliations = [_clean(a.get("affiliation"))]
+        if name:
+            out.append({"name": name, "affiliation": "; ".join(affiliations)})
+    if not out:
+        out = [{"name": n, "affiliation": ""} for n in _europepmc_names(result)]
+    return out
+
+
+def _europepmc_names(result: dict) -> list[str]:
+    return [n for n in (_clean(x).rstrip(".") for x in (result.get("authorString") or "").split(",")) if n]
+
+
 def europepmc_record(result: dict) -> Record:
     """A Europe PMC result that is not in PubMed, as a record."""
     journal = ((result.get("journalInfo") or {}).get("journal") or {}).get("title") or (
@@ -426,13 +470,14 @@ def europepmc_record(result: dict) -> Record:
         source="europepmc",
         ext_id=str(result["id"]),
         title=_plain(result.get("title")),
-        authors=short_authors([n.strip().rstrip(".") for n in (result.get("authorString") or "").split(",")]),
+        authors=short_authors(_europepmc_names(result)),
         year=_year(str(result.get("pubYear") or "")),
         journal=journal,
         pubtypes=[pubtypes] if isinstance(pubtypes, str) else list(pubtypes),
         abstract=_plain(result.get("abstractText")),
         doi=result.get("doi"),
         pmcid=result.get("pmcid"),
+        author_list=europepmc_authors(result),
     )
 
 

@@ -257,6 +257,11 @@ def create_app(
         submit(f"paper-{paper_id}", lambda: job.extract_paper(project_id, spec, paper_id))
         return {"ok": True}
 
+    @app.get("/api/projects/{project_id}/papers/{paper_id}/authors")
+    def authors(project_id: str, paper_id: int) -> dict:
+        get_paper(project_id, paper_id)
+        return {"authors": pipeline.author_list(paper_id)}
+
     @app.put("/api/projects/{project_id}/papers/{paper_id}/decisions")
     def decide(project_id: str, paper_id: int, body: DecisionIn) -> dict:
         paper = get_paper(project_id, paper_id)
