@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS projects (
     search_plan TEXT,
     search_log TEXT,
     overlap TEXT,
-    summary TEXT
+    summary TEXT,
+    run_started_at TEXT
 );
 CREATE TABLE IF NOT EXISTS papers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,7 +133,7 @@ class Store:
             self._db.executescript(SCHEMA)
             # Columns added since the first version; CREATE TABLE IF NOT EXISTS leaves old tables as they were.
             for table, column in (
-                ("projects", "search_log"), ("projects", "overlap"), ("projects", "summary"),
+                ("projects", "search_log"), ("projects", "overlap"), ("projects", "summary"), ("projects", "run_started_at"),
                 ("papers", "found_in"), ("papers", "authors"), ("papers", "cited_by"), ("papers", "author_list"),
                 ("papers", "extracted_model"),
             ):
@@ -272,11 +273,13 @@ class Store:
             ),
         )
 
-    def usage(self, project_id: str) -> list[dict]:
+    def usage(self, project_id: str, since: str | None = None) -> list[dict]:
+        """Tokens by step and model; with `since`, only the calls from then on (and reading the problem)."""
+        recent = " AND (created_at >= ? OR step = 'spec')" if since else ""
         return self._all(
             "SELECT step, model, COUNT(*) AS calls, SUM(input_tokens) AS input_tokens, "
             "SUM(output_tokens) AS output_tokens, SUM(cache_read_input_tokens) AS cache_read_input_tokens, "
             "SUM(cache_creation_input_tokens) AS cache_creation_input_tokens "
-            "FROM usage WHERE project_id = ? GROUP BY step, model ORDER BY MIN(created_at)",
-            (project_id,),
+            f"FROM usage WHERE project_id = ?{recent} GROUP BY step, model ORDER BY MIN(created_at)",
+            (project_id, since) if since else (project_id,),
         )

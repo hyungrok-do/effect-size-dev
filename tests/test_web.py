@@ -153,12 +153,18 @@ def test_the_agents_page_comes_first_until_a_provider_is_ready(browser, served):
     assert toggle.get_attribute("data-missing") == "true" and card(page, "anthropic").locator(".provider-ready").is_hidden()
     page.fill("#api-key", NCBI_KEY)
     assert "NCBI API key" in page.inner_text("#key-status") and toggle.get_attribute("data-missing") == "true"
-    page.locator(".provider-card:has(input[value='openai'])").click()
+    # A key is never kept as the other vendor's, and following the advice carries it over to its own box.
+    page.fill("#api-key", OPENAI_KEY)
+    kept = "() => [sessionStorage.getItem('esf-anthropic-api-key'), sessionStorage.getItem('esf-openai-api-key')]"
+    assert page.evaluate(kept) == [None, None]
+    card(page, "openai").click()
+    assert (page.input_value("#openai-key"), page.input_value("#api-key")) == (OPENAI_KEY, "")
+    assert page.evaluate(kept) == [None, OPENAI_KEY]
     page.fill("#openai-key", ANTHROPIC_KEY)
     assert page.inner_text("#openai-key-status").startswith("This is an Anthropic API key, not an OpenAI API key")
-    page.fill("#openai-key", "")
     card(page, "anthropic").click()
-    page.fill("#api-key", ANTHROPIC_KEY)
+    assert (page.input_value("#api-key"), page.input_value("#openai-key")) == (ANTHROPIC_KEY, "")
+    assert page.evaluate(kept) == [ANTHROPIC_KEY, None]
     assert page.inner_text("#key-status").startswith("Kept for this tab only.")
     assert toggle.get_attribute("data-missing") == "false" and card(page, "anthropic").locator(".provider-ready").is_visible()
 
@@ -171,6 +177,9 @@ def test_the_agents_page_comes_first_until_a_provider_is_ready(browser, served):
     assert page.is_hidden("#agents-page") and page.is_visible("#searches")
     page.click("#agents-toggle")
     assert page.is_visible("#agents-page") and page.is_hidden("#intro")
+    # Escape closes it and gives the focus back to its button.
+    page.keyboard.press("Escape")
+    assert page.is_hidden("#agents-page") and page.evaluate("document.activeElement.id") == "agents-toggle"
     assert not page.errors, page.errors
     context.close()
 
@@ -216,6 +225,13 @@ def test_the_openai_api_with_a_key_from_the_page(browser, served):
     assert [tool["name"] for tool in tools[0]] == ["count_pubmed", "search_pubmed", "search_europepmc", "search_clinicaltrials", "submit_search_plan"]
     assert served["responses"].requests == []
     assert page.locator("#map-body [data-stage='extract'] .map-agent").all_inner_texts() == ["Code", "GPT-6.1 Sol", "GPT-6 Luna"]
+    # Choosing Claude now changes nothing about this search: its work stays credited to the models that did it.
+    page.click("#agents-toggle")
+    card(page, "anthropic").click()
+    page.click("#agents-done")
+    assert page.inner_text("#models").startswith("Opus 5.5 plans and reviews")
+    assert "How GPT-6 Luna read your paragraph" in page.inner_text("#spec .summary")
+    assert page.locator("#map-body [data-stage='extract'] .map-agent").all_inner_texts() == ["Code", "GPT-6.1 Sol", "GPT-6 Luna"]
     assert not page.errors, page.errors
     context.close()
 
@@ -234,6 +250,7 @@ def test_claude_gets_only_the_anthropic_key(browser, served):
     page.click("#read")
     page.wait_for_selector("#spec:not([hidden])")
     assert "How Sonnet 5.5 read your paragraph" in page.inner_text("#spec .summary")
+    project_id = page.evaluate("location.hash.slice(1)")
     [headers] = page.jobs
     assert headers["x-model-provider"] == "anthropic" and headers["x-anthropic-api-key"] == ANTHROPIC_KEY and "x-openai-api-key" not in headers
     assert (headers["x-manager-model"], headers["x-worker-model"]) == ("claude-sonnet-5-5", "claude-haiku-5-5")
@@ -254,6 +271,12 @@ def test_claude_gets_only_the_anthropic_key(browser, served):
     assert page.is_visible("#agents-page") and page.is_hidden("#searches")
     assert page.inner_text("#key-status") == "Enter your Anthropic API key first."
     assert page.evaluate("document.activeElement.id") == "api-key" and len(page.jobs) == 1
+
+    # A link to a search opens the search, though no key is set; the Agents button says one is missing.
+    page.goto(f"{served['url']}#{project_id}")
+    page.reload()
+    page.wait_for_selector("#spec:not([hidden])")
+    assert page.is_hidden("#agents-page") and page.get_attribute("#agents-toggle", "data-missing") == "true"
     assert not page.errors, page.errors
     context.close()
 

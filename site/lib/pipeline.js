@@ -9,7 +9,7 @@
 // is cut short (the tab closed) can be continued.
 
 import { NO_ACTIVITY, short } from './activity.js';
-import { describeError, ModelDeclined, ModelTruncated } from './claude.js';
+import { describeError, ModelDeclined, ModelTruncated, outOfCredit } from './claude.js';
 import { buildEvidence, decisionsBasis, overlapRecords } from './evidence.js';
 import { LEVEL_NAMES, LEVELS, PROMPTS } from './generated.js';
 import { jatsToText } from './jats.js';
@@ -51,7 +51,7 @@ const PROCESSED = new Set(['extracted', 'needs_manual', 'no_fulltext', 'error'])
 const STOPPING_CODES = new Set(['invalid_api_key', 'insufficient_quota', 'model_not_found']);
 export function stopsTheRun(error) {
   if (error?.name === 'OpenAIError') return STOPPING_CODES.has(error.code) || [401, 403].includes(error.status);
-  return [401, 403, 404].includes(error?.status); // the Anthropic SDK's errors carry the HTTP status
+  return [401, 403, 404].includes(error?.status) || outOfCredit(error); // the Anthropic SDK's errors carry the HTTP status
 }
 
 async function pool(items, limit, fn, onEach) {
@@ -137,6 +137,7 @@ export class Pipeline {
       await this.store.clearPapers(projectId);
       await this.store.updateProject(projectId, {
         error: null, search_plan: null, search_log: null, collected: false, followed: false, overlap: null, summary: null, progress: null,
+        run_started_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
       });
       project = await this.store.project(projectId);
     } else {
@@ -548,14 +549,22 @@ export class Pipeline {
   // stop: in a run, where an error that would fail every paper stops the run.
   async extractPaper(projectId, spec, paperId, { upload = null, uploadName = '', stop = null } = {}) {
     try {
-      await this.extractOne(projectId, spec, paperId, upload, uploadName);
+      await this.extractOne(projectId, spec, paperId, upload, uploadName, stop);
     } catch (error) {
+      if (stop && stopsTheRun(error)) {
+        // The run stops; the paper waits for Continue, as an unscreened record does.
+        stop.error ||= error;
+        const paper = await this.store.paper(paperId);
+        await this.store.updatePaper(paperId, {
+          status: paper?.screen?.decision === 'unsure' ? 'unsure' : 'screened_in', error: `Not extracted: ${describeError(error)}`,
+        });
+        return;
+      }
       await this.store.updatePaper(paperId, { status: 'error', error: `Extraction failed. ${describeError(error)}` });
-      if (stop && stopsTheRun(error)) stop.error ||= error;
     }
   }
 
-  async extractOne(projectId, spec, paperId, upload, uploadName) {
+  async extractOne(projectId, spec, paperId, upload, uploadName, stop = null) {
     const paper = await this.store.paper(paperId);
     const sink = this.sink(projectId);
     const title = short(paper.title || paper.ext_id);
@@ -599,7 +608,7 @@ export class Pipeline {
       );
       report = verify(worker, doc.text, quotesReliable);
     } catch (error) {
-      if (stopsTheRun(error)) throw error;
+      if (stop && stopsTheRun(error)) throw error;
       if (error instanceof ModelDeclined) workerError = `the worker ${error.message}`;
       else if (error instanceof ModelTruncated) workerError = "the worker's extraction was cut off before it finished";
       else workerError = `the worker failed: ${describeError(error)}`;
@@ -630,7 +639,10 @@ export class Pipeline {
         finalReport = verify(final, doc.text, quotesReliable);
         extractedBy = 'manager';
       } catch (error) {
-        if (stopsTheRun(error)) throw error;
+        if (stop && stopsTheRun(error)) {
+          if (!worker) throw error;
+          stop.error ||= error; // the worker's extraction is kept, flagged; the run stops after this paper
+        }
         if (!worker) {
           await this.store.updatePaper(paperId, {
             status: 'needs_manual', escalation: { reasons, audit: audited },

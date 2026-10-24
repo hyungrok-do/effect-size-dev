@@ -27,7 +27,7 @@ from .llm import LLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
 from .openai_llm import OpenAIError
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
 from .sources import Record, SourceError, Sources, europepmc_pmid, europepmc_record, trial_record
-from .store import Store
+from .store import Store, now
 from .verify import Verification, escalation_reasons, in_audit_sample, verify
 
 log = logging.getLogger(__name__)
@@ -53,9 +53,16 @@ STOPPING_CODES = frozenset({
 def stops_the_run(exc: BaseException) -> bool:
     if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError)):
         return True
-    if isinstance(exc, (OpenAIError, ChatGPTError)):
+    if isinstance(exc, anthropic.APIStatusError):
+        # An Anthropic account out of credit answers 400 (or 402) with a billing error.
+        error = exc.body.get("error") if isinstance(exc.body, dict) else None
+        kind = error.get("type") if isinstance(error, dict) else None
+        return exc.status_code == 402 or kind == "billing_error" or "credit balance" in str(exc).lower()
+    if isinstance(exc, ChatGPTError):
+        return not exc.retryable  # the sign-in can't be used: every later call would fail the same way
+    if isinstance(exc, OpenAIError):
         code = exc.code.replace("subscription_sharing_v2_", "subscription_sharing_")
-        return code in STOPPING_CODES or (isinstance(exc, OpenAIError) and exc.status in (401, 403))
+        return code in STOPPING_CODES or exc.status in (401, 403)
     return False
 
 
@@ -173,7 +180,8 @@ class Pipeline:
         assert project is not None and project["spec"]
         spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
         self.store.clear_papers(project_id)
-        self.store.update_project(project_id, error=None, search_plan=None, search_log=None, overlap=None, summary=None, progress=None)
+        self.store.update_project(project_id, error=None, search_plan=None, search_log=None, overlap=None, summary=None, progress=None,
+                                  run_started_at=now())
         try:
             self.store.update_project(project_id, status="searching")
             self._progress(project_id, "planning the search")
@@ -499,16 +507,21 @@ class Pipeline:
         return record.author_list
 
     def extract_paper(self, project_id: str, spec: SearchSpec, paper_id: int, stop: "_Stop | None" = None) -> None:
-        """Extract one paper. In a run (`stop` given), an error that would fail every paper stops the run."""
+        """Extract one paper. In a run (`stop` given), an error that would fail every paper stops the run,
+        and the paper goes back to wait for the next run."""
         try:
-            self._extract_paper(project_id, spec, paper_id)
+            self._extract_paper(project_id, spec, paper_id, stop)
         except Exception as exc:
-            log.exception("extracting paper %s failed", paper_id)
-            self.store.update_paper(paper_id, status="error", error=f"Extraction failed. {describe_error(exc)}")
             if stop is not None and stops_the_run(exc):
                 stop.set(exc)
+                paper = self.store.paper(paper_id) or {}
+                waiting = "unsure" if (paper.get("screen") or {}).get("decision") == "unsure" else "screened_in"
+                self.store.update_paper(paper_id, status=waiting, error=f"Not extracted: {describe_error(exc)}")
+                return
+            log.exception("extracting paper %s failed", paper_id)
+            self.store.update_paper(paper_id, status="error", error=f"Extraction failed. {describe_error(exc)}")
 
-    def _extract_paper(self, project_id: str, spec: SearchSpec, paper_id: int) -> None:
+    def _extract_paper(self, project_id: str, spec: SearchSpec, paper_id: int, stop: "_Stop | None" = None) -> None:
         paper = self.store.paper(paper_id)
         assert paper is not None
         sink = self._sink(project_id)
@@ -528,7 +541,7 @@ class Pipeline:
 
         document = self.llm.document(fulltext, paper["title"] or paper["ext_id"])
         quotes_reliable = fulltext.kind != "oa_pdf" and bool(fulltext.text.strip())
-        worker, report, worker_error = self._worker_pass(spec, document, fulltext, quotes_reliable, sink)
+        worker, report, worker_error = self._worker_pass(spec, document, fulltext, quotes_reliable, sink, stop)
         reasons = escalation_reasons(worker, report)
         if worker_error:
             reasons = [worker_error]
@@ -543,8 +556,10 @@ class Pipeline:
                 final_report = verify(final, fulltext.text, quotes_reliable)
                 extracted_by = "manager"
             except Exception as exc:
-                if stops_the_run(exc):
-                    raise
+                if stop is not None and stops_the_run(exc):
+                    if worker is None:
+                        raise
+                    stop.set(exc)  # the worker's extraction is kept, flagged; the run stops after this paper
                 if worker is None:
                     self.store.update_paper(
                         paper_id,
@@ -567,7 +582,7 @@ class Pipeline:
         )
 
     def _worker_pass(
-        self, spec: SearchSpec, document: dict, fulltext: FullText, quotes_reliable: bool, sink
+        self, spec: SearchSpec, document: dict, fulltext: FullText, quotes_reliable: bool, sink, stop: "_Stop | None" = None
     ) -> tuple[PaperExtraction | None, Verification | None, str | None]:
         try:
             worker = self.llm.extract(spec, document, sink)
@@ -576,7 +591,7 @@ class Pipeline:
         except ModelTruncated:
             return None, None, "the worker's extraction was cut off before it finished"
         except Exception as exc:
-            if stops_the_run(exc):
+            if stop is not None and stops_the_run(exc):
                 raise
             return None, None, f"the worker failed: {describe_error(exc)}"
         return worker, verify(worker, fulltext.text, quotes_reliable), None

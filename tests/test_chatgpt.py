@@ -381,6 +381,11 @@ def test_a_rejected_registration_is_forgotten(tmp_path):
         session.finish(api.authorize(session.start(PORT)), HOST)
     assert caught.value.code == "registration_rejected" and "register" in str(caught.value)
     assert saved(tmp_path)["client_id"] is None
+    # The tokens held from the earlier sign-in were issued to that registration: they go too.
+    assert session.state()["status"] == "reauth_required"
+    with pytest.raises(ChatGPTError) as caught:
+        session.access_token()
+    assert caught.value.code == "reauth_required"
     params = dict(httpx.URL(session.start(PORT)).params)
     assert params["client_id"] == REGISTRATION_ENTRY and params["agent_name_hint"] == APP_NAME
 
@@ -620,6 +625,19 @@ def test_a_key_service_outage_during_refresh_keeps_the_rotated_tokens(tmp_path):
     api.jwks_status = 200
     # The used-up refresh token is not sent again; the received rotation is verified and used.
     assert session.access_token() == "at-2" and api.refreshes == 1
+
+
+def test_a_kept_rotation_that_has_expired_is_renewed_with_its_refresh_token(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    api.refresh_id_token = {}
+    api.jwks_status = 503
+    clock.now += 3600
+    with pytest.raises(ChatGPTError):
+        session.access_token()
+    clock.now += 7200  # the outage outlasts the rotated access token too
+    api.jwks_status = 200
+    assert session.access_token() == "at-3" and api.token_forms[-1]["refresh_token"] == "rt-2"
+    assert session.state()["status"] == "connected" and api.refreshes == 2
 
 
 def test_a_kept_rotation_is_checked_as_of_when_it_arrived(tmp_path):

@@ -211,8 +211,10 @@ export class Store extends EventTarget {
     })));
   }
 
-  async usage(projectId) {
-    const rows = await this.tx('usage', 'readonly', ({ usage }) => request(usage.index('project').getAll(projectId)));
+  // Tokens by step and model; with `since`, only the calls from then on (and reading the problem).
+  async usage(projectId, since = null) {
+    const all = await this.tx('usage', 'readonly', ({ usage }) => request(usage.index('project').getAll(projectId)));
+    const rows = since ? all.filter((r) => r.created_at >= since || r.step === 'spec') : all;
     const groups = new Map();
     for (const r of rows.sort((a, b) => a.created_at.localeCompare(b.created_at))) {
       const key = `${r.step}\u0001${r.model}`;

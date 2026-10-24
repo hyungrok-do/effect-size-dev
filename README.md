@@ -387,10 +387,16 @@ so use the page only from its published address and don't add third-party script
 local server edition the key travels from the page to the server in a request header (the
 Anthropic key in `X-Anthropic-Api-Key`, the OpenAI key in `X-OpenAI-Api-Key`, only the chosen one); if
 you host that server for others, serve it over HTTPS. The server answers only to its own address,
-`localhost`, or a name in `ESF_ALLOWED_HOSTS`, and accepts changes only from its own page, so another
-web page open in the same browser can't drive it. A ChatGPT sign-in can be used only from the
-computer that runs the server: another computer can't run jobs on that plan, see who signed in, or
-sign them out.
+`localhost`, or a name in `ESF_ALLOWED_HOSTS`, accepts changes only from its own page, and may not be
+shown in a frame on another site, so another web page open in the same browser can't drive it. A
+ChatGPT sign-in can be used only from the computer that runs the server: another computer can't run
+jobs on that plan, see who signed in, or sign them out.
+
+Behind a reverse proxy, have the proxy pass the original `Host` (or list the public name in
+`ESF_ALLOWED_HOSTS`) and `X-Forwarded-Proto`; for a proxy on another machine, uvicorn also needs
+`FORWARDED_ALLOW_IPS` set to its address. Requests through a proxy count as coming from another
+computer, so the ChatGPT sign-in can't be used that way: open the server's own address on its
+computer for that, or use an API key.
 
 ## Not yet
 

@@ -45,3 +45,19 @@ def test_an_older_specification_is_upgraded():
     assert spec.statistics_needed[0].purpose == "Mean and SD of PHQ-9 per arm" and spec.statistics_needed[0].outcome == "PHQ-9"
     assert spec.search_terms[0].terms == ["mindfulness", "PHQ-9"]
     assert upgrade_spec(spec.model_dump()) == spec.model_dump()  # a current one is left as it is
+
+
+def test_usage_since_a_search_started_keeps_the_reading_of_the_problem(tmp_path, monkeypatch):
+    store = Store(tmp_path / "test.sqlite3")
+    project_id = store.create_project("A search run twice, on two providers.")
+    tokens = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    for at, step, model in (("2026-01-01T00:00:00+00:00", "spec", "claude-opus-5-5"),
+                            ("2026-01-01T00:01:00+00:00", "screen", "claude-haiku-5-5"),
+                            ("2026-01-02T00:01:00+00:00", "screen", "gpt-6-luna")):
+        monkeypatch.setattr("esf.store.now", lambda at=at: at)
+        store.add_usage(project_id, step, model, tokens)
+    assert {(u["step"], u["model"]) for u in store.usage(project_id)} == {
+        ("spec", "claude-opus-5-5"), ("screen", "claude-haiku-5-5"), ("screen", "gpt-6-luna")}
+    # The second search started on the 2nd: the first one's workers did none of its work.
+    assert [(u["step"], u["model"], u["calls"]) for u in store.usage(project_id, since="2026-01-02T00:00:00+00:00")] == [
+        ("spec", "claude-opus-5-5", 1), ("screen", "gpt-6-luna", 1)]

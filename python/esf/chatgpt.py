@@ -640,7 +640,10 @@ class ChatGPTSession:
         """Renew the tokens. Called with _refresh_lock held."""
         with self._lock:
             tokens, rotation, client_id, subject = self._tokens, self._rotation, self._client_id, self._subject
-        assert tokens is not None and client_id is not None
+        if tokens is None:
+            raise ChatGPTError("signed_out", "Sign in with ChatGPT first.")
+        if client_id is None:  # the registration was rejected while these tokens were held
+            raise self._sign_in_again(ChatGPTError("registration_rejected", REGISTRATION_REJECTED))
         if rotation is None:
             sent = self._clock()
             try:
@@ -680,7 +683,11 @@ class ChatGPTSession:
             if exc.retryable:
                 raise self._note(exc)  # the rotation is kept, and verified on the next call
             raise self._sign_in_again(exc) from None
-        return self._install(rotation.tokens, claims)
+        token = self._install(rotation.tokens, claims)
+        if rotation.tokens.expires_at - self._clock() <= REFRESH_MARGIN:
+            # The outage outlasted the access token too: renew it with the rotation's refresh token.
+            return self._refresh()
+        return token
 
     def _install(self, tokens: _Tokens, claims: dict | None) -> str:
         with self._lock:
@@ -696,6 +703,10 @@ class ChatGPTSession:
         """Forget a registration ChatGPT rejects for good, so the next sign-in registers the app again."""
         with self._lock:
             self._client_id = None
+            # Tokens held from before were issued to the rejected registration, so they go too.
+            if self._tokens is not None or self._rotation is not None:
+                self._tokens = self._rotation = None
+                self._status = "reauth_required"
             try:
                 self._save()
             except ChatGPTError:

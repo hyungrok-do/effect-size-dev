@@ -342,6 +342,8 @@ def describe_error(exc: BaseException) -> str:
         return "This Anthropic API key may not use the model. Check the key's workspace and model access."
     if isinstance(exc, anthropic.RateLimitError):
         return "The Anthropic API rate limit was reached. Wait a minute and try again."
+    if isinstance(exc, anthropic.APIStatusError) and (exc.status_code == 402 or "credit balance" in str(exc).lower()):
+        return "The Anthropic account has run out of credit. Add credit under Plans & Billing in the Anthropic Console."
     return str(exc)
 
 

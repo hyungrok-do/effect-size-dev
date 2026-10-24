@@ -6,7 +6,7 @@ import { Activity, liveTasks, short } from './lib/activity.js';
 import { Claude, MODELS } from './lib/claude.js';
 import { OPENAI_MODELS, OpenAI } from './lib/openai.js';
 import {
-  keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS as PROVIDER_INFO, ROLE_INFO, roleNames, roleOf, whoDid,
+  keyKind, keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS as PROVIDER_INFO, ROLE_INFO, roleNames, roleOf, whoDid,
 } from './lib/providers.js';
 import { csvOf, download, exportRows, LOG_COLUMNS, logRows, PAPER, toCsv } from './lib/export.js';
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
@@ -67,15 +67,24 @@ function chosenModels(name = state.provider) {
   return Object.fromEntries(chosen.roles.map((role) => [role, MODEL_CHOICES[name].includes(saved[role]) ? saved[role] : chosen.defaults[role]]));
 }
 const names = () => roleNames(chosenModels());
+// The model that did a step of the open search (the last that served it), for the lines about past
+// work: who read the problem, who wrote the summary. The chosen manager when no model has yet.
+function didBy(step) {
+  const rows = (state.id ? state.runUsage : []).filter((u) => u.step === step && u.model);
+  return rows.length ? modelLabel(rows.at(-1).model) : names().manager;
+}
 const client = () => provider().client(apiKey(), chosenModels());
 const ROLE_ORDER = ['manager', 'fetcher', 'worker', 'code'];
+// The roles' names for a job running in this tab: the models it started with, whatever is chosen since.
+const jobNames = (key) => jobs.get(key) || names();
 
-// The roles' names for the open search: the models that served each role in it (its usage), so past
-// work is credited to the models that did it; the chosen provider's for roles it has not used yet.
+// The roles' names for the open search: the models that served each role in it (the usage since it
+// last started, and reading the problem), so past work is credited to the models that did it; the
+// chosen provider's for roles it has not used yet.
 function searchNames() {
   const n = { ...names() };
   const seen = {};
-  for (const u of state.id ? state.usage : []) {
+  for (const u of state.id ? state.runUsage : []) {
     const role = STEP_AGENT[u.step];
     if (role && u.model) (seen[role] ||= new Set()).add(modelLabel(u.model));
   }
@@ -99,9 +108,9 @@ const NCBI_KEY = 'esf-ncbi-api-key';
 const $ = (selector) => document.querySelector(selector);
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const store = new Store();
-const jobs = new Set(); // projects and papers with work running in this tab
+const jobs = new Map(); // projects and papers with work running in this tab -> the roles' names when it started
 const state = {
-  provider: 'anthropic', agentsOpen: false, id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
+  provider: 'anthropic', agentsOpen: false, id: null, project: null, papers: [], decisions: {}, usage: [], runUsage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
   uploadFor: null, step: 'setup', stepChosen: false, source: 'papers', filter: 'all', timelineAll: false,
   available: { setup: true, problem: true, spec: false, progress: false, review: false, summary: false },
   reviewAt: {}, // `${source}:${tab}` -> the paper id shown there
@@ -163,6 +172,7 @@ function loadSettings() {
   loadKey();
   $('#contact-email').value = readSetting(EMAIL);
   $('#ncbi-key').value = readSetting(NCBI_KEY);
+  showNcbiStatus();
 }
 
 // The chosen provider's key, from this tab or (if remembered) this browser.
@@ -181,23 +191,32 @@ function loadKey() {
 
 const apiKey = () => $('#api-key').value.trim();
 
+// A key that is surely another (keyProblem) is not kept under this provider: it stays in the box only.
 function saveKey() {
   const key = apiKey();
   const { storage: name } = provider();
   try {
     storage('local')?.removeItem(name);
     storage('session')?.removeItem(name);
-    if (key) storage($('#remember-key').checked ? 'local' : 'session')?.setItem(name, key);
+    if (key && !keyProblem(state.provider, key)?.wrong) storage($('#remember-key').checked ? 'local' : 'session')?.setItem(name, key);
   } catch { /* storage unavailable */ }
   showKeyStatus();
   showProvider();
 }
 
+// A key pasted under the other provider (keyProblem tells the person to choose it) moves with them.
 function chooseProvider(name) {
   if (!PROVIDERS[name] || name === state.provider) return;
+  const pasted = apiKey();
+  const remember = $('#remember-key').checked;
   state.provider = name;
   writeSetting(PROVIDER, name);
   loadKey();
+  if (keyKind(pasted) === name && !apiKey()) {
+    $('#api-key').value = pasted;
+    $('#remember-key').checked = remember;
+    saveKey();
+  }
   showKeyStatus();
   namesChanged();
 }
@@ -206,6 +225,8 @@ function chooseModel(role, model) {
   writeSetting(modelsSetting(state.provider), JSON.stringify({ ...chosenModels(), [role]: model }));
   showProvider();
   namesChanged();
+  // The roles list was redrawn: the new select takes the focus back, so arrow keys keep working.
+  $(`#model-${role}`)?.focus({ preventScroll: true });
 }
 
 // The parts of an open search that name the models.
@@ -230,6 +251,7 @@ function showProvider() {
   for (const el of document.querySelectorAll('[data-name]')) {
     el.textContent = el.dataset.name === 'vendor' ? chosen.vendor : n[el.dataset.name] || el.textContent;
   }
+  showDoers();
   const line = [`${n.manager} plans and reviews`, n.fetcher && `${n.fetcher} fetches`, `${n.worker} screens and reads`].filter(Boolean);
   $('#models').textContent = line.join(' · ');
   $('#agents-summary').replaceChildren(h('strong', {}, `${chosen.label}: `), `${line.join(', ')}.`,
@@ -258,6 +280,11 @@ function showAgentsPage() {
     }, MODEL_CHOICES[state.provider].map((model) => h('option', { value: model, selected: model === models[key] || null }, modelLabel(model)))))));
 }
 
+// The lines about the open search's past work name the model that did it (didBy).
+function showDoers() {
+  for (const el of document.querySelectorAll('[data-did]')) el.textContent = didBy(el.dataset.did);
+}
+
 function setAgentsOpen(open) {
   state.agentsOpen = open;
   $('#agents-page').hidden = !open;
@@ -267,6 +294,8 @@ function setAgentsOpen(open) {
   if (open) {
     showAgentsPage();
     window.scrollTo(0, 0);
+  } else {
+    $('#agents-toggle').focus({ preventScroll: true });
   }
 }
 
@@ -329,16 +358,28 @@ function haveKey() {
   return false;
 }
 
+// The NCBI key, never a model key pasted in its box: that would go to NCBI in every PubMed URL.
+function ncbiKey() {
+  const key = $('#ncbi-key').value.trim();
+  return keyKind(key) === 'anthropic' || keyKind(key) === 'openai' ? '' : key;
+}
+
+function showNcbiStatus() {
+  const kind = keyKind($('#ncbi-key').value.trim());
+  const other = PROVIDER_INFO[kind];
+  showError($('#ncbi-status'), other ? `This is an ${other.keyName}, not an NCBI API key: it is not sent to NCBI or kept. Paste it on the Agents page.` : '');
+}
+
 // A pipeline wired to the settings as they are when a job starts.
 // The literature sources alone, for work that needs no model (an older record's authors).
-const literature = () => new Sources({ email: $('#contact-email').value.trim(), ncbiApiKey: $('#ncbi-key').value.trim() });
+const literature = () => new Sources({ email: $('#contact-email').value.trim(), ncbiApiKey: ncbiKey() });
 
 function pipeline(projectId) {
   const llm = client();
   const activity = new Activity(store, projectId);
   const sources = new Sources({
     email: $('#contact-email').value.trim(),
-    ncbiApiKey: $('#ncbi-key').value.trim(),
+    ncbiApiKey: ncbiKey(),
     // Only Claude can download what the browser may not; without it such a PDF waits for an upload.
     proxy: llm.canFetch ? (url) => activity.track(
       { agent: 'fetcher', step: 'fetch', text: `Fetching ${short(url.replace(/^https?:\/\//, ''), 70)} for the browser` },
@@ -353,7 +394,7 @@ function pipeline(projectId) {
 // moves on to the next step (the redraws are throttled, so watching statuses could miss a quick job).
 async function startJob(key, work, then = null) {
   if (jobs.has(key)) return;
-  jobs.add(key);
+  jobs.set(key, names());
   try {
     await work();
   } finally {
@@ -390,7 +431,7 @@ async function loadProjects() {
 
 function newSearch() {
   Object.assign(state, {
-    id: null, project: null, papers: [], decisions: {}, usage: [], events: [], specKey: '', papersKey: '',
+    id: null, project: null, papers: [], decisions: {}, usage: [], runUsage: [], events: [], specKey: '', papersKey: '',
     step: apiKey() ? 'problem' : 'setup', stepChosen: false,
     available: { setup: true, problem: true, spec: false, progress: false, review: false, summary: false },
   });
@@ -403,6 +444,7 @@ function newSearch() {
   $('#delete-project').hidden = true;
   $('#read-status').textContent = '';
   showError($('#problem-error'), '');
+  showDoers();
   renderTabs();
   renderActivity();
   loadProjects();
@@ -411,7 +453,7 @@ function newSearch() {
 
 async function openProject(id) {
   Object.assign(state, {
-    id, project: null, papers: [], decisions: {}, usage: [], events: [], specKey: '', papersKey: '',
+    id, project: null, papers: [], decisions: {}, usage: [], runUsage: [], events: [], specKey: '', papersKey: '',
     stepChosen: false,
   });
   history.replaceState(null, '', `#${id}`);
@@ -456,8 +498,10 @@ async function refresh() {
       state.papers = await store.papers(id);
       state.decisions = await store.decisions(id);
       state.usage = await store.usage(id);
+      state.runUsage = await store.usage(id, project.run_started_at);
       state.events = (await store.events(id)).map((e) => ({ ...e, agent: roleOf(e.agent) }));
       renderProblem(project);
+      showDoers();
       renderSpec(project);
       renderProgress(project);
       state.available.review = state.papers.length > 0;
@@ -708,7 +752,7 @@ function renderProblem(project) {
   paragraph.readOnly = true;
   $('#read').hidden = true;
   $('#delete-project').hidden = jobs.has(project.id);
-  $('#read-status').textContent = project.status === 'reading' ? `${names().manager} is reading the problem…` : '';
+  $('#read-status').textContent = project.status === 'reading' ? `${jobNames(project.id).manager} is reading the problem…` : '';
   showError($('#problem-error'), !project.spec && project.error ? project.error : '');
   if (!project.spec && project.status === 'interrupted') {
     $('#read').hidden = false;
@@ -958,7 +1002,7 @@ function renderSummary(project) {
   const running = summary?.status === 'running' || jobs.has(`summary-${project.id}`);
   $('#summarize').disabled = running || jobs.has(project.id);
   $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
-  $('#summarize-status').textContent = running ? `${names().manager} is checking for overlap and writing the summary…`
+  $('#summarize-status').textContent = running ? `${jobNames(`summary-${project.id}`).manager} is checking for overlap and writing the summary…`
     : jobs.has(project.id) ? 'Wait until the search finishes.' : '';
   showError($('#summary-error'), summary?.status === 'error' ? summary.error
     : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
@@ -1185,7 +1229,8 @@ async function start() {
   $('#forget-key').addEventListener('click', forgetKey);
   $('#check-key').addEventListener('click', checkKey);
   $('#contact-email').addEventListener('change', (e) => writeSetting(EMAIL, e.target.value.trim()));
-  $('#ncbi-key').addEventListener('change', (e) => writeSetting(NCBI_KEY, e.target.value.trim()));
+  $('#ncbi-key').addEventListener('input', showNcbiStatus);
+  $('#ncbi-key').addEventListener('change', () => writeSetting(NCBI_KEY, ncbiKey()));
   $('#upload').addEventListener('change', uploaded);
   $('#export-included').addEventListener('click', () => exportCsv(true));
   $('#export-all').addEventListener('click', () => exportCsv(false));
@@ -1194,7 +1239,8 @@ async function start() {
   $('#export-log-csv').addEventListener('click', () => exportLog('csv'));
   $('#export-log-json').addEventListener('click', () => exportLog('json'));
   $('#timeline-all').addEventListener('click', () => { state.timelineAll = !state.timelineAll; renderActivity(); });
-  document.addEventListener('keydown', reviewKeys);
+  // The review's arrow keys, while the review is on the page (the Agents page hides it).
+  document.addEventListener('keydown', (event) => { if (!state.agentsOpen) reviewKeys(event); });
   for (const step of STEPS) {
     $(`#tab-${step}`).addEventListener('click', () => selectStep(step));
     $(`#tab-${step}`).addEventListener('keydown', tabKeys);

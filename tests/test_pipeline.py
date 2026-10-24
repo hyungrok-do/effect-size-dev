@@ -1,8 +1,9 @@
+import anthropic
 import httpx
 
 from esf.config import Settings
 from esf.pipeline import Pipeline
-from esf.schemas import SearchLevel
+from esf.schemas import SearchLevel, SearchSpec, upgrade_spec
 from esf.server import export_rows
 from esf.sources import Sources
 from esf.store import Store
@@ -323,3 +324,59 @@ def test_a_restart_keeps_the_summary_that_was_being_rewritten(tmp_path):
     kept = store.project(project_id)["summary"]
     assert kept["status"] == "done" and kept["result"] == done["result"] and "restarted" in kept["last_error"]
     assert isinstance(store, Store)
+
+
+def out_of_credit() -> anthropic.BadRequestError:
+    """What the Anthropic API answers once the account has no credit left."""
+    message = "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."
+    body = {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+    response = httpx.Response(400, json=body, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    return anthropic.BadRequestError(message, response=response, body=body)
+
+
+def test_an_account_out_of_credit_stops_the_run_and_the_papers_wait(tmp_path):
+    pipeline, store, llm = make_pipeline(tmp_path, worker_concurrency=1)
+    extract = llm.extract
+
+    def until_the_credit_runs_out(spec, document, sink=None):
+        if llm.calls.count("extract") >= 2:
+            llm.calls.append("extract")
+            raise out_of_credit()
+        return extract(spec, document, sink)
+
+    llm.extract = until_the_credit_runs_out
+    project_id = store.create_project("We plan a randomized trial of a mindfulness app versus waitlist for PHQ-9 at 12 weeks.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    project = store.project(project_id)
+    assert project["status"] == "error" and "run out of credit" in project["error"]
+    assert llm.calls.count("extract") == 3  # one refused call, then no more
+    papers = store.papers(project_id)
+    assert [p["status"] for p in papers].count("extracted") == 2 and "error" not in [p["status"] for p in papers]
+    # The paper the refusal came on waits with the others, saying why; Extract takes it up once there is credit.
+    refused = next(p for p in papers if p["error"])
+    assert refused["status"] == "screened_in" and refused["error"].startswith("Not extracted: The Anthropic account has run out of credit")
+    llm.extract = extract
+    spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
+    pipeline.extract_paper(project_id, spec, refused["id"])
+    assert store.paper(refused["id"])["status"] == "extracted"
+
+
+def test_a_stopping_error_in_the_review_keeps_the_workers_extraction(tmp_path):
+    pipeline, store, llm = make_pipeline(tmp_path, worker_concurrency=1)
+
+    def refused(*args, **kwargs):
+        llm.calls.append("adjudicate")
+        raise out_of_credit()
+
+    llm.adjudicate = refused
+    project_id = store.create_project("We plan a randomized trial of a mindfulness app versus waitlist for PHQ-9 at 12 weeks.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    project = store.project(project_id)
+    assert project["status"] == "error" and "run out of credit" in project["error"]
+    pilot = next(p for p in store.papers(project_id) if p["ext_id"] == "44444444")
+    # The worker's extraction stands, flagged, with the reason the manager did not review it.
+    assert pilot["status"] == "extracted" and pilot["extracted_by"] == "worker"
+    assert any(r.startswith("manager review failed: The Anthropic account has run out of credit") for r in pilot["escalation"]["reasons"])
+    assert llm.calls.count("adjudicate") == 1

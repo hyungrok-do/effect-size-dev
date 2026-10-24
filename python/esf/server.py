@@ -82,14 +82,24 @@ class ModelChoice(BaseModel):
     worker_model: str = Field(min_length=1, max_length=200)
 
 
+# Headers a reverse proxy adds; behind one, every visitor reaches the server from 127.0.0.1.
+FORWARDING_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host", "x-forwarded-proto")
+LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1"}
+
+
 def _remote(request: Request) -> bool:
     """Whether the page was opened from another computer: ChatGPT sends the browser back to
-    127.0.0.1, which there is that computer, not this server."""
-    host = request.client.host if request.client else ""
+    127.0.0.1, which there is that computer, not this server. A request through a proxy, or to a name
+    other than this computer's own, counts as remote."""
+    peer = request.client.host if request.client else ""
     try:
-        return not ipaddress.ip_address(host).is_loopback
+        if not ipaddress.ip_address(peer).is_loopback:
+            return True
     except ValueError:
         return False  # not an address (the test client); nothing to say it is remote
+    if any(header in request.headers for header in FORWARDING_HEADERS):
+        return True
+    return _host_name(request.headers.get("host", "")) not in LOOPBACK_NAMES
 
 
 def _loopback_only(request: Request) -> None:
@@ -104,6 +114,20 @@ def _host_name(host: str) -> str:
     if host.startswith("["):
         return host[1:host.index("]")] if "]" in host else host
     return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+def _own_page(request: Request, host: str, allowed_hosts: set[str]) -> bool:
+    """Whether a request that changes something comes from the server's own page. The browser's
+    Sec-Fetch-Site says so against the address the person sees, so it holds behind a proxy too; without
+    it, the Origin's host must be the Host the request came to (or a name in ESF_ALLOWED_HOSTS)."""
+    site = request.headers.get("sec-fetch-site")
+    if site is not None:
+        return site in ("same-origin", "none")
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True  # not a browser's cross-site request: those carry an Origin
+    origin_host = origin.split("://", 1)[-1].lower()
+    return origin_host == host.lower() or _host_name(origin_host) in allowed_hosts - {"localhost"}
 
 
 def _is_address(name: str) -> bool:
@@ -316,13 +340,13 @@ def create_app(
         name = _host_name(host)
         if not (name in allowed_hosts or _is_address(name)):
             return JSONResponse({"detail": "This server answers only to its address or localhost; ESF_ALLOWED_HOSTS lists other names."}, status_code=403)
-        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-            origin = request.headers.get("origin")
-            if request.headers.get("sec-fetch-site") in ("cross-site", "same-site") or (
-                origin is not None and origin.lower() != f"{request.url.scheme}://{host}".lower()
-            ):
-                return JSONResponse({"detail": "Only this server's own page may make changes."}, status_code=403)
-        return await call_next(request)
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and not _own_page(request, host, allowed_hosts):
+            return JSONResponse({"detail": "Only this server's own page may make changes."}, status_code=403)
+        response = await call_next(request)
+        # Nor may another site frame the page and have the person click in it.
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        return response
 
     @app.exception_handler(ChatGPTError)
     async def chatgpt_failed(request: Request, exc: ChatGPTError) -> JSONResponse:
@@ -444,6 +468,8 @@ def create_app(
         project = get_project(project_id)
         project["counts"] = store.status_counts(project_id)
         project["usage"] = store.usage(project_id)
+        # The models of this search, for naming who did what; usage above also counts earlier searches.
+        project["run_usage"] = store.usage(project_id, since=project.get("run_started_at"))
         project["level_names"] = LEVEL_NAMES
         return project
 

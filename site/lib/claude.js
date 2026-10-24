@@ -30,6 +30,12 @@ function apiDetail(error) {
   return `${error?.status ? `${error.status}: ` : ''}${text}${id ? ` (request ${id})` : ''}`;
 }
 
+// An Anthropic account out of credit answers 400 (or 402) with a billing error.
+export function outOfCredit(error) {
+  const body = error?.error?.error || error?.error;
+  return error?.status === 402 || body?.type === 'billing_error' || /credit balance/i.test(body?.message || '');
+}
+
 export function describeError(error) {
   const message = error?.message || String(error);
   if (error?.name === 'OpenAIError') return message; // openai.js words its own errors
@@ -43,6 +49,7 @@ export function describeError(error) {
     return `Anthropic refused the request (${apiDetail(error)}). Check that the key's workspace may use this model.`;
   }
   if (error?.status === 429) return `The Anthropic API rate limit was reached (${apiDetail(error)}). Wait a minute and try again.`;
+  if (outOfCredit(error)) return `The Anthropic account has run out of credit (${apiDetail(error)}). Add credit under Plans & Billing in the Anthropic Console.`;
   if (error?.status) return `The Anthropic API returned an error (${apiDetail(error)}).`;
   return message;
 }

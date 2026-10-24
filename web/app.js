@@ -2,7 +2,7 @@
 
 import { decisionsBasis } from '/lib/evidence.js';
 import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
-import { keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS, ROLE_INFO, roleNames } from '/lib/providers.js';
+import { keyKind, keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS, ROLE_INFO, roleNames } from '/lib/providers.js';
 import { searchMap } from '/lib/search-map.js';
 import { SpecPanel } from '/lib/spec-panel.js';
 
@@ -81,13 +81,14 @@ function loadKeys() {
   }
 }
 
+// A key that is surely another (keyProblem) is not kept for this provider: it stays in the box only.
 function saveKey(provider) {
   const { storage: name, remember } = KEYS[provider];
   const key = keyOf(provider);
   try {
     storage('local')?.removeItem(name);
     storage('session')?.removeItem(name);
-    if (key) storage($(remember).checked ? 'local' : 'session')?.setItem(name, key);
+    if (key && !keyProblem(provider, key)?.wrong) storage($(remember).checked ? 'local' : 'session')?.setItem(name, key);
   } catch { /* storage unavailable: the key lives only in the field */ }
   showAgents();
 }
@@ -192,19 +193,37 @@ function names() {
   return { ...roleNames({}), manager: planName(models.manager), worker: planName(models.worker) };
 }
 
-// The roles' names for a search: the models that served each role in it (its usage), so past work is
-// credited to the models that did it; the chosen ones for roles it has not used yet.
+// The roles' names for a search: the models that served each role in it (the usage since it last
+// started, and reading the problem), so past work is credited to the models that did it; the chosen
+// ones for roles it has not used yet.
 const STEP_ROLE = { spec: 'manager', search: 'manager', adjudicate: 'manager', overlap: 'manager', summarize: 'manager', screen: 'worker', extract: 'worker' };
+const runUsage = (project) => project?.run_usage || project?.usage || [];
 function searchNames(project) {
   const n = { ...names() };
   const seen = {};
-  for (const u of project?.usage || []) {
+  for (const u of runUsage(project)) {
     const role = STEP_ROLE[u.step];
     if (role && u.model) (seen[role] ||= new Set()).add(planName(u.model));
   }
   for (const [role, labels] of Object.entries(seen)) n[role] = [...labels].join(', ');
   return n;
 }
+
+// The model that did a step of the open search (the last that served it), for the lines about past
+// work: who read the problem, who wrote the summary. The chosen manager when no model has yet.
+function didBy(step) {
+  const rows = runUsage(state.project).filter((u) => u.step === step && u.model);
+  return rows.length ? planName(rows.at(-1).model) : names().manager;
+}
+
+function showDoers() {
+  for (const el of document.querySelectorAll('[data-did]')) el.textContent = didBy(el.dataset.did);
+}
+
+// The roles' names for work this page started on the server: the models it started with, whatever is
+// chosen since (after a reload, the ones chosen now).
+const startedWith = {};
+const jobNames = (key) => startedWith[key] || names();
 
 async function chooseModels() {
   const manager = $('#model-manager').value;
@@ -251,8 +270,18 @@ function showPage() {
   $('#agents-toggle').setAttribute('aria-expanded', String(state.agentsOpen));
 }
 
+// A key pasted in the other key provider's box (keyProblem tells the person to choose it) moves with them.
 function chooseProvider(name) {
+  const previous = state.provider;
   state.provider = PROVIDERS[name] ? name : 'anthropic';
+  if (KEYS[previous] && KEYS[state.provider] && keyKind(keyOf(previous)) === state.provider && !keyOf(state.provider)) {
+    $(KEYS[state.provider].input).value = keyOf(previous);
+    $(KEYS[state.provider].remember).checked = $(KEYS[previous].remember).checked;
+    $(KEYS[previous].input).value = '';
+    $(KEYS[previous].remember).checked = false;
+    saveKey(previous);
+    saveKey(state.provider);
+  }
   try { storage('local')?.setItem(PROVIDER, state.provider); } catch { /* storage unavailable */ }
   showAgents();
   if (state.provider === 'chatgpt' && state.chatgpt?.status === 'connected') loadChatGPT(true);
@@ -289,6 +318,7 @@ function showAgents() {
   for (const el of document.querySelectorAll('[data-name]')) {
     el.textContent = el.dataset.name === 'vendor' ? chosen.vendor : n[el.dataset.name] || el.textContent;
   }
+  showDoers();
   if (state.config.manager_model) {
     $('#models').textContent = `${n.manager} plans and reviews · ${n.worker} screens and reads`
       + (state.config.contact_email_set ? '' : ' · set ESF_CONTACT_EMAIL to fetch open-access PDFs');
@@ -525,6 +555,7 @@ async function refresh() {
   state.papers = hasPapers ? await api(`/api/projects/${id}/papers`) : [];
   if (id !== state.id) return;
   renderProblem(project);
+  showDoers();
   renderSpec(project);
   renderProgress(project);
   if (hasPapers) renderReview();
@@ -550,7 +581,7 @@ function renderProblem(project) {
   paragraph.value = project.paragraph;
   paragraph.readOnly = true;
   $('#read').hidden = true;
-  $('#read-status').textContent = project.status === 'reading' ? `${names().manager} is reading the problem…` : '';
+  $('#read-status').textContent = project.status === 'reading' ? `${jobNames(project.id).manager} is reading the problem…` : '';
   showError($('#problem-error'), !project.spec && project.error ? project.error : '');
 }
 
@@ -563,7 +594,9 @@ async function readProblem() {
   if (!agentsReady()) return;
   $('#read').disabled = true;
   try {
+    const started = names();
     const { id } = await api('/api/projects', { method: 'POST', body: { paragraph: text }, withAgents: true });
+    startedWith[id] = started;
     await openProject(id);
   } catch (error) {
     showError($('#problem-error'), error.message);
@@ -919,7 +952,7 @@ function renderSummary(project) {
   $('#summary').hidden = !state.papers.some((p) => p.status === 'extracted') && !summary;
   $('#summarize').disabled = running || searching;
   $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
-  $('#summarize-status').textContent = running ? `${names().manager} is checking for overlap and writing the summary…`
+  $('#summarize-status').textContent = running ? `${jobNames(`summary-${project.id}`).manager} is checking for overlap and writing the summary…`
     : searching ? 'Wait until the search finishes.' : '';
   showError($('#summary-error'), summary?.status === 'error' ? summary.error
     : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
@@ -939,6 +972,7 @@ async function writeSummary() {
   showError($('#summary-error'), '');
   $('#summarize').disabled = true;
   try {
+    startedWith[`summary-${state.id}`] = names();
     await api(`/api/projects/${state.id}/summary`, { method: 'POST', withAgents: true });
   } catch (error) {
     showError($('#summary-error'), error.message);
@@ -956,6 +990,9 @@ async function start() {
   $('#summarize').addEventListener('click', writeSummary);
   // The review's arrow keys, only while the review is on screen.
   document.addEventListener('keydown', (event) => { if (!state.agentsOpen) reviewKeys(event); });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.agentsOpen && !document.querySelector('dialog[open]')) closeAgents();
+  });
   $('#agents-toggle').addEventListener('click', () => (state.agentsOpen ? closeAgents() : openAgents()));
   $('#agents-back').addEventListener('click', closeAgents);
   $('#agents-done').addEventListener('click', closeAgents);
@@ -988,8 +1025,9 @@ async function start() {
   }
   showAgents();
   await loadChatGPT();
-  // The page opens on the Agents page until the chosen provider can run the agents.
-  if (notReady()) openAgents();
+  // The page opens on the Agents page until the chosen provider can run the agents; a link to a search
+  // opens the search (the Agents button says what is missing).
+  if (notReady() && !location.hash.slice(1)) openAgents();
   // The plan's models, asked of OpenAI, need not hold up the page.
   if (state.provider === 'chatgpt' && state.chatgpt.status === 'connected') loadChatGPT(true);
   await loadProjects();

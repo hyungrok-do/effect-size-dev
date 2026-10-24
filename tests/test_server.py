@@ -218,6 +218,15 @@ def test_only_the_servers_own_pages_may_reach_it(tmp_path):
         response = client.post("/api/chatgpt/sign-out", headers=headers)
         assert response.status_code == 403 and response.json()["detail"] == "Only this server's own page may make changes.", headers
     assert client.post("/api/chatgpt/sign-out", headers={"Origin": BASE, "Sec-Fetch-Site": "same-origin"}).status_code == 200
+    # Behind a proxy the page's Origin is the proxy's name: the browser's Sec-Fetch-Site still says it is the same page.
+    assert client.post("/api/chatgpt/sign-out", headers={"Origin": "https://esf.example.org", "Sec-Fetch-Site": "same-origin"}).status_code == 200
+    # Without Sec-Fetch-Site, the Origin must be the Host the request came to.
+    assert client.post("/api/chatgpt/sign-out", headers={"Host": "localhost:8000", "Origin": "http://localhost:8000"}).status_code == 200
+    assert client.post("/api/chatgpt/sign-out", headers={"Host": "127.0.0.1:8000", "Origin": "http://localhost:8000"}).status_code == 403
+    # No other site may frame the page and have the person click in it.
+    for path in ("/", "/api/config"):
+        response = client.get(path)
+        assert response.headers["x-frame-options"] == "DENY" and response.headers["content-security-policy"] == "frame-ancestors 'none'", path
     # ChatGPT sends the browser back to the callback from its own site: reading stays open.
     assert client.get("/auth/callback?code=abc&state=forged", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 400
     # A name of its own, when the server is told to answer to it.
@@ -239,6 +248,14 @@ def test_the_chatgpt_sign_in_is_only_for_this_computer(tmp_path):
     response = remote.post("/api/projects", json={"paragraph": PARAGRAPH}, headers={"X-Model-Provider": "chatgpt"})
     assert response.status_code == 403 and response.json()["detail"] == "Your ChatGPT plan can be used only from the computer that runs the server."
     assert session.state()["status"] == "connected" and session.state()["manager_model"] == "gpt-6.1-sol" and plans == []
+    # Behind a proxy every visitor comes from 127.0.0.1: a forwarded request, or one to another name, is remote too.
+    proxied = TestClient(local.app, base_url=BASE, client=("127.0.0.1", 50000))
+    assert proxied.get("/api/chatgpt").json()["remote"] is False
+    for headers in ({"X-Forwarded-For": "203.0.113.9"}, {"Forwarded": "for=203.0.113.9"}, {"X-Real-IP": "203.0.113.9"},
+                    {"Host": "192.168.1.20:8000"}):
+        assert proxied.get("/api/chatgpt", headers=headers).json() == {"status": "connected", "remote": True}, headers
+        assert proxied.post("/api/chatgpt/sign-out", headers=headers).status_code == 403, headers
+    assert session.state()["status"] == "connected"
 
     # This computer sees who is signed in and runs jobs on the plan.
     state = local.get("/api/chatgpt").json()

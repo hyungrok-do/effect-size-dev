@@ -913,6 +913,26 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     context.close()
 
 
+def test_a_key_pasted_under_the_other_provider_moves_with_the_person(browser, site_url):
+    context = browser.new_context()
+    context.route("**/*", Network())
+    page = context.new_page()
+    page.goto(site_url)
+    assert page.is_visible("#agents-page")
+    page.check("input[name='provider'][value='openai']")
+    page.fill("#api-key", KEY)
+    assert "choose Claude API to use it" in page.inner_text("#key-status")
+    kept = "() => [sessionStorage.getItem('esf-openai-api-key'), sessionStorage.getItem('esf-anthropic-api-key')]"
+    assert page.evaluate(kept) == [None, None]  # never kept as an OpenAI key
+    # Following the advice carries it over.
+    page.check("input[name='provider'][value='anthropic']")
+    assert page.input_value("#api-key") == KEY and page.evaluate(kept) == [None, KEY]
+    assert page.get_attribute("#agents-toggle", "data-missing") == "false"
+    page.check("input[name='provider'][value='openai']")
+    assert page.input_value("#api-key") == ""
+    context.close()
+
+
 def test_the_page_runs_on_openai_models(browser, site_url):
     """With OpenAI chosen in Setup, every step runs on OpenAI's Responses API with the user's key, the
     page names the OpenAI models, and nothing is fetched through a model (OpenAI has no web fetch)."""
@@ -945,16 +965,24 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     page.check("input[name='provider'][value='anthropic']")
     assert page.input_value("#api-key") == KEY and page.inner_text("#models").startswith("Opus 5.5 plans")
     # Each provider keeps its own choice of models.
+    page.focus("#model-worker")
     page.select_option("#model-worker", "claude-sonnet-5-5")
     assert page.inner_text("#models") == "Opus 5.5 plans and reviews · Sonnet 5.5 fetches · Sonnet 5.5 screens and reads"
+    assert page.evaluate("document.activeElement.id") == "model-worker"  # the redrawn list keeps the focus
     assert "Opus 5.5 · Sonnet 5.5 · Sonnet 5.5" in page.inner_text(".provider-card[data-provider='anthropic']")
     page.check("input[name='provider'][value='openai']")
     assert page.input_value("#api-key") == OPENAI_KEY and page.input_value("#model-worker") == "gpt-6-luna"
     page.click("#agents-done")
     assert page.is_hidden("#agents-page") and page.is_visible(".layout")
+    assert page.evaluate("document.activeElement.id") == "agents-toggle"
 
     page.fill("#contact-email", "test@example.com")
     page.dispatch_event("#contact-email", "change")
+    # A model key pasted in the NCBI box is neither kept nor sent to NCBI.
+    page.fill("#ncbi-key", KEY)
+    page.dispatch_event("#ncbi-key", "change")
+    assert page.inner_text("#ncbi-status").startswith("This is an Anthropic API key, not an NCBI API key: it is not sent to NCBI")
+    assert page.evaluate("localStorage.getItem('esf-ncbi-api-key')") is None
     page.click("#setup-done")
     page.fill("#paragraph", "We propose a two-arm randomized trial of a 12-week mindfulness app versus waitlist for PHQ-9 in students.")
     page.click("#read")
@@ -972,7 +1000,9 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     pdf_paper.locator(".paper-details summary").click()
     assert "The open-access PDF could not be downloaded (example.org doesn't accept requests from web pages)" in pdf_paper.inner_text()
     assert open_paper(page, "Mindfulness groups and depressive").locator(".badge", has_text="Reviewed by GPT-6.1 Sol").count() == 1
-    assert open_paper(page, "A mindfulness app for depressive").locator(".badge", has_text="Extracted by GPT-6 Luna").count() == 1
+    app = open_paper(page, "A mindfulness app for depressive")
+    audited = "random audit" in app.text_content()  # one clean extraction in ten goes to the manager anyway
+    assert app.locator(".badge", has_text="Reviewed by GPT-6.1 Sol" if audited else "Extracted by GPT-6 Luna").count() == 1
     names = [" ".join(x.split()) for x in page.locator("#agents .agent h3").all_inner_texts()]
     assert names == ["GPT-6.1 Sol manager", "GPT-6 Luna workers", "Code search and checks"], names
     assert "GPT-6.1 Sol" in page.locator("#timeline li .who").all_inner_texts()
@@ -985,6 +1015,8 @@ def test_the_page_runs_on_openai_models(browser, site_url):
 
     calls = network.openai_calls
     assert calls and all(h["authorization"] == f"Bearer {OPENAI_KEY}" for h, _ in calls)
+    pubmed = [str(r.url) for r in network.literature.requests if r.url.host == "eutils.ncbi.nlm.nih.gov"]
+    assert pubmed and not any("api_key" in url or KEY in url for url in pubmed)
     steps = {}
     for _, body in calls:
         assert body["store"] is False and body["stream"] is True and "max_output_tokens" not in body and "temperature" not in body
@@ -1031,6 +1063,7 @@ def test_a_search_saved_before_openai_keeps_its_credits(browser, site_url):
           search_plan: { levels: [{ level: 'primary', query: 'q', why: '' }], clinicaltrials_queries: [], extra_ids: [] } });
         for (const { id: _, ...paper } of papers) await store.addPaper(id, paper);
         const usage = { input_tokens: 10, output_tokens: 5 };
+        await store.addUsage(id, 'spec', 'claude-opus-5-5', usage);
         await store.addUsage(id, 'search', 'claude-opus-5-5', usage);
         await store.addUsage(id, 'fetch', 'claude-sonnet-5-5', usage);
         await store.addUsage(id, 'extract', 'claude-haiku-5-5', usage);
@@ -1053,6 +1086,13 @@ def test_a_search_saved_before_openai_keeps_its_credits(browser, site_url):
     extracted = open_paper(page, "Trial 2")
     extracted.locator(".paper-details summary").click()
     assert extracted.locator(".badge", has_text="Extracted by Haiku 5.5").count() == 1
+    # The review's arrow keys do nothing while the Agents page covers it; Escape closes it and gives the focus back.
+    page.click("#agents-toggle")
+    page.evaluate("document.activeElement.blur()")
+    page.keyboard.press("ArrowLeft")
+    page.keyboard.press("Escape")
+    assert page.is_hidden("#agents-page") and page.evaluate("document.activeElement.id") == "agents-toggle"
+    assert "Trial 2" in page.inner_text("#papers .paper h3")
     names = [" ".join(x.split()) for x in page.locator("#agents .agent h3").all_inner_texts()]
     assert names == ["Opus 5.5 manager", "Sonnet 5.5 fetcher", "Haiku 5.5 workers", "Code search and checks"], names
     assert page.locator("#timeline li .who").all_inner_texts() == ["Haiku 5.5", "Sonnet 5.5", "Opus 5.5"]
@@ -1062,6 +1102,21 @@ def test_a_search_saved_before_openai_keeps_its_credits(browser, site_url):
     chips = page.locator("#map-body [data-stage='extract'] .map-agent").all_inner_texts()
     assert chips == ["Code", "Sonnet 5.5", "Haiku 5.5", "Opus 5.5"], chips
     assert "downloaded by Sonnet 5.5" in page.inner_text("#map-body [data-stage='extract']")
+    page.click("#tab-spec")
+    assert page.inner_text("#spec .summary").startswith("How Opus 5.5 read your paragraph")
+    page.click("#tab-summary")
+    assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol describes")  # not written yet: the chosen manager will
+
+    # After Search again (here, one started after every call above), the earlier search's models are not
+    # credited; reading the problem still is.
+    page.evaluate("""async (id) => {
+        const { Store } = await import('/lib/store.js');
+        await new Store().updateProject(id, { run_started_at: '2100-01-01T00:00:00Z' });
+    }""", project_id)
+    page.reload()
+    page.wait_for_selector("#review:not([hidden]) .paper")
+    names = [" ".join(x.split()) for x in page.locator("#agents .agent h3").all_inner_texts()]
+    assert names == ["Opus 5.5 manager", "GPT-6 Luna workers", "Code search and checks"], names
 
     # A dated snapshot is named as its model; a host that failed once is tried again without a fetcher.
     labels = page.evaluate("""async () => {
