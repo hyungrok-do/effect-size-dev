@@ -2,6 +2,7 @@
 
 import { decisionsBasis } from '/lib/evidence.js';
 import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
+import { modelLabel, roleNames } from '/lib/providers.js';
 import { searchMap } from '/lib/search-map.js';
 import { SpecPanel } from '/lib/spec-panel.js';
 
@@ -18,10 +19,12 @@ const TABS = [
 
 const $ = (selector) => document.querySelector(selector);
 const state = {
+  provider: 'anthropic', chatgpt: null, signInTimer: null,
   id: null, project: null, papers: [], tab: 'extracted', timer: null, specKey: '', papersKey: '', config: {},
   reviewAt: {}, // tab -> the paper id shown there
 };
 const KEY_STORAGE = 'esf-anthropic-api-key';
+const PROVIDER = 'esf-provider'; // 'anthropic' (Claude with a key) or 'chatgpt' (OpenAI on the signed-in plan)
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -77,7 +80,7 @@ function forgetKey() {
 const apiKey = () => $('#api-key').value.trim();
 
 function showKeyStatus() {
-  const box = $('.keybox');
+  const box = $('#anthropic-box');
   const status = $('#key-status');
   box.dataset.missing = 'false';
   if (apiKey()) {
@@ -93,17 +96,147 @@ function showKeyStatus() {
 }
 
 function haveKey() {
+  if (state.provider === 'chatgpt') {
+    if (state.chatgpt?.status === 'connected') return true;
+    $('#chatgpt-box').dataset.missing = 'true';
+    $('#chatgpt-status').textContent = state.chatgpt?.status === 'reauth_required'
+      ? 'Your ChatGPT sign-in has expired. Sign in with ChatGPT again first.' : 'Sign in with ChatGPT first.';
+    $('#chatgpt-sign-in').focus();
+    return false;
+  }
   if (apiKey() || state.config.server_has_key) return true;
-  $('.keybox').dataset.missing = 'true';
+  $('#anthropic-box').dataset.missing = 'true';
   $('#key-status').textContent = 'Enter your Anthropic API key first.';
   $('#api-key').focus();
   return false;
 }
 
+// -- the models: Claude with a key, or OpenAI's on a ChatGPT plan ---------------------------
+
+// The names of the roles (see /lib/providers.js) for the chosen models; the plan's own names for its models.
+function names() {
+  if (state.provider === 'chatgpt') {
+    const plan = state.chatgpt || {};
+    const label = (slug) => plan.models?.find((m) => m.slug === slug)?.display_name || modelLabel(slug);
+    return { ...roleNames({}), manager: label(plan.manager_model || state.config.openai_manager_model),
+      worker: label(plan.worker_model || state.config.openai_worker_model) };
+  }
+  return roleNames({ manager: state.config.manager_model, worker: state.config.worker_model });
+}
+
+function showProvider() {
+  const chatgpt = state.provider === 'chatgpt';
+  for (const input of document.querySelectorAll('input[name="provider"]')) input.checked = input.value === state.provider;
+  $('#anthropic-box').hidden = chatgpt;
+  $('#chatgpt-box').hidden = !chatgpt;
+  const n = names();
+  for (const el of document.querySelectorAll('[data-name]')) {
+    el.textContent = el.dataset.name === 'vendor' ? (chatgpt ? 'OpenAI' : 'Anthropic') : n[el.dataset.name] || el.textContent;
+  }
+  if (state.config.manager_model) {
+    $('#models').textContent = `${n.manager} plans and reviews · ${n.worker} screens and reads`
+      + (state.config.contact_email_set ? '' : ' · set ESF_CONTACT_EMAIL to fetch open-access PDFs');
+  }
+  if (chatgpt) showChatGPT();
+}
+
+function chooseProvider(name) {
+  state.provider = name === 'chatgpt' ? 'chatgpt' : 'anthropic';
+  try { storage('local')?.setItem(PROVIDER, state.provider); } catch { /* storage unavailable */ }
+  showProvider();
+  if (state.project) {
+    renderProblem(state.project);
+    renderProgress(state.project);
+    renderSummary(state.project);
+  }
+}
+
+// The sign-in as the server has it: who, the plan's models and the chosen ones. Never a token.
+async function loadChatGPT(refreshModels = false) {
+  try {
+    state.chatgpt = await api(`/api/chatgpt${refreshModels ? '?refresh=true' : ''}`);
+  } catch (error) {
+    state.chatgpt = { status: 'disconnected', error: error.message, models: [] };
+  }
+  showProvider();
+  if (state.chatgpt.status !== 'connecting') stopWaiting();
+}
+
+function stopWaiting() {
+  clearInterval(state.signInTimer);
+  state.signInTimer = null;
+}
+
+function showChatGPT() {
+  const plan = state.chatgpt || { status: 'disconnected', models: [] };
+  const box = $('#chatgpt-box');
+  box.dataset.missing = 'false';
+  const connected = plan.status === 'connected';
+  $('#chatgpt-sign-in').hidden = connected;
+  $('#chatgpt-sign-in').textContent = plan.status === 'reauth_required' ? 'Sign in with ChatGPT again' : 'Sign in with ChatGPT';
+  $('#chatgpt-sign-in').disabled = Boolean(plan.remote);
+  $('#chatgpt-sign-out').hidden = !connected;
+  const who = [plan.name, plan.email && `(${plan.email})`].filter(Boolean).join(' ');
+  $('#chatgpt-status').textContent = plan.remote
+    ? 'Sign in with ChatGPT works only in a browser on the computer that runs the server: ChatGPT sends you back to 127.0.0.1.'
+    : {
+      connected: `Signed in${who ? ` as ${who}` : ''}. The models run on your ChatGPT plan; set this app's share of it in ChatGPT Settings. The sign-in lasts until the server stops.`,
+      connecting: 'Finish signing in on the ChatGPT tab; this page notices when you are done.',
+      reauth_required: 'Your ChatGPT sign-in has expired or was revoked. Sign in again.',
+      disconnected: 'Opens ChatGPT in a new tab. A ChatGPT Plus or Pro plan then runs the models, with no API key; only this server holds the sign-in, in memory.',
+    }[plan.status] || '';
+  if (plan.error) $('#chatgpt-status').textContent += ` ${plan.error}`;
+  const models = plan.models || [];
+  $('#chatgpt-models').hidden = !connected;
+  for (const [id, chosen] of [['#chatgpt-manager', plan.manager_model], ['#chatgpt-worker', plan.worker_model]]) {
+    const listed = models.some((m) => m.slug === chosen) ? models : [{ slug: chosen, display_name: modelLabel(chosen) }, ...models];
+    $(id).replaceChildren(...listed.map((m) => h('option', { value: m.slug, selected: m.slug === chosen || null }, m.display_name)));
+    $(id).disabled = !models.length;
+  }
+}
+
+async function signInWithChatGPT() {
+  // Opened now, while the click still counts, so the browser doesn't block it; pointed at ChatGPT below.
+  const tab = window.open('about:blank', '_blank');
+  try {
+    const { url } = await api('/api/chatgpt/sign-in', { method: 'POST' });
+    if (tab) {
+      tab.opener = null;
+      tab.location.href = url;
+    } else {
+      window.location.href = url;
+    }
+  } catch (error) {
+    tab?.close();
+    $('#chatgpt-status').textContent = error.message;
+    return;
+  }
+  await loadChatGPT();
+  stopWaiting();
+  state.signInTimer = setInterval(() => loadChatGPT(), 1500);
+}
+
+async function chooseModels() {
+  try {
+    state.chatgpt = await api('/api/chatgpt/models', {
+      method: 'PUT', body: { manager_model: $('#chatgpt-manager').value, worker_model: $('#chatgpt-worker').value },
+    });
+  } catch (error) {
+    $('#chatgpt-status').textContent = error.message;
+  }
+  showProvider();
+}
+
+async function signOutOfChatGPT() {
+  state.chatgpt = await api('/api/chatgpt/sign-out', { method: 'POST' });
+  showProvider();
+}
+
 async function api(path, options = {}) {
   const { withKey, ...rest } = options;
   const init = { ...rest, headers: { 'Content-Type': 'application/json' } };
-  if (withKey && apiKey()) init.headers['X-Anthropic-Api-Key'] = apiKey();
+  if (withKey) init.headers['X-Model-Provider'] = state.provider;
+  if (withKey && state.provider === 'anthropic' && apiKey()) init.headers['X-Anthropic-Api-Key'] = apiKey();
   if (init.body !== undefined && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
   const response = await fetch(path, init);
   if (!response.ok) {
@@ -211,7 +344,7 @@ function renderProblem(project) {
   paragraph.value = project.paragraph;
   paragraph.readOnly = true;
   $('#read').hidden = true;
-  $('#read-status').textContent = project.status === 'reading' ? 'Opus is reading the problem…' : '';
+  $('#read-status').textContent = project.status === 'reading' ? `${names().manager} is reading the problem…` : '';
   showError($('#problem-error'), !project.spec && project.error ? project.error : '');
 }
 
@@ -302,7 +435,7 @@ function renderProgress(project) {
   card.hidden = !(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
   if (card.hidden) return;
 
-  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running: RUNNING.has(project.status), fetcher: false }));
+  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running: RUNNING.has(project.status), fetcher: false, names: names() }));
 
   const progress = project.progress || {};
   const bar = $('#progress');
@@ -418,6 +551,9 @@ function showPaper(paperId) {
   $('#papers .paper h3')?.scrollIntoView({ block: 'nearest' });
 }
 
+// The model that made a paper's extraction, or, for one saved without it, the role's current name.
+const extractor = (paper) => (paper.extracted_model ? modelLabel(paper.extracted_model) : names()[paper.extracted_by] || paper.extracted_by);
+
 function badge(text, kind = '') {
   return h('span', { class: `badge ${kind}`.trim() }, text);
 }
@@ -459,11 +595,11 @@ function paperCard(paper, trials) {
     h('div', { class: 'meta' },
       badge({ clinicaltrials: 'ClinicalTrials.gov', pubmed: 'PubMed' }[paper.source] || 'Europe PMC'),
       paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind),
-      paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
-      paper.extracted_by === 'worker' && badge('Extracted by Haiku'),
+      paper.extracted_by === 'manager' && badge(`Reviewed by ${extractor(paper)}`, 'accent'),
+      paper.extracted_by === 'worker' && badge(`Extracted by ${extractor(paper)}`),
       paper.escalation?.audit && badge('Audit sample')),
     extracted && screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
-    reasons.length > 0 && h('p', { class: 'reason' }, `Why Opus reviewed it: ${reasons.join('; ')}`),
+    reasons.length > 0 && h('p', { class: 'reason' }, `Why ${paper.extracted_by === 'manager' ? extractor(paper) : names().manager} reviewed it: ${reasons.join('; ')}`),
     differs && h('p', { class: 'reason' }, `Differs from the plan: ${paper.extraction.mismatch_reasons.join('; ')}`),
     extracted && paper.extraction.notes && h('p', { class: 'reason' }, `Notes: ${paper.extraction.notes}`));
 
@@ -576,7 +712,7 @@ function renderSummary(project) {
   $('#summary').hidden = !state.papers.some((p) => p.status === 'extracted') && !summary;
   $('#summarize').disabled = running || searching;
   $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
-  $('#summarize-status').textContent = running ? 'Opus is checking for overlap and writing the summary…'
+  $('#summarize-status').textContent = running ? `${names().manager} is checking for overlap and writing the summary…`
     : searching ? 'Wait until the search finishes.' : '';
   showError($('#summary-error'), summary?.status === 'error' ? summary.error
     : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
@@ -615,15 +751,27 @@ async function start() {
   $('#forget-key').addEventListener('click', forgetKey);
   $('#summarize').addEventListener('click', writeSummary);
   document.addEventListener('keydown', reviewKeys);
+  for (const input of document.querySelectorAll('input[name="provider"]')) {
+    input.addEventListener('change', () => chooseProvider(input.value));
+  }
+  $('#chatgpt-sign-in').addEventListener('click', signInWithChatGPT);
+  $('#chatgpt-sign-out').addEventListener('click', signOutOfChatGPT);
+  $('#chatgpt-manager').addEventListener('change', chooseModels);
+  $('#chatgpt-worker').addEventListener('change', chooseModels);
+  // Back from the ChatGPT tab: the sign-in may have finished there.
+  window.addEventListener('focus', () => { if (state.provider === 'chatgpt') loadChatGPT(); });
   loadKey();
+  try {
+    state.provider = storage('local')?.getItem(PROVIDER) === 'chatgpt' ? 'chatgpt' : 'anthropic';
+  } catch { /* storage unavailable */ }
   try {
     const config = await api('/api/config');
     state.config = config;
-    $('#models').textContent = `Manager ${config.manager_model} · workers ${config.worker_model}`
-      + (config.contact_email_set ? '' : ' · set ESF_CONTACT_EMAIL to fetch open-access PDFs');
   } catch {
     $('#models').textContent = 'The server is not responding.';
   }
+  showProvider();
+  await loadChatGPT(true);
   showKeyStatus();
   await loadProjects();
   const id = location.hash.slice(1);

@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS papers (
     fulltext_url TEXT,
     extraction TEXT,
     extracted_by TEXT,
+    extracted_model TEXT,
     verification TEXT,
     escalation TEXT,
     error TEXT,
@@ -133,6 +134,7 @@ class Store:
             for table, column in (
                 ("projects", "search_log"), ("projects", "overlap"), ("projects", "summary"),
                 ("papers", "found_in"), ("papers", "authors"), ("papers", "cited_by"), ("papers", "author_list"),
+                ("papers", "extracted_model"),
             ):
                 if column not in {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}:
                     self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")

@@ -203,7 +203,7 @@ const PARTS = {
   screening: {
     title: 'Screening rules',
     folded: true,
-    hint: 'How Haiku decides which titles and abstracts to keep.',
+    hint: 'How the workers decide which titles and abstracts to keep.',
     count: (spec) => `${spec.inclusion_criteria.length} to include · ${spec.exclusion_criteria.length} to exclude`,
     view: (spec, panel) => {
       // One table of both lists; a rule moves between them when its first column changes.
@@ -225,7 +225,7 @@ const PARTS = {
   terms: {
     title: 'Search terms',
     folded: true,
-    hint: 'Synonyms, MeSH headings and instrument names, by concept, separated by commas. Opus builds the search from these.',
+    hint: 'Synonyms, MeSH headings and instrument names, by concept, separated by commas. The manager builds the search from these.',
     count: (spec) => `${spec.search_terms.reduce((n, g) => n + g.terms.length, 0)} in ${spec.search_terms.length} groups`,
     view: (spec, panel) => panel.rows('terms', spec.search_terms, [
       { key: 'concept', ...choice('Concept', CONCEPTS, { show: (v) => h('strong', {}, CONCEPTS[v] || v) }) },

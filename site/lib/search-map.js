@@ -3,6 +3,7 @@
 // and its records as stored, so it fills in as the search runs. Styles are in search-map.css.
 
 import { LEVEL_NAMES, LEVELS } from './generated.js';
+import { roleOf } from './providers.js';
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -22,21 +23,23 @@ const number = (n) => Number(n).toLocaleString('en-US');
 const plural = (n, one, many = `${one}s`) => `${number(n)} ${n === 1 ? one : many}`;
 const short = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
 
-const AGENT_LABELS = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', code: 'Code' };
+// The roles' names when the page gives none (see providers.js for the roles).
+const ROLE_NAMES = { manager: 'Manager', fetcher: 'Fetcher', worker: 'Workers', code: 'Code' };
 const SOURCE_NAMES = { pubmed: 'PubMed', europepmc: 'Europe PMC', clinicaltrials: 'ClinicalTrials.gov' };
 
 // The stages in the order the search runs them, and the progress stage that says each is under way.
+// `how` is given the roles' names.
 const STAGES = [
-  { key: 'plan', title: 'Plan the search', agents: ['opus'], how: 'Opus builds terms for each concept and sets levels from broad to narrow.' },
-  { key: 'search', title: 'Search from the top down', agents: ['code'], how: 'The levels run in order, reviews first; each record counts once.' },
-  { key: 'screen', title: 'Screen titles and abstracts', agents: ['haiku'], how: 'Haiku includes, excludes or marks each record unsure (kept).' },
-  { key: 'follow', title: 'Follow the reviews’ references', agents: ['code', 'haiku'], how: 'Studies cited by the included reviews are added and screened.' },
+  { key: 'plan', title: 'Plan the search', agents: ['manager'], how: (n) => `${n.manager} builds terms for each concept and sets levels from broad to narrow.` },
+  { key: 'search', title: 'Search from the top down', agents: ['code'], how: () => 'The levels run in order, reviews first; each record counts once.' },
+  { key: 'screen', title: 'Screen titles and abstracts', agents: ['worker'], how: (n) => `${n.worker} includes, excludes or marks each record unsure (kept).` },
+  { key: 'follow', title: 'Follow the reviews’ references', agents: ['code', 'worker'], how: () => 'Studies cited by the included reviews are added and screened.' },
   {
-    key: 'extract', title: 'Read and extract', agents: ['code', 'sonnet', 'haiku', 'opus'],
-    how: 'Text is fetched, Haiku extracts each number with its quote, code checks it, Opus redoes what is flagged.',
+    key: 'extract', title: 'Read and extract', agents: ['code', 'fetcher', 'worker', 'manager'],
+    how: (n) => `Text is fetched, ${n.worker} extracts each number with its quote, code checks it, ${n.manager} redoes what is flagged.`,
   },
-  { key: 'overlap', title: 'Check for overlap', agents: ['opus'], how: 'Opus finds studies reported twice and reviews pooling studies in the set.' },
-  { key: 'ready', title: 'Ready for review', agents: [], how: 'Extracted records wait for your review.' },
+  { key: 'overlap', title: 'Check for overlap', agents: ['manager'], how: (n) => `${n.manager} finds studies reported twice and reviews pooling studies in the set.` },
+  { key: 'ready', title: 'Ready for review', agents: [], how: () => 'Extracted records wait for your review.' },
 ];
 const STAGE_OF = {
   'planning the search': 'plan', 'running the search': 'search', screening: 'screen',
@@ -96,7 +99,7 @@ const facts = (...items) => {
 };
 
 // What each stage found, from the search and its records.
-function details(key, { project, papers, state, progress, log }) {
+function details(key, { project, papers, state, progress, log, names }) {
   const plan = project.search_plan;
   if (key === 'plan') {
     if (!plan) return null;
@@ -159,8 +162,8 @@ function details(key, { project, papers, state, progress, log }) {
     if (!kept.length) return null;
     const count = (f) => kept.filter(f).length;
     const kinds = [['registry', 'Registry results'], ['pmc_xml', 'PMC full text'], ['oa_pdf', 'Open-access PDF'], ['abstract', 'Abstract only']];
-    const sonnet = count((p) => p.fetched_by === 'sonnet');
-    const opus = count((p) => p.extracted_by === 'manager');
+    const fetched = count((p) => roleOf(p.fetched_by) === 'fetcher');
+    const redone = count((p) => p.extracted_by === 'manager');
     return [
       bar([
         { kind: 'include', label: 'Extracted', n: count((p) => p.status === 'extracted') },
@@ -170,8 +173,8 @@ function details(key, { project, papers, state, progress, log }) {
       ]),
       facts(
         ...kinds.map(([k, label]) => [count((p) => p.fulltext_kind === k), label]).filter(([n]) => n).map(([n, label]) => `${label}: ${number(n)}`),
-        sonnet > 0 && `${plural(sonnet, 'document')} downloaded by Sonnet`,
-        opus > 0 && `${plural(opus, 'paper')} re-extracted by Opus`,
+        fetched > 0 && `${plural(fetched, 'document')} downloaded by ${names.fetcher || 'Claude'}`,
+        redone > 0 && `${plural(redone, 'paper')} re-extracted by ${names.manager}`,
       ),
     ];
   }
@@ -198,9 +201,11 @@ function details(key, { project, papers, state, progress, log }) {
 
 const STATE_TEXT = { done: 'Done', active: 'Running', stopped: 'Stopped here', pending: 'Waiting' };
 
-// The map of a search. `running` says whether it is running now; `fetcher` whether Sonnet downloads
-// what the browser may not (the browser edition; the local server downloads by itself).
-export function searchMap({ project, papers, running, fetcher = false }) {
+// The map of a search. `running` says whether it is running now; `fetcher` whether a model downloads
+// what the browser may not (the browser edition with Claude; the local server downloads by itself);
+// `names` are the roles' names, e.g. { manager: 'Opus 5.5', worker: 'Haiku 5.5', ... } (providers.js).
+export function searchMap({ project, papers, running, fetcher = false, names = {} }) {
+  names = { ...ROLE_NAMES, ...names };
   const states = stageStates(project, running);
   const progress = project.progress || {};
   const log = project.search_log || [];
@@ -213,10 +218,10 @@ export function searchMap({ project, papers, running, fetcher = false }) {
       h('div', { class: 'map-card' },
         h('div', { class: 'map-head' },
           h('h4', {}, stage.title),
-          h('span', { class: 'map-agents' }, stage.agents.filter((a) => fetcher || a !== 'sonnet')
-            .map((a) => h('span', { class: 'map-agent', 'data-agent': a }, AGENT_LABELS[a]))),
+          h('span', { class: 'map-agents' }, stage.agents.filter((a) => fetcher || a !== 'fetcher')
+            .map((a) => h('span', { class: 'map-agent', 'data-agent': a }, names[a]))),
           h('span', { class: 'map-state' }, live)),
-        h('p', { class: 'map-how' }, stage.how),
-        details(stage.key, { project, papers, state, progress, log })));
+        h('p', { class: 'map-how' }, stage.how(names)),
+        details(stage.key, { project, papers, state, progress, log, names })));
   }));
 }

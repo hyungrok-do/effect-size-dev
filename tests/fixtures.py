@@ -432,6 +432,9 @@ class FakeLLM:
         self.calls: list[str] = []
         self.screened: list[str] = []  # the record texts screening saw
 
+    def document(self, fulltext, title):
+        return fulltext.document_block(title)
+
     def read_spec(self, paragraph, sink=None):
         self.calls.append("spec")
         return SPEC
@@ -593,3 +596,93 @@ def streamed(model, payload, stop_reason="end_turn"):
         {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": 50}},
         {"type": "message_stop"},
     ])
+
+
+# -- OpenAI's Responses API ----------------------------------------------------------------------
+
+OPENAI_USAGE = {"input_tokens": 120, "input_tokens_details": {"cached_tokens": 20}, "output_tokens": 30,
+                "output_tokens_details": {"reasoning_tokens": 10}}
+
+
+def openai_sse(items: list[dict], model: str, usage: dict | None = None, status: str = "completed", incomplete: dict | None = None) -> bytes:
+    """A Responses stream: each output item announced and finished, then the response completed (or
+    incomplete). The completed response leaves `output` empty, as plan usage's stream may."""
+    response = {"id": "resp_1", "object": "response", "model": model, "status": status, "output": [],
+                "usage": usage or OPENAI_USAGE, "incomplete_details": incomplete}
+    events = [{"type": "response.created", "response": {**response, "status": "in_progress", "usage": None}}]
+    for index, item in enumerate(items):
+        events.append({"type": "response.output_item.added", "output_index": index, "item": {**item, "status": "in_progress"}})
+        events.append({"type": "response.output_item.done", "output_index": index, "item": item})
+    events.append({"type": "response.completed" if status == "completed" else "response.incomplete", "response": response})
+    return sse(events)
+
+
+def message_item(text: str) -> dict:
+    return {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}]}
+
+
+def reasoning_item() -> dict:
+    return {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque-reasoning"}
+
+
+def function_call_item(name: str, arguments: dict, call_id: str) -> dict:
+    return {"type": "function_call", "id": f"fc_{call_id}", "call_id": call_id, "name": name, "namespace": "literature",
+            "arguments": json.dumps(arguments), "status": "completed"}
+
+
+class FakeOpenAI:
+    """httpx mock transport handler standing in for the Responses API: each step is answered as
+    FakeLLM answers it, so a whole pipeline can run on OpenAILLM."""
+
+    def __init__(self):
+        self.llm = FakeLLM()
+        self.requests: list[tuple[httpx.Request, dict]] = []
+        self.tool_outputs: dict[str, str] = {}
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.requests.append((request, body))
+        return httpx.Response(200, content=self.respond(body), headers={"content-type": "text/event-stream"})
+
+    def respond(self, body: dict) -> bytes:
+        """The stream answering one request body (the browser tests serve it to the page)."""
+        items = self._search(body) if "tools" in body else [message_item(self._answer(body).model_dump_json())]
+        return openai_sse(items, body["model"])
+
+    def _answer(self, body):
+        parts = body["input"][0]["content"]
+        text = "".join(p["text"] for p in parts if p["type"] == "input_text")
+        files = [p for p in parts if p["type"] == "input_file"]
+        name = body["text"]["format"]["name"]
+        if name == "SearchSpec":
+            return self.llm.read_spec(text)
+        if name == "ScreenDecision":
+            return self.llm.screen(SPEC, text)
+        if name == "PaperExtraction":
+            first = text.split("\n", 1)[0].removeprefix("Document: ").removesuffix(" (the text layer of its PDF)")
+            document = {"title": files[0]["filename"].removesuffix(".pdf") if files else first}
+            if "Junior reviewer's extraction" in text:
+                return self.llm.adjudicate(SPEC, document, None, ["a flag"])
+            return self.llm.extract(SPEC, document)
+        if name == "OverlapReport":
+            return self.llm.check_overlap(SPEC, json.loads(text.split("Records:\n", 1)[1]))
+        if name == "EvidenceSummary":
+            data = json.loads(text.split("the values:\n", 1)[1])
+            return self.llm.summarize(SPEC, data["overlap"], data)
+        raise AssertionError(name)
+
+    def _search(self, body):
+        """Explores (with a null max_results, as strict mode sends for "the default"), submits the plan, then stops."""
+        self.llm.calls.append("search-turn")
+        for item in body["input"]:
+            if item.get("type") == "function_call_output":
+                self.tool_outputs[item["call_id"]] = item["output"]
+        calls = {item["call_id"] for item in body["input"] if item.get("type") == "function_call"}
+        if not calls:
+            return [reasoning_item(),
+                    function_call_item("count_pubmed", {"queries": ["mindfulness[tiab]", f"mindfulness[tiab] AND {REVIEW_FILTER}"]}, "c1"),
+                    function_call_item("search_europepmc", {"query": EUROPEPMC_QUERY, "max_results": None}, "c2")]
+        if "c3" not in calls:
+            return [function_call_item("submit_search_plan", PLAN.model_dump(), "c3")]
+        return [message_item("Searched from the reviews down to the full text.")]

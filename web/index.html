@@ -144,6 +144,13 @@
   .keybox .hint { margin: 6px 0 0; }
   .keybox[data-missing="true"] { border-color: var(--error); }
   .keybox[data-missing="true"] .hint { color: var(--error); }
+  .provider { margin: 14px 0 0; padding: 0; border: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; }
+  .provider legend { float: left; font-size: 14px; font-weight: 600; margin-right: 4px; padding: 0; }
+  .provider .check { color: var(--ink); }
+  .provider .check .hint { color: var(--muted); font-size: 13px; }
+  .model-row { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; }
+  .model-row label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); min-width: 200px; }
+  .model-row select { width: auto; min-width: 200px; }
 
   textarea, input[type="text"], input[type="password"], select {
     width: 100%; padding: 8px 10px; border: 1px solid var(--field-line); border-radius: 8px;
@@ -255,7 +262,7 @@
 
 <section class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published effect sizes a study plan needs</h2>
-  <p class="lede">Describe the study you are planning. Claude searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and Opus summarizes what the papers you kept report.</p>
+  <p class="lede">Describe the study you are planning. Claude, or OpenAI's models on your ChatGPT plan, searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and <span data-name="manager">Opus 5.5</span> summarizes what the papers you kept report.</p>
   <ul class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
@@ -267,11 +274,16 @@
     </li>
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>You decide</h3>
-      <p>Review the papers one at a time, including or excluding each result. Opus checks for studies counted twice and summarizes what you kept, number by number.</p>
+      <p>Review the papers one at a time, including or excluding each result. <span data-name="manager">Opus 5.5</span> checks for studies counted twice and summarizes what you kept, number by number.</p>
     </li>
   </ul>
-  <p class="notice">Your paragraph and the text of the papers are sent to Anthropic's API to be read. Don't paste anything you can't share with it.</p>
-  <div class="keybox">
+  <p class="notice">Your paragraph and the text of the papers are sent to <span data-name="vendor">Anthropic</span>'s API to be read. Don't paste anything you can't share with it.</p>
+  <fieldset class="provider">
+    <legend>Models</legend>
+    <label class="check"><input type="radio" name="provider" value="anthropic" checked> Claude <span class="hint">Anthropic API key</span></label>
+    <label class="check"><input type="radio" name="provider" value="chatgpt"> OpenAI <span class="hint">your ChatGPT plan, no key</span></label>
+  </fieldset>
+  <div class="keybox" id="anthropic-box">
     <label for="api-key">Anthropic API key</label>
     <div class="key-row">
       <input id="api-key" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true">
@@ -279,6 +291,18 @@
       <button id="forget-key" type="button" class="secondary small">Forget</button>
     </div>
     <p id="key-status" class="hint" aria-live="polite"></p>
+  </div>
+  <div class="keybox" id="chatgpt-box" hidden>
+    <label>ChatGPT plan</label>
+    <div class="key-row">
+      <button id="chatgpt-sign-in" type="button" class="primary small">Sign in with ChatGPT</button>
+      <button id="chatgpt-sign-out" type="button" class="secondary small" hidden>Sign out</button>
+    </div>
+    <p id="chatgpt-status" class="hint" aria-live="polite"></p>
+    <div id="chatgpt-models" class="model-row" hidden>
+      <label>Manager <select id="chatgpt-manager"></select></label>
+      <label>Workers <select id="chatgpt-worker"></select></label>
+    </div>
   </div>
 </section>
 
@@ -306,7 +330,7 @@
     <section id="spec" class="card" aria-labelledby="spec-title" hidden>
       <p class="eyebrow">Step 2</p>
       <h2 id="spec-title">Validate what to look for</h2>
-      <p class="summary">How Opus read your paragraph. Click anything it got wrong to change it, then search.</p>
+      <p class="summary">How <span data-name="manager">Opus 5.5</span> read your paragraph. Click anything it got wrong to change it, then search.</p>
       <form id="spec-form" novalidate>
         <div id="spec-panel"></div>
         <div class="actions">
@@ -367,7 +391,7 @@
     <section id="summary" class="card" aria-labelledby="summary-title" hidden>
       <p class="eyebrow">Step 5</p>
       <h2 id="summary-title">Summary</h2>
-      <p class="summary">Opus describes what the papers you kept report for each effect size the plan needs: the values side by side, how closely each matches your study, how much they vary, and which share participants. It does not combine studies or pick a value; that is for you. Every number here comes from the papers; Opus refers to them by key.</p>
+      <p class="summary"><span data-name="manager">Opus 5.5</span> describes what the papers you kept report for each effect size the plan needs: the values side by side, how closely each matches your study, how much they vary, and which share participants. It does not combine studies or pick a value; that is for you. Every number here comes from the papers; the model refers to them by key.</p>
       <div class="actions">
         <button id="summarize" type="button" class="primary">Write the summary</button>
         <span id="summarize-status" class="muted small" aria-live="polite"></span>

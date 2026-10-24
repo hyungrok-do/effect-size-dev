@@ -1,9 +1,9 @@
 // The search-and-extract pipeline, running in the page:
 //
-//   spec (Opus) -> search plan (Opus + tools) -> run the levels from the top down -> screen (Haiku)
-//   -> add what the included reviews cite -> screen those (Haiku)
-//   -> full text (browser, or Sonnet when the browser may not) -> extract (Haiku)
-//   -> verify (code) -> adjudicate escalations (Opus) -> review (you)
+//   spec (manager) -> search plan (manager + tools) -> run the levels from the top down -> screen (workers)
+//   -> add what the included reviews cite -> screen those (workers)
+//   -> full text (browser, or Claude's fetcher when the browser may not) -> extract (workers)
+//   -> verify (code) -> adjudicate escalations (manager) -> review (you)
 //
 // A port of python/esf/pipeline.py. Everything is stored in IndexedDB as it happens, so a run that
 // is cut short (the tab closed) can be continued.
@@ -15,7 +15,7 @@ import { LEVEL_NAMES, LEVELS, PROMPTS } from './generated.js';
 import { jatsToText } from './jats.js';
 import { pdfText } from './pdf.js';
 import {
-  bytesToBase64, europepmcPmid, europepmcRecord, europepmcUrl, trialRecord, trialResultsText,
+  bytesToBase64, europepmcPmid, europepmcRecord, europepmcUrl, SourceError, trialRecord, trialResultsText,
 } from './sources.js';
 import { escalationReasons, inAuditSample, verify } from './verify.js';
 
@@ -85,9 +85,9 @@ export function previousSummary(summary) {
 }
 
 export class Pipeline {
-  constructor({ store, claude, sources, settings = {}, activity = NO_ACTIVITY }) {
+  constructor({ store, llm, sources, settings = {}, activity = NO_ACTIVITY }) {
     this.store = store;
-    this.claude = claude;
+    this.llm = llm; // Claude (claude.js) or OpenAI (openai.js)
     this.sources = sources;
     this.settings = { ...DEFAULTS, ...settings };
     this.activity = activity;
@@ -108,8 +108,8 @@ export class Pipeline {
     await this.store.updateProject(projectId, { status: 'reading', error: null });
     try {
       const spec = await this.activity.track(
-        { agent: 'opus', step: 'spec', text: 'Reading the problem' },
-        (step) => this.claude.readSpec(project.paragraph, { sink: step.meter(this.sink(projectId)) }),
+        { agent: 'manager', step: 'spec', text: 'Reading the problem' },
+        (step) => this.llm.readSpec(project.paragraph, { sink: step.meter(this.sink(projectId)) }),
         (s) => `${s.design.replaceAll('_', ' ')}; outcomes: ${s.outcomes.map((o) => o.measure || o.name).join(', ')}; `
           + `${plural(s.statistics_needed.length, 'number')} to find; ${plural(s.open_questions.length, 'question')} worth deciding`,
       );
@@ -140,9 +140,9 @@ export class Pipeline {
         await this.store.updateProject(projectId, { status: 'searching' });
         await this.progress(projectId, 'planning the search');
         plan = await this.activity.track(
-          { agent: 'opus', step: 'search', text: 'Planning the search' },
-          // Opus's searches while it plans show as part of this step.
-          (step) => this.claude.planSearch(spec, new Toolbox(this.sources, step.activity), {
+          { agent: 'manager', step: 'search', text: 'Planning the search' },
+          // The manager's searches while it plans show as part of this step.
+          (step) => this.llm.planSearch(spec, new Toolbox(this.sources, step.activity), {
             sink: step.meter(this.sink(projectId)), maxIterations: this.settings.searchMaxIterations,
           }),
           (p) => [
@@ -365,8 +365,8 @@ export class Pipeline {
     await pool(papers, this.settings.concurrency, async (paper) => {
       try {
         const decision = await this.activity.track(
-          { agent: 'haiku', step: 'screen', text: `Screening “${short(paper.title)}”`, paperId: paper.id },
-          (step) => this.claude.screen(spec, recordText(paper), { sink: step.meter(sink) }),
+          { agent: 'worker', step: 'screen', text: `Screening “${short(paper.title)}”`, paperId: paper.id },
+          (step) => this.llm.screen(spec, recordText(paper), { sink: step.meter(sink) }),
           (d) => `${d.decision} (${STUDY_TYPES[d.study_type] || d.study_type}): ${d.reason}`,
         );
         const status = { include: 'screened_in', exclude: 'screened_out', unsure: 'unsure' }[decision.decision];
@@ -396,15 +396,15 @@ export class Pipeline {
 
   // -- across papers: overlap and the summary ---------------------------------------
 
-  // Opus looks across the extracted records for reports that would be counted twice.
+  // The manager looks across the extracted records for reports that would be counted twice.
   async checkOverlap(projectId) {
     const project = await this.store.project(projectId);
     const records = overlapRecords(await this.store.papers(projectId));
     let report = { groups: [], notes: '' };
     if (records.length > 1) {
       report = await this.activity.track(
-        { agent: 'opus', step: 'overlap', text: `Checking ${plural(records.length, 'record')} for overlap` },
-        (step) => this.claude.checkOverlap(project.spec, records, { sink: step.meter(this.sink(projectId)) }),
+        { agent: 'manager', step: 'overlap', text: `Checking ${plural(records.length, 'record')} for overlap` },
+        (step) => this.llm.checkOverlap(project.spec, records, { sink: step.meter(this.sink(projectId)) }),
         (r) => [
           r.groups.length ? plural(r.groups.length, 'overlap') : 'No overlap found',
           ...r.groups.map((g) => `${g.records.join(', ')}: ${g.relation.replaceAll('_', ' ')}${g.use ? `; use ${g.use}` : ''}`),
@@ -414,7 +414,7 @@ export class Pipeline {
     await this.store.updateProject(projectId, { overlap: { report, records: records.map((r) => r.key), input: records } });
   }
 
-  // Opus describes, for each effect size the plan needs, the values the investigator kept: how they
+  // The manager describes, for each effect size the plan needs, the values the investigator kept: how they
   // compare and where they share participants. It does not combine them or recommend one.
   async summarize(projectId) {
     const previous = previousSummary((await this.store.project(projectId)).summary);
@@ -432,10 +432,10 @@ export class Pipeline {
       if (!evidence.values.length) throw new Error('There is nothing to summarize: no extracted result is kept.');
       const result = await this.activity.track(
         {
-          agent: 'opus', step: 'summarize',
+          agent: 'manager', step: 'summarize',
           text: `Summarizing ${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')}`,
         },
-        (step) => this.claude.summarize(project.spec, overlap.report, evidence, { sink: step.meter(this.sink(projectId)) }),
+        (step) => this.llm.summarize(project.spec, overlap.report, evidence, { sink: step.meter(this.sink(projectId)) }),
         (r) => {
           // Keys shown with their values, as on the page: "SDs of 4.2 [V4] to 4.5 [V8]".
           const values = new Map(evidence.values.map((v) => [v.key, v.value]));
@@ -498,21 +498,30 @@ export class Pipeline {
         if (text.length > 500) return { kind: 'pmc_xml', text, url: `https://pmc.ncbi.nlm.nih.gov/articles/${paper.pmcid}/` };
       }
     }
+    let missed = null; // why an open-access PDF was not read
     if (paper.doi) {
       const url = await sources.unpaywall.pdfUrl(paper.doi);
       if (url) {
-        const bytes = await sources.unpaywall.downloadPdf(url);
+        let bytes = null;
+        try {
+          bytes = await sources.unpaywall.downloadPdf(url);
+        } catch (error) {
+          // A PDF the page may not download, with no model to fetch it (OpenAI) or a fetch that failed:
+          // the abstract is still read, as in the local edition, and the PDF can be uploaded.
+          if (!(error instanceof SourceError) || !paper.abstract) throw error;
+          missed = `The open-access PDF could not be downloaded (${error.message.replace(/\.$/, '')}), so the abstract was read. Upload the PDF to read the full text.`;
+        }
         if (bytes) {
           return {
             kind: 'oa_pdf', text: await pdfText(bytes), url, pdf: bytesToBase64(bytes),
-            fetched_by: sources.http.isBlocked(url) ? 'sonnet' : 'browser',
+            fetched_by: sources.http.isBlocked(url) ? 'fetcher' : 'browser',
           };
         }
       }
     }
     if (paper.abstract) {
       const url = paper.source === 'europepmc' ? europepmcUrl(paper.ext_id) : `https://pubmed.ncbi.nlm.nih.gov/${paper.ext_id}/`;
-      return { kind: 'abstract', text: `# ${paper.title}\n\n## Abstract\n${paper.abstract}\n`, url };
+      return { kind: 'abstract', text: `# ${paper.title}\n\n## Abstract\n${paper.abstract}\n`, url, ...(missed ? { note: missed } : {}) };
     }
     return null;
   }
@@ -540,8 +549,8 @@ export class Pipeline {
         doc = await this.activity.track(
           { agent: 'code', step: 'fetch', text: `Getting the text of “${title}”`, paperId },
           () => this.fullText(paper),
-          (d) => (d ? `${TEXT_KIND[d.kind]}${d.fetched_by === 'sonnet' ? ', fetched by Sonnet' : ''}, `
-            + `${Math.max(1, Math.round(d.text.length / 1000))}k characters` : 'no open text found'),
+          (d) => (d ? `${TEXT_KIND[d.kind]}${d.fetched_by === 'fetcher' ? ', fetched by Claude' : ''}, `
+            + `${Math.max(1, Math.round(d.text.length / 1000))}k characters${d.note ? `\n${d.note}` : ''}` : 'no open text found'),
         );
       } catch (error) {
         await this.store.updatePaper(paperId, { status: 'no_fulltext', error: `Could not get the text: ${describeError(error)}` });
@@ -554,7 +563,7 @@ export class Pipeline {
     }
     await this.store.saveDocument(projectId, paperId, doc);
     await this.store.updatePaper(paperId, {
-      status: 'extracting', fulltext_kind: doc.kind, fulltext_url: doc.url, fetched_by: doc.fetched_by || null,
+      status: 'extracting', fulltext_kind: doc.kind, fulltext_url: doc.url, fetched_by: doc.fetched_by || null, fulltext_note: doc.note || null,
     });
 
     const document = documentBlock(doc, paper.title || paper.ext_id);
@@ -564,14 +573,14 @@ export class Pipeline {
     let workerError = null;
     try {
       worker = await this.activity.track(
-        { agent: 'haiku', step: 'extract', text: `Extracting “${title}”`, paperId },
-        (step) => this.claude.extract(spec, document, { sink: step.meter(sink) }),
+        { agent: 'worker', step: 'extract', text: `Extracting “${title}”`, paperId },
+        (step) => this.llm.extract(spec, document, { sink: step.meter(sink) }),
         found,
       );
       report = verify(worker, doc.text, quotesReliable);
     } catch (error) {
       if (error instanceof ModelDeclined) workerError = `the worker ${error.message}`;
-      else if (error instanceof ModelTruncated) workerError = "the worker's extraction was cut off at max_tokens";
+      else if (error instanceof ModelTruncated) workerError = "the worker's extraction was cut off before it finished";
       else workerError = `the worker failed: ${describeError(error)}`;
     }
     let reasons = workerError ? [workerError] : escalationReasons(worker, report);
@@ -581,8 +590,8 @@ export class Pipeline {
       await this.activity.note({
         agent: 'code', step: 'verify', paperId, phase: reasons.length ? 'flag' : 'note',
         text: `Checked “${title}”`,
-        detail: audited ? 'every check passed; picked for the random audit, so Opus reviews it'
-          : reasons.length ? `${plural(reasons.length, 'flag')}, so Opus reviews it: ${short(reasons[0], 120)}`
+        detail: audited ? 'every check passed; picked for the random audit, so the manager reviews it'
+          : reasons.length ? `${plural(reasons.length, 'flag')}, so the manager reviews it: ${short(reasons[0], 120)}`
             : 'every quote found and every number plausible',
       });
     }
@@ -593,8 +602,8 @@ export class Pipeline {
     if (reasons.length) {
       try {
         final = await this.activity.track(
-          { agent: 'opus', step: 'adjudicate', text: `Reviewing “${title}”`, paperId },
-          (step) => this.claude.adjudicate(spec, document, worker, reasons, { sink: step.meter(sink) }),
+          { agent: 'manager', step: 'adjudicate', text: `Reviewing “${title}”`, paperId },
+          (step) => this.llm.adjudicate(spec, document, worker, reasons, { sink: step.meter(sink) }),
           found,
         );
         finalReport = verify(final, doc.text, quotesReliable);
@@ -611,13 +620,14 @@ export class Pipeline {
       }
     }
     await this.store.updatePaper(paperId, {
-      status: 'extracted', extraction: final, extracted_by: extractedBy, verification: finalReport,
+      status: 'extracted', extraction: final, extracted_by: extractedBy, extracted_model: this.llm.models?.[extractedBy] || null,
+      verification: finalReport,
       escalation: reasons.length ? { reasons, audit: audited } : null,
     });
   }
 }
 
-// What the search agent can call while it explores. Each call shows in the activity log as Opus's.
+// What the search agent can call while it explores. Each call shows in the activity log as the manager's.
 export class Toolbox {
   constructor(sources, activity = NO_ACTIVITY) {
     this.sources = sources;
@@ -625,7 +635,7 @@ export class Toolbox {
   }
 
   countPubmed(queries) {
-    return this.activity.track({ agent: 'opus', step: 'search', text: `Counts ${plural(queries.length, 'PubMed query', 'PubMed queries')}` }, async () => {
+    return this.activity.track({ agent: 'manager', step: 'search', text: `Counts ${plural(queries.length, 'PubMed query', 'PubMed queries')}` }, async () => {
       const lines = [];
       for (const [i, query] of queries.entries()) {
         let hits;
@@ -641,7 +651,7 @@ export class Toolbox {
   }
 
   previewPubmed(query, maxResults) {
-    return this.activity.track({ agent: 'opus', step: 'search', text: `Tries PubMed: ${short(query, 90)}` }, async () => {
+    return this.activity.track({ agent: 'manager', step: 'search', text: `Tries PubMed: ${short(query, 90)}` }, async () => {
       const [count, ids] = await this.sources.pubmed.search(query, maxResults);
       const lines = [`Total hits: ${count}`];
       for (const r of await this.sources.pubmed.summaries(ids)) lines.push(`${r.pmid} | ${r.year} | ${r.pubtypes.join(', ')} | ${r.title}`);
@@ -650,7 +660,7 @@ export class Toolbox {
   }
 
   previewEuropepmc(query, maxResults) {
-    return this.activity.track({ agent: 'opus', step: 'search', text: `Tries Europe PMC: ${short(query, 90)}` }, async () => {
+    return this.activity.track({ agent: 'manager', step: 'search', text: `Tries Europe PMC: ${short(query, 90)}` }, async () => {
       const [total, results] = await this.sources.europepmc.search(query, maxResults, { abstracts: false });
       const lines = [`Total hits: ${total}`];
       for (const r of results) {
@@ -662,7 +672,7 @@ export class Toolbox {
   }
 
   previewTrials(query, maxResults) {
-    return this.activity.track({ agent: 'opus', step: 'search', text: `Tries ClinicalTrials.gov: ${short(query, 90)}` },
+    return this.activity.track({ agent: 'manager', step: 'search', text: `Tries ClinicalTrials.gov: ${short(query, 90)}` },
       () => this.trialsPreview(query, maxResults), (out) => out.split('\n')[0]);
   }
 

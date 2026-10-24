@@ -25,9 +25,9 @@
 .map-agents { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .map-agent { --agent: var(--code, #6f6f68); padding: 0 7px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
   color: var(--agent); border: 1px solid color-mix(in srgb, var(--agent) 45%, transparent); }
-.map-agent[data-agent="opus"] { --agent: var(--opus, #2457c5); }
-.map-agent[data-agent="sonnet"] { --agent: var(--sonnet, #7445b8); }
-.map-agent[data-agent="haiku"] { --agent: var(--haiku, #1d7a4a); }
+.map-agent[data-agent="manager"] { --agent: var(--manager, #2457c5); }
+.map-agent[data-agent="fetcher"] { --agent: var(--fetcher, #7445b8); }
+.map-agent[data-agent="worker"] { --agent: var(--worker, #1d7a4a); }
 .map-state { margin-left: auto; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .map-stage[data-state="active"] .map-state { color: var(--accent); font-weight: 600; }
 .map-stage[data-state="stopped"] .map-state { color: var(--warn); font-weight: 600; }

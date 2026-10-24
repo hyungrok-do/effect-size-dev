@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Effect Size Finder</title>
-<meta name="description" content="Describe a planned study; Claude searches PubMed and ClinicalTrials.gov and extracts the statistics papers report, each with its quote, for you to include or exclude. Runs in your browser with your own Anthropic API key.">
+<meta name="description" content="Describe a planned study; Claude or an OpenAI model searches PubMed and ClinicalTrials.gov and extracts the statistics papers report, each with its quote, for you to include or exclude. Runs in your browser with your own Anthropic or OpenAI API key.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232457c5' stroke-width='2.5' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="lib/spec-panel.css">
 <link rel="stylesheet" href="lib/review.css">
@@ -29,9 +29,9 @@
     --warn: #8a5a00;
     --warn-soft: #fbf1dc;
     --mark: #ffe58a;
-    --opus: #2457c5;
-    --sonnet: #7445b8;
-    --haiku: #1d7a4a;
+    --manager: #2457c5;
+    --fetcher: #7445b8;
+    --worker: #1d7a4a;
     --code: #6f6f68;
     color-scheme: light;
   }
@@ -55,9 +55,9 @@
       --warn: #f0c56b;
       --warn-soft: #3a2f17;
       --mark: #6b5a17;
-      --opus: #84a9f5;
-      --sonnet: #c4a4f6;
-      --haiku: #8fd3a6;
+      --manager: #84a9f5;
+      --fetcher: #c4a4f6;
+      --worker: #8fd3a6;
       --code: #9d9c94;
       color-scheme: dark;
     }
@@ -81,9 +81,9 @@
     --warn: #f0c56b;
     --warn-soft: #3a2f17;
     --mark: #6b5a17;
-      --opus: #84a9f5;
-      --sonnet: #c4a4f6;
-      --haiku: #8fd3a6;
+      --manager: #84a9f5;
+      --fetcher: #c4a4f6;
+      --worker: #8fd3a6;
       --code: #9d9c94;
     color-scheme: dark;
   }
@@ -156,6 +156,11 @@
   .keybox .hint { margin: 6px 0 0; }
   .keybox[data-missing="true"] { border-color: var(--error); }
   .keybox[data-missing="true"] .hint { color: var(--error); }
+  .provider { margin: 16px 0 0; padding: 0; border: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; }
+  .provider legend { float: left; font-size: 15px; font-weight: 600; margin-right: 4px; padding: 0; }
+  .provider .check { font-size: 15px; color: var(--ink); }
+  .provider .check .hint { color: var(--muted); font-size: 14px; }
+  .keybox #provider-note { color: var(--ink-2); }
   .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px 18px; margin-top: 16px; }
   .settings-grid label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 4px; color: var(--ink); }
   .settings-grid .hint { display: block; font-weight: 400; }
@@ -257,7 +262,7 @@
   .top-right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
   #activity-toggle { display: inline-flex; align-items: center; gap: 6px; }
   #activity-toggle[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent); }
-  .pulse, .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--haiku); display: inline-block; animation: pulse 1.2s ease-in-out infinite; }
+  .pulse, .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--worker); display: inline-block; animation: pulse 1.2s ease-in-out infinite; }
   .live-dot { margin-left: 6px; }
   @keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
   @media (prefers-reduced-motion: reduce) { .pulse, .live-dot, .job::before { animation: none; } }
@@ -332,9 +337,9 @@
   .agent .last-what { font-size: 12.5px; color: var(--ink); }
   .agent .last-detail { font-size: 12px; color: var(--ink-2);
     display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
-  [data-agent="opus"] { --agent: var(--opus); }
-  [data-agent="sonnet"] { --agent: var(--sonnet); }
-  [data-agent="haiku"] { --agent: var(--haiku); }
+  [data-agent="manager"] { --agent: var(--manager); }
+  [data-agent="fetcher"] { --agent: var(--fetcher); }
+  [data-agent="worker"] { --agent: var(--worker); }
   [data-agent="code"] { --agent: var(--code); }
   .filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; }
   .filter button { font: inherit; font-size: 12.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--field-line); background: transparent; color: var(--ink-2); cursor: pointer; }
@@ -396,7 +401,7 @@
 
 <section class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published effect sizes a study plan needs</h2>
-  <p class="lede">Describe the study you are planning. Claude searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and Opus summarizes what the papers you kept report. Everything runs in this page, with your own Anthropic API key.</p>
+  <p class="lede">Describe the study you are planning. Claude, or an OpenAI model if you prefer, searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and <span data-name="manager">Opus 5.5</span> summarizes what the papers you kept report. Everything runs in this page, with your own Anthropic or OpenAI API key.</p>
   <ul id="points" class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
@@ -432,9 +437,14 @@
 
     <section id="setup" class="card" role="tabpanel" aria-labelledby="tab-setup" hidden>
       <h2 id="setup-title">Set up</h2>
-      <p class="summary">Everything runs in this page with your own Anthropic API key. The contact email and NCBI key are optional, but they help the search.</p>
+      <p class="summary">Everything runs in this page with your own API key, from Anthropic for Claude or from OpenAI. The contact email and NCBI key are optional, but they help the search.</p>
+      <fieldset class="provider">
+        <legend>Models</legend>
+        <label class="check"><input type="radio" name="provider" value="anthropic" checked> Claude <span class="hint">Anthropic API key</span></label>
+        <label class="check"><input type="radio" name="provider" value="openai"> OpenAI <span class="hint">OpenAI API key</span></label>
+      </fieldset>
       <div class="keybox">
-        <label for="api-key">Anthropic API key</label>
+        <label id="api-key-label" for="api-key">Anthropic API key</label>
         <div class="key-row">
           <input id="api-key" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true">
           <label class="check"><input id="remember-key" type="checkbox"> Remember on this browser</label>
@@ -442,6 +452,7 @@
           <button id="forget-key" type="button" class="secondary small">Forget</button>
         </div>
         <p id="key-status" class="hint" aria-live="polite"></p>
+        <p id="provider-note" class="hint" hidden>OpenAI has nothing like Claude's web fetch, so a PDF this page may not download is left for you to upload. To run on your ChatGPT plan instead of a key, use the local edition: OpenAI allows Sign in with ChatGPT only for apps that run on your own computer.</p>
       </div>
       <div class="settings-grid">
         <div><label for="contact-email">Contact email <span class="hint">NCBI asks for one; Unpaywall needs it to find open-access PDFs.</span></label><input id="contact-email" type="text" inputmode="email" autocomplete="email" placeholder="you@university.edu"></div>
@@ -449,7 +460,7 @@
       </div>
       <h3>Who does what</h3>
       <ul id="roles" class="roles"></ul>
-      <p class="notice">Your key, searches and decisions stay in this browser. Your paragraph and the papers' text are sent to Anthropic's API to be read, and searches go to PubMed, ClinicalTrials.gov, Europe PMC and Unpaywall. Don't paste anything you can't share with them.</p>
+      <p class="notice">Your key, searches and decisions stay in this browser. Your paragraph and the papers' text are sent to <span data-name="vendor">Anthropic</span>'s API to be read, and searches go to PubMed, ClinicalTrials.gov, Europe PMC and Unpaywall. Don't paste anything you can't share with them.</p>
       <div class="actions"><button id="setup-done" type="button" class="primary">Next: describe the study</button></div>
     </section>
 
@@ -468,7 +479,7 @@
 
     <section id="spec" class="card" role="tabpanel" aria-labelledby="tab-spec" hidden>
       <h2 id="spec-title">Validate what to look for</h2>
-      <p class="summary">How Opus read your paragraph. Click anything it got wrong to change it, then search.</p>
+      <p class="summary">How <span data-name="manager">Opus 5.5</span> read your paragraph. Click anything it got wrong to change it, then search.</p>
       <form id="spec-form" novalidate>
         <div id="spec-panel"></div>
         <div class="actions">
@@ -537,7 +548,7 @@
 
     <section id="summary" class="card" role="tabpanel" aria-labelledby="tab-summary" hidden>
       <h2 id="summary-title">Summary</h2>
-      <p class="summary">Opus describes what the papers you kept report for each effect size the plan needs: the values side by side, how closely each matches your study, how much they vary, and which share participants. It does not combine studies or pick a value; that is for you. Every number here comes from the papers; Opus refers to them by key.</p>
+      <p class="summary"><span data-name="manager">Opus 5.5</span> describes what the papers you kept report for each effect size the plan needs: the values side by side, how closely each matches your study, how much they vary, and which share participants. It does not combine studies or pick a value; that is for you. Every number here comes from the papers; the model refers to them by key.</p>
       <div class="actions">
         <button id="summarize" type="button" class="primary">Write the summary</button>
         <span id="summarize-status" class="muted small" aria-live="polite"></span>

@@ -1,8 +1,9 @@
-"""Claude API calls.
+"""Claude API calls, and what the model providers share.
 
 Claude Opus 5.5 is the manager: it reads the problem, plans the search and adjudicates escalated
 extractions. Claude Haiku 5.5 is the worker: it screens every record and makes the first-pass
-extraction of every paper. Arithmetic never happens here; Claude only reads and quotes.
+extraction of every paper. openai_llm.py gives OpenAI models the same steps. Arithmetic never
+happens here; the models only read and quote.
 """
 
 from __future__ import annotations
@@ -11,11 +12,12 @@ import json
 from typing import Any, Callable, Protocol, TypeVar
 
 import anthropic
-from anthropic import beta_tool
-from pydantic import BaseModel
+from anthropic import beta_tool, transform_schema
+from pydantic import BaseModel, TypeAdapter
 
 from . import prompts
 from .config import Settings
+from .fulltext import FullText
 from .schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec
 
 # Opus only: when a safety classifier declines a benign request, the API retries it on the
@@ -32,6 +34,34 @@ class ModelDeclined(RuntimeError):
 
 class ModelTruncated(RuntimeError):
     """The response hit max_tokens before the structured output was complete."""
+
+
+def output_schema(model: type) -> dict:
+    """The JSON schema of a structured output, exactly as the Anthropic SDK sends it. OpenAI's strict
+    mode takes it as it is: every object is closed and every property required."""
+    return transform_schema(TypeAdapter(model).json_schema())
+
+
+class LLM(Protocol):
+    """What the pipeline calls: ClaudeLLM or openai_llm.OpenAILLM (and the tests' fake)."""
+
+    def document(self, fulltext: FullText, title: str) -> dict: ...
+
+    def read_spec(self, paragraph: str, sink: UsageSink | None = None) -> SearchSpec: ...
+
+    def plan_search(self, spec: SearchSpec, toolbox: "SearchToolbox", sink: UsageSink | None = None) -> SearchPlan: ...
+
+    def check_overlap(self, spec: SearchSpec, records: list[dict], sink: UsageSink | None = None) -> OverlapReport: ...
+
+    def summarize(self, spec: SearchSpec, overlap: dict, evidence: dict, sink: UsageSink | None = None) -> EvidenceSummary: ...
+
+    def adjudicate(
+        self, spec: SearchSpec, document: dict, worker: PaperExtraction | None, flags: list[str], sink: UsageSink | None = None
+    ) -> PaperExtraction: ...
+
+    def screen(self, spec: SearchSpec, record_text: str, sink: UsageSink | None = None) -> ScreenDecision: ...
+
+    def extract(self, spec: SearchSpec, document: dict, sink: UsageSink | None = None) -> PaperExtraction: ...
 
 
 class SearchToolbox(Protocol):
@@ -130,6 +160,8 @@ class ClaudeLLM:
     def __init__(self, settings: Settings, client: anthropic.Anthropic | None = None):
         self.settings = settings
         self.client = client or anthropic.Anthropic()
+        self.manager_model = settings.manager_model
+        self.worker_model = settings.worker_model
 
     # -- plumbing ---------------------------------------------------------------
 
@@ -164,7 +196,7 @@ class ClaudeLLM:
         max_tokens: int = 64000,
     ) -> T:
         params: dict[str, Any] = {
-            "model": self.settings.manager_model if manager else self.settings.worker_model,
+            "model": self.manager_model if manager else self.worker_model,
             "max_tokens": max_tokens,
             "system": _cached_system(system),
             "messages": [{"role": "user", "content": content}],
@@ -178,6 +210,10 @@ class ClaudeLLM:
             message = stream.get_final_message()
         self._record(sink, step, message)
         return self._unwrap(message, output_format)
+
+    def document(self, fulltext: FullText, title: str) -> dict:
+        """The paper for extract() and adjudicate(): a document block, the PDF itself when there is one."""
+        return fulltext.document_block(title)
 
     # -- manager (Opus) -----------------------------------------------------------
 
@@ -195,7 +231,7 @@ class ClaudeLLM:
     def plan_search(self, spec: SearchSpec, toolbox: SearchToolbox, sink: UsageSink | None = None) -> SearchPlan:
         submitted: dict[str, SearchPlan] = {}
         runner = self.client.beta.messages.tool_runner(
-            model=self.settings.manager_model,
+            model=self.manager_model,
             max_tokens=16000,
             system=_cached_system(prompts.SEARCH),
             tools=search_tools(toolbox, submitted),

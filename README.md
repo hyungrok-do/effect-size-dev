@@ -3,9 +3,10 @@
 Describe a study you are planning in a short paragraph. Effect Size Finder searches PubMed, Europe
 PMC and ClinicalTrials.gov, reads the papers it can open, and extracts the statistics they report (group
 sizes, means, SDs, event counts, CIs, hazard ratios, and so on), each with the sentence or table
-row it came from. You review the papers one at a time, including or excluding each result; Opus
-checks the studies for overlap and summarizes, for each effect size your plan needs, what the studies
-you kept report.
+row it came from. You review the papers one at a time, including or excluding each result; the lead
+model checks the studies for overlap and summarizes, for each effect size your plan needs, what the
+studies you kept report. The models are Claude's (with an Anthropic API key) or OpenAI's (with an
+OpenAI API key, or, in the local edition, on your ChatGPT plan: **Sign in with ChatGPT**).
 
 It **searches for relevant papers**, **extracts the reported numbers** and **summarizes them**. It
 does not combine studies into an effect size or compute a sample size: those choices are yours.
@@ -18,11 +19,12 @@ This project was largely generated with Claude Code and is under validation.
 |---|---|---|
 | Runs | Entirely in the page; published on GitHub Pages | A Python server on your computer |
 | Install | None: open the page | `pip install -e .` and `esf serve` |
-| API key | Each person pastes their own; it goes only to Anthropic | Pasted in the page, or set on the server |
+| Models | Claude (Anthropic API key) or OpenAI (OpenAI API key) | Claude (Anthropic API key) or OpenAI on your ChatGPT Plus or Pro plan (Sign in with ChatGPT, no key) |
+| API key | Each person pastes their own; it goes only to Anthropic or OpenAI | Pasted in the page, or set on the server; none with a ChatGPT plan |
 | Searches stored | In that person's browser (IndexedDB) | In `data/` on the server |
-| PDFs the browser can't download | Fetched by Claude Sonnet 5.5 (web fetch) | Downloaded by the server |
+| PDFs the browser can't download | Fetched by Claude Sonnet 5.5 (web fetch); with OpenAI, the abstract is read and the PDF can be uploaded | Downloaded by the server |
 
-Both give Claude the same prompts, schemas and tools: `scripts/build_site_data.py` writes them
+Both give the models the same prompts, schemas and tools: `scripts/build_site_data.py` writes them
 from the Python package into `site/lib/generated.js`. The browser edition's quote checks, JATS
 reader and registry formatting are ports of the Python ones, and the tests require identical output.
 
@@ -47,9 +49,10 @@ YOU     Review one paper at a time: include or exclude each result; export CSV o
 OPUS    Summarize: for each effect size the plan needs, the values that bear on it and how they compare
 ```
 
-Claude reads and quotes; it never computes or converts a number. Every value is checked by code
-against the text it was read from, and in the summary Opus refers to values by key rather than
-typing them.
+The steps above name Claude's models; with OpenAI, GPT-6.1 Sol is the manager and GPT-6 Luna the
+worker (see [Claude or OpenAI](#claude-or-openai)). The models read and quote; they never compute or
+convert a number. Every value is checked by code against the text it was read from, and in the
+summary the manager refers to values by key rather than typing them.
 
 ### The search, from the top down
 
@@ -122,6 +125,52 @@ Haiku has no server-side fallback; a paper Haiku declines goes to Opus.
 Nothing is dropped silently: a record that cannot be screened goes forward as "unsure", and a paper
 neither model could extract shows up under **Needs attention**.
 
+## Claude or OpenAI
+
+Choose the models under **Models** in Setup. The steps, prompts, schemas and checks are the same;
+only the models and the way they are called differ.
+
+| Role | Claude | OpenAI |
+|---|---|---|
+| Manager: read the problem, plan the search, re-extract, check overlap, summarize | Opus 5.5 | GPT-6.1 Sol (`gpt-6.1-sol`) |
+| Workers: screen and extract | Haiku 5.5 | GPT-6 Luna (`gpt-6-luna`) |
+| Fetcher (browser edition) | Sonnet 5.5, web fetch | None |
+
+OpenAI's models are called through the Responses API (`python/esf/openai_llm.py`,
+`site/lib/openai.js`), with the same reasoning effort per step as Claude's (lowered to the nearest
+one a model takes, when its plan says which). Structured outputs use strict JSON schemas (the same
+schemas Claude gets), and the search agent's tools are strict function tools. Requests are not
+stored at OpenAI (`store: false`) and are streamed; without storage, each turn of the search agent
+sends the whole conversation back, its reasoning included in encrypted form. OpenAI has no
+counterpart to Claude's server-side web fetch, so in the browser edition a PDF the page may not
+download is not fetched: the abstract is read instead, and the card says so; upload the PDF to read
+it. A PDF is sent as a file; if ChatGPT plan usage refuses files, its text layer is sent instead.
+There is no server-side refusal fallback: a paper the worker declines goes to the manager, as with
+Haiku.
+
+### Sign in with ChatGPT (local edition)
+
+In the local edition, choose **OpenAI** and click **Sign in with ChatGPT**. ChatGPT opens in a new
+tab; after you sign in and allow plan usage it returns to the server (`/auth/callback`), and the
+models run on your ChatGPT plan instead of an API key. This needs a ChatGPT Plus or Pro plan, and
+counts against the plan's usage; ChatGPT Settings shows it and lets you cap this app's share. The
+page then lists the models your plan offers, to pick the manager and the workers.
+
+OpenAI offers this self-serve to open-source apps that run on your own computer: ChatGPT returns to
+`http://127.0.0.1:<port>/auth/callback` only. The GitHub Pages edition is a hosted page, so it uses
+an OpenAI API key instead. Open the local page on the computer that runs the server (the server
+refuses a sign-in started from another machine). The sign-in uses OAuth with PKCE and an OIDC nonce,
+and the identity token is verified against OpenAI's signing keys (`python/esf/chatgpt.py`). Only the
+app's registration (its issued client ID) and your choice of models are saved, in
+`data/chatgpt.json`; the tokens stay in the server's memory, are renewed as they expire, and are gone
+when the server stops, so you sign in again after a restart. **Sign out** revokes them; you can also
+disconnect the app in ChatGPT Settings.
+
+Plan usage is a preview with its own rules for requests (no output-token cap or sampling settings,
+the system prompt in `instructions`, function tools in a namespace), which the OpenAI calls here
+follow. They are tested against a mock of the API, not the live service; if OpenAI rejects a request,
+the error names the reason.
+
 ## Publish the browser edition on GitHub Pages
 
 1. In the repository's **Settings → Pages**, set **Source** to **GitHub Actions**. Pages for a
@@ -129,8 +178,8 @@ neither model could extract shows up under **Needs attention**.
    by anyone who has its address, which is fine here because nothing is stored on a server.
 2. Merge to `main`. The **Pages** workflow builds `site/` (it bundles the Anthropic TypeScript SDK
    and pdf.js at pinned versions) and publishes it; the workflow run shows the address.
-3. Share the address. Each person pastes their own Anthropic API key and, under **Contact email and
-   NCBI key**, an email address (NCBI asks for one; Unpaywall needs it to find open-access PDFs).
+3. Share the address. Each person chooses Claude or OpenAI and pastes their own Anthropic or
+   OpenAI API key and, under **Contact email and NCBI key**, an email address (NCBI asks for one; Unpaywall needs it to find open-access PDFs).
 
 Keep the tab open while a search runs; if it closes, open the search again and choose **Continue**.
 Searches live in that browser only: another browser or computer starts empty, and clearing the
@@ -161,7 +210,7 @@ fail there. If one of these turns out to be blocked, a small proxy for it is the
 
 ## Run the local server
 
-Requirements: Python 3.10 or later and an Anthropic API key.
+Requirements: Python 3.10 or later, and an Anthropic API key or a ChatGPT Plus or Pro plan.
 
 ```bash
 git clone https://github.com/hyungrok-do/effect-size-dev.git
@@ -177,7 +226,9 @@ Paste your Anthropic API key into the **Anthropic API key** box at the top of th
 sends it only with the requests that run Claude (reading the problem, searching, extracting); the
 server uses it for that job in memory and never writes it to disk. In the browser it is kept for
 the tab, or on the browser if you tick **Remember on this browser**; **Forget** clears it.
-Alternatively, set `ANTHROPIC_API_KEY` on the server, and the box becomes optional.
+Alternatively, set `ANTHROPIC_API_KEY` on the server, and the box becomes optional. To use
+OpenAI's models on your ChatGPT plan instead, choose **OpenAI** and **Sign in with ChatGPT** (see
+[above](#sign-in-with-chatgpt-local-edition)).
 
 Searches are stored in `data/esf.sqlite3`, and the text read from each paper in `data/projects/`.
 
@@ -188,6 +239,8 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 | `NCBI_API_KEY` | | Optional; raises the PubMed rate limit from 3 to 10 requests a second. |
 | `ESF_MANAGER_MODEL` | `claude-opus-5-5` | The manager model. |
 | `ESF_WORKER_MODEL` | `claude-haiku-5-5` | The worker model. |
+| `ESF_OPENAI_MANAGER_MODEL` | `gpt-6.1-sol` | The manager model on a ChatGPT plan, until the page picks another. |
+| `ESF_OPENAI_WORKER_MODEL` | `gpt-6-luna` | The worker model on a ChatGPT plan, until the page picks another. |
 | `ESF_AUDIT_FRACTION` | `0.1` | Share of clean extractions that Opus re-checks anyway. |
 | `ESF_PER_QUERY_LIMIT` | `100` | Records taken from each level's query, by relevance. |
 | `ESF_MAX_CANDIDATES` | `300` | Records screened from the levels and registry queries. |
@@ -199,8 +252,8 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 
 ## The browser edition's page
 
-Each step has its own tab: **Setup** (your Anthropic API key, a contact email and an optional NCBI
-key), **Describe**, **Validate**, **Search**, **Review** and **Summary**. The page opens at Setup until
+Each step has its own tab: **Setup** (Claude or OpenAI and your API key for it, a contact email and
+an optional NCBI key), **Describe**, **Validate**, **Search**, **Review** and **Summary**. The page opens at Setup until
 it has a key. **Validate** shows how Opus read your paragraph, as a structured specification: the
 question in one sentence, anything worth deciding before the search, then one table per part: the
 comparison (population with its condition, age and setting; intervention with its delivery, dose
@@ -221,9 +274,9 @@ running (with how far it has got) or stopped, and what it found: each level's qu
 taken and new records; how screening and extraction came out; the references followed. The local
 server's page shows the same map.
 
-The **Agent activity** panel lists every job each agent is doing right now (Opus 5.5 managing,
-Sonnet 5.5 fetching, Haiku 5.5 screening and reading, and the page's own code searching and
-checking): which paper or query, how long it has run and the tokens it has used so far, with the
+The **Agent activity** panel lists every job each agent is doing right now (with Claude, Opus 5.5
+managing, Sonnet 5.5 fetching, Haiku 5.5 screening and reading; with OpenAI, GPT-6.1 Sol and GPT-6
+Luna; and the page's own code searching and checking): which paper or query, how long it has run and the tokens it has used so far, with the
 searches Opus runs while planning shown under the planning job, and how far the current batch has
 got (screening 14 of 60). An idle agent shows its last job and how it ended. Below is a timeline of
 every finished job with its tokens and its outcome: the screening decision and reason, the numbers
@@ -304,13 +357,14 @@ summary stays, with the error.
 
 ## Privacy
 
-Your paragraph and the text of the papers are sent to Anthropic's API. Literature requests go to
+Your paragraph and the text of the papers are sent to Anthropic's API, or to OpenAI's if you choose
+it. Literature requests go to
 NCBI, ClinicalTrials.gov, Europe PMC, and Unpaywall, and, in the browser edition, to the sites that
 host open-access PDFs. Nothing else leaves your browser (browser edition) or the machine running the
 server (local server).
 
-In the browser edition the API key goes from the page straight to Anthropic, with the header
-Anthropic requires for calls from a browser. Anyone who can run scripts in the page could read it,
+In the browser edition the API key goes from the page straight to Anthropic (with the header
+Anthropic requires for calls from a browser) or to OpenAI. Anyone who can run scripts in the page could read it,
 so use the page only from its published address and don't add third-party scripts to it. In the
 local server edition the key travels from the page to the server in a request header; if you host
 that server for others, serve it over HTTPS.
@@ -336,8 +390,10 @@ python scripts/build_site_data.py      # after changing prompts or schemas in py
 pytest
 ```
 
-The tests use recorded-format responses for the literature APIs and a mock HTTP transport for the
-Claude API, so they need neither network access nor an API key. `tests/test_site.py` drives the
-browser edition in Chromium with every request answered from the same fixtures, including a PDF host
-that refuses web pages so the download goes through Sonnet; it is skipped if Playwright or the
-built `site/vendor/` is missing. Set `ESF_CHROMIUM` to use a particular Chromium binary.
+The tests use recorded-format responses for the literature APIs and mock HTTP transports for the
+Claude API, OpenAI's Responses API and ChatGPT's sign-in, so they need neither network access nor an
+API key. `tests/test_site.py` drives the browser edition in Chromium with every request answered from
+the same fixtures, including a PDF host that refuses web pages so the download goes through Sonnet,
+and a search run on OpenAI's models; it is skipped if Playwright or the built `site/vendor/` is
+missing. `tests/test_web.py` drives the local page against the server: signing in with ChatGPT (the
+browser's trip to ChatGPT answered with its redirect back) and searching on the plan. Set `ESF_CHROMIUM` to use a particular Chromium binary.

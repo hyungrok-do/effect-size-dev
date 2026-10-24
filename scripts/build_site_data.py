@@ -1,6 +1,7 @@
 """Write site/lib/generated.js from the Python package: the prompts, the structured-output schemas
-(exactly as the Anthropic SDK sends them), the search agent's tools and the search levels. The browser edition and the
-Python server then give Claude the same instructions.
+(exactly as the Anthropic SDK sends them), the search agent's tools (for Claude and as OpenAI function
+tools) and the search levels. The browser edition and the Python server then give the models the
+same instructions.
 
     python scripts/build_site_data.py          # rewrite the file
     python scripts/build_site_data.py --check  # fail if it is out of date
@@ -12,18 +13,12 @@ import json
 import sys
 from pathlib import Path
 
-from anthropic import transform_schema
-from pydantic import TypeAdapter
-
 from esf import prompts
-from esf.llm import MAX_COUNTED, SEARCH_PLAN_RECORDED, search_tools
+from esf.llm import MAX_COUNTED, SEARCH_PLAN_RECORDED, output_schema, search_tools
+from esf.openai_llm import TOOL_NAMESPACE, function_tools
 from esf.schemas import LEVEL_NAMES, LEVELS, EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchSpec
 
 TARGET = Path(__file__).resolve().parents[1] / "site" / "lib" / "generated.js"
-
-
-def schema(model: type) -> dict:
-    return transform_schema(TypeAdapter(model).json_schema())
 
 
 def tools() -> list[dict]:
@@ -37,13 +32,16 @@ def render() -> str:
             for name in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "SUMMARIZE", "FOUND_BY_FULL_TEXT")
         },
         "SCHEMAS": {
-            "SearchSpec": schema(SearchSpec),
-            "ScreenDecision": schema(ScreenDecision),
-            "PaperExtraction": schema(PaperExtraction),
-            "OverlapReport": schema(OverlapReport),
-            "EvidenceSummary": schema(EvidenceSummary),
+            "SearchSpec": output_schema(SearchSpec),
+            "ScreenDecision": output_schema(ScreenDecision),
+            "PaperExtraction": output_schema(PaperExtraction),
+            "OverlapReport": output_schema(OverlapReport),
+            "EvidenceSummary": output_schema(EvidenceSummary),
         },
         "SEARCH_TOOLS": tools(),
+        # The same tools as OpenAI strict function tools.
+        "OPENAI_TOOLS": function_tools(tools()),
+        "TOOL_NAMESPACE": TOOL_NAMESPACE,
         "SEARCH_PLAN_RECORDED": SEARCH_PLAN_RECORDED,
         "MAX_COUNTED": MAX_COUNTED,
         "LEVELS": list(LEVELS),

@@ -1,7 +1,7 @@
 // What the agents are doing. Finished steps go to the search's activity log in IndexedDB; steps in
 // progress are kept in memory, so the page can show who is working on what right now.
 //
-// agent: 'opus' (manager) | 'sonnet' (fetcher) | 'haiku' (workers) | 'code' (searches and checks)
+// agent: a role, 'manager' | 'fetcher' | 'worker' | 'code' (searches and checks); see providers.js
 
 import { describeError } from './claude.js';
 
@@ -26,7 +26,7 @@ const clip = (text) => {
 };
 
 export class Activity {
-  // parent: the step that the steps tracked here are part of (Opus's searches while it plans).
+  // parent: the step that the steps tracked here are part of (the manager's searches while it plans).
   constructor(store, projectId, parent = null) {
     this.store = store;
     this.projectId = projectId;

@@ -24,6 +24,9 @@ class Settings:
     # Opus plans and adjudicates; Haiku screens and extracts.
     manager_model: str = "claude-opus-5-5"
     worker_model: str = "claude-haiku-5-5"
+    # The same roles when the work runs on a ChatGPT plan; the page can pick others from the plan's models.
+    openai_manager_model: str = "gpt-6.1-sol"
+    openai_worker_model: str = "gpt-6-luna"
     data_dir: Path = REPO_ROOT / "data"
     web_dir: Path = REPO_ROOT / "web"
     # NCBI and Unpaywall ask callers to identify themselves; Unpaywall requires it.
@@ -46,6 +49,8 @@ class Settings:
         return cls(
             manager_model=os.environ.get("ESF_MANAGER_MODEL", cls.manager_model),
             worker_model=os.environ.get("ESF_WORKER_MODEL", cls.worker_model),
+            openai_manager_model=os.environ.get("ESF_OPENAI_MANAGER_MODEL", cls.openai_manager_model),
+            openai_worker_model=os.environ.get("ESF_OPENAI_WORKER_MODEL", cls.openai_worker_model),
             data_dir=Path(os.environ.get("ESF_DATA_DIR", str(cls.data_dir))),
             web_dir=Path(os.environ.get("ESF_WEB_DIR", str(cls.web_dir))),
             contact_email=os.environ.get("ESF_CONTACT_EMAIL") or None,

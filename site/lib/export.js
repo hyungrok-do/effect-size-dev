@@ -1,5 +1,7 @@
 // CSV and JSON exports, built in the page. Same columns as the Python server's export.
 
+import { roleOf } from './providers.js';
+
 export const PAPER = -1; // result_index of a decision about the whole paper
 
 // A decision on a result wins over a decision on its whole paper.
@@ -48,7 +50,7 @@ export const csvOf = (columns, rows) => [columns.join(','), ...rows.map((r) => c
 export const toCsv = (rows) => csvOf(COLUMNS, rows);
 
 // The agent activity log: one row per finished step or note, oldest first. `job` and `parent` say
-// which steps were part of which (Opus's searches while it planned); `models` are the models its
+// which steps were part of which (the manager's searches while it planned); `models` are the models its
 // calls were served by; tokens count input with cache reads and writes.
 export const LOG_COLUMNS = [
   'at', 'started', 'agent', 'models', 'step', 'phase', 'job', 'parent', 'paper_id', 'paper_title', 'text', 'detail',
@@ -58,7 +60,7 @@ export const LOG_COLUMNS = [
 export function logRows(events, papers) {
   const titles = new Map(papers.map((p) => [p.id, p.title || p.ext_id]));
   return events.map((e) => ({
-    at: e.at, started: e.started || '', agent: e.agent, models: (e.models || []).join('; '), step: e.step, phase: e.phase,
+    at: e.at, started: e.started || '', agent: roleOf(e.agent), models: (e.models || []).join('; '), step: e.step, phase: e.phase,
     job: e.job || '', parent: e.parent || '', paper_id: e.paper_id ?? '', paper_title: e.paper_title || titles.get(e.paper_id) || '',
     text: e.text, detail: e.detail || '', ms: e.ms ?? '', calls: e.usage?.calls ?? '', input_tokens: e.usage?.input ?? '',
     output_tokens: e.usage?.output ?? '',

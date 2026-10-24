@@ -30,6 +30,7 @@ function apiDetail(error) {
 
 export function describeError(error) {
   const message = error?.message || String(error);
+  if (error?.name === 'OpenAIError') return message; // openai.js words its own errors
   if (/Could not resolve authentication method/i.test(message)) {
     return 'No Anthropic API key was given. Enter your key at the top of the page and try again.';
   }
@@ -46,6 +47,34 @@ export function describeError(error) {
 
 export const looksLikeAnthropicKey = (key) => /^sk-ant-[A-Za-z0-9_-]{8,}$/.test(key);
 
+// What the search agent's tools do, by name, for either provider; `plan()` is the plan it submitted.
+// A null max_results (OpenAI's strict mode sends null for "the default") takes the default.
+export function searchRunners(toolbox) {
+  let submitted = null;
+  const preview = (input) => Math.max(1, Math.min(input.max_results ?? 20, 50));
+  const tools = {
+    count_pubmed: (input) => toolbox.countPubmed((input.queries || []).slice(0, MAX_COUNTED)),
+    search_pubmed: (input) => toolbox.previewPubmed(input.query, preview(input)),
+    search_europepmc: (input) => toolbox.previewEuropepmc(input.query, preview(input)),
+    search_clinicaltrials: (input) => toolbox.previewTrials(input.query, preview(input)),
+    submit_search_plan: (input) => {
+      const levels = input.levels || [];
+      // The Python edition validates the input against the tool's schema; refuse the same things here.
+      if (!levels.every((l) => LEVELS.includes(l?.level) && typeof l.query === 'string')) {
+        throw new Error(`Each level needs a level (${LEVELS.join(', ')}) and a query.`);
+      }
+      submitted = {
+        levels: levels.map((l) => ({ level: l.level, query: l.query, why: l.why || '' })),
+        clinicaltrials_queries: input.clinicaltrials_queries || [],
+        extra_ids: input.extra_ids || [],
+        summary: input.summary || '',
+      };
+      return SEARCH_PLAN_RECORDED;
+    },
+  };
+  return { tools, plan: () => submitted };
+}
+
 const cachedSystem = (text) => [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
 const withSpec = (prompt, spec) => `${prompt}\n\nSpecification:\n${JSON.stringify(spec, null, 2)}`;
 
@@ -61,6 +90,9 @@ function structured(message) {
 }
 
 export class Claude {
+  // Claude can fetch what the browser may not (fetchUrl); OpenAI has no such tool.
+  canFetch = true;
+
   constructor({ apiKey, models = MODELS, client = null }) {
     this.models = models;
     this.client = client || new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 3 });
@@ -107,27 +139,7 @@ export class Claude {
   }
 
   async planSearch(spec, toolbox, { sink, maxIterations = 25 } = {}) {
-    let plan = null;
-    const tools = {
-      count_pubmed: (input) => toolbox.countPubmed((input.queries || []).slice(0, MAX_COUNTED)),
-      search_pubmed: (input) => toolbox.previewPubmed(input.query, Math.max(1, Math.min(input.max_results ?? 20, 50))),
-      search_europepmc: (input) => toolbox.previewEuropepmc(input.query, Math.max(1, Math.min(input.max_results ?? 20, 50))),
-      search_clinicaltrials: (input) => toolbox.previewTrials(input.query, Math.max(1, Math.min(input.max_results ?? 20, 50))),
-      submit_search_plan: (input) => {
-        const levels = input.levels || [];
-        // The Python edition validates the input against the tool's schema; refuse the same things here.
-        if (!levels.every((l) => LEVELS.includes(l?.level) && typeof l.query === 'string')) {
-          throw new Error(`Each level needs a level (${LEVELS.join(', ')}) and a query.`);
-        }
-        plan = {
-          levels: levels.map((l) => ({ level: l.level, query: l.query, why: l.why || '' })),
-          clinicaltrials_queries: input.clinicaltrials_queries || [],
-          extra_ids: input.extra_ids || [],
-          summary: input.summary || '',
-        };
-        return SEARCH_PLAN_RECORDED;
-      },
-    };
+    const { tools, plan } = searchRunners(toolbox);
     const messages = [{ role: 'user', content: `Specification:\n${JSON.stringify(spec, null, 2)}` }];
     for (let i = 0; i < maxIterations; i++) {
       const message = await this.client.beta.messages.create({
@@ -156,8 +168,8 @@ export class Claude {
       }));
       messages.push({ role: 'user', content: results });
     }
-    if (!plan) throw new Error('The search agent stopped without submitting a search plan.');
-    return plan;
+    if (!plan()) throw new Error('The search agent stopped without submitting a search plan.');
+    return plan();
   }
 
   checkOverlap(spec, records, { sink } = {}) {

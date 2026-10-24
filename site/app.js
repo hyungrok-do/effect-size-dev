@@ -1,8 +1,11 @@
 // Effect Size Finder, browser edition: the whole app runs in this page. Searches are kept in
-// IndexedDB; Claude is called with the user's own key; nothing goes to a server of ours.
+// IndexedDB; the models (Claude, or OpenAI's) are called with the user's own key; nothing goes to a
+// server of ours.
 
 import { Activity, liveTasks, short } from './lib/activity.js';
 import { Claude, looksLikeAnthropicKey, MODELS } from './lib/claude.js';
+import { looksLikeOpenAIKey, OPENAI_MODELS, OpenAI } from './lib/openai.js';
+import { modelLabel, roleNames, roleOf, whoDid } from './lib/providers.js';
 import { csvOf, download, exportRows, LOG_COLUMNS, logRows, PAPER, toCsv } from './lib/export.js';
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
@@ -30,18 +33,40 @@ const kindOf = (paper) => (paper.source === 'clinicaltrials' ? 'clinicaltrials' 
 // Which search found a paper, on its card; the search log names each level in full (LEVEL_NAMES).
 const LEVEL_SHORT = {
   reviews: 'Reviews search', primary: 'Target-population search', full_text: 'Full-text search',
-  wider: 'Related-populations search', outcome_data: 'Outcome-data search', cited: 'Cited by a review', named: 'Named by Opus',
+  wider: 'Related-populations search', outcome_data: 'Outcome-data search', cited: 'Cited by a review', named: 'Named in the search plan',
 };
-const version = (model) => model.replace(/^claude-[a-z]+-/, '').replace('-', '.');
-const AGENTS = [
-  ['opus', `Opus ${version(MODELS.manager)}`, 'manager', 'Reads the problem, plans the search, reviews flagged extractions'],
-  ['sonnet', `Sonnet ${version(MODELS.fetcher)}`, 'fetcher', 'Downloads what the browser may not read'],
-  ['haiku', `Haiku ${version(MODELS.worker)}`, 'workers', 'Screen every record and extract every paper'],
-  ['code', 'Code', 'search and checks', 'Runs the searches, gets the text, checks every quote'],
-];
-const AGENT_NAMES = Object.fromEntries(AGENTS.map(([key, name]) => [key, name]));
+// The two ways to run the models, each with its own key. OpenAI's plan sign-in (Sign in with ChatGPT)
+// is for apps on the user's own computer, so it is in the local edition only.
+const PROVIDERS = {
+  anthropic: {
+    vendor: 'Anthropic', models: MODELS, keyName: 'Anthropic API key', placeholder: 'sk-ant-…', storage: 'esf-anthropic-api-key',
+    looksLike: looksLikeAnthropicKey, wrongKey: "This doesn't look like an Anthropic API key: those start with sk-ant-.",
+    console: ['https://console.anthropic.com/settings/keys', 'Anthropic Console'],
+    canFetch: true,
+    client: (apiKey) => new Claude({ apiKey }),
+  },
+  openai: {
+    vendor: 'OpenAI', models: OPENAI_MODELS, keyName: 'OpenAI API key', placeholder: 'sk-…', storage: 'esf-openai-api-key',
+    looksLike: looksLikeOpenAIKey, wrongKey: "This doesn't look like an OpenAI API key: those start with sk-.",
+    console: ['https://platform.openai.com/api-keys', 'OpenAI dashboard'],
+    canFetch: false,
+    client: (apiKey) => new OpenAI({ apiKey }),
+  },
+};
+const PROVIDER = 'esf-provider';
+const provider = () => PROVIDERS[state.provider] || PROVIDERS.anthropic;
+const names = () => roleNames(provider().models);
+// The agents of the chosen provider: key (a role, see providers.js), name, role, what it does.
+function agents() {
+  const n = names();
+  return [
+    ['manager', n.manager, 'manager', 'Reads the problem, plans the search, reviews flagged extractions'],
+    n.fetcher && ['fetcher', n.fetcher, 'fetcher', 'Downloads what the browser may not read'],
+    ['worker', n.worker, 'workers', 'Screen every record and extract every paper'],
+    ['code', 'Code', 'search and checks', 'Runs the searches, gets the text, checks every quote'],
+  ].filter(Boolean);
+}
 const ACTIVITY_OPEN = 'esf-activity-open';
-const KEY = 'esf-anthropic-api-key';
 const EMAIL = 'esf-contact-email';
 const NCBI_KEY = 'esf-ncbi-api-key';
 
@@ -50,7 +75,7 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const store = new Store();
 const jobs = new Set(); // projects and papers with work running in this tab
 const state = {
-  id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
+  provider: 'anthropic', id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
   uploadFor: null, step: 'setup', stepChosen: false, source: 'papers', filter: 'all', timelineAll: false,
   available: { setup: true, problem: true, spec: false, progress: false, review: false, summary: false },
   reviewAt: {}, // `${source}:${tab}` -> the paper id shown there
@@ -108,23 +133,68 @@ function writeSetting(name, value) {
 }
 
 function loadSettings() {
-  const remembered = storage('local')?.getItem(KEY);
-  $('#api-key').value = remembered || storage('session')?.getItem(KEY) || '';
-  $('#remember-key').checked = Boolean(remembered);
+  state.provider = PROVIDERS[readSetting(PROVIDER)] ? readSetting(PROVIDER) : 'anthropic';
+  loadKey();
   $('#contact-email').value = readSetting(EMAIL);
   $('#ncbi-key').value = readSetting(NCBI_KEY);
+}
+
+// The chosen provider's key, from this tab or (if remembered) this browser.
+function loadKey() {
+  const { storage: name } = provider();
+  let remembered = null;
+  let tab = null;
+  try {
+    remembered = storage('local')?.getItem(name);
+    tab = storage('session')?.getItem(name);
+  } catch { /* storage unavailable */ }
+  $('#api-key').value = remembered || tab || '';
+  $('#remember-key').checked = Boolean(remembered);
+  showProvider();
 }
 
 const apiKey = () => $('#api-key').value.trim();
 
 function saveKey() {
   const key = apiKey();
+  const { storage: name } = provider();
   try {
-    storage('local')?.removeItem(KEY);
-    storage('session')?.removeItem(KEY);
-    if (key) storage($('#remember-key').checked ? 'local' : 'session')?.setItem(KEY, key);
+    storage('local')?.removeItem(name);
+    storage('session')?.removeItem(name);
+    if (key) storage($('#remember-key').checked ? 'local' : 'session')?.setItem(name, key);
   } catch { /* storage unavailable */ }
   showKeyStatus();
+}
+
+function chooseProvider(name) {
+  if (!PROVIDERS[name] || name === state.provider) return;
+  state.provider = name;
+  writeSetting(PROVIDER, name);
+  loadKey();
+  showKeyStatus();
+  if (state.project) {
+    renderProgress(state.project);
+    renderReview();
+    renderSummary(state.project);
+  }
+  renderActivity();
+}
+
+// Everything on the page that names the provider or its models.
+function showProvider() {
+  const chosen = provider();
+  const n = names();
+  for (const input of document.querySelectorAll('input[name="provider"]')) input.checked = input.value === state.provider;
+  $('#api-key-label').textContent = chosen.keyName;
+  $('#api-key').placeholder = chosen.placeholder;
+  $('#provider-note').hidden = state.provider !== 'openai';
+  for (const el of document.querySelectorAll('[data-name]')) {
+    el.textContent = el.dataset.name === 'vendor' ? chosen.vendor : n[el.dataset.name] || el.textContent;
+  }
+  $('#roles').replaceChildren(...agents().map(([key, name, role, does]) => h('li', { 'data-agent': key },
+    h('strong', {}, `${name} · ${role}`), does)));
+  $('#models').textContent = [`${n.manager} plans and reviews`, n.fetcher && `${n.fetcher} fetches`, `${n.worker} screens and reads`]
+    .filter(Boolean).join(' · ');
 }
 
 function forgetKey() {
@@ -138,17 +208,17 @@ function showKeyStatus() {
   $('.keybox').dataset.missing = 'false';
   $('#setup-flag').hidden = Boolean(apiKey());
   const status = $('#key-status');
-  if (apiKey() && !looksLikeAnthropicKey(apiKey())) {
+  const chosen = provider();
+  if (apiKey() && !chosen.looksLike(apiKey())) {
     $('.keybox').dataset.missing = 'true';
-    status.textContent = "This doesn't look like an Anthropic API key: those start with sk-ant-. "
-      + 'An NCBI key goes in the NCBI API key box below.';
+    status.textContent = `${chosen.wrongKey} An NCBI key goes in the NCBI API key box below.`;
   } else if (apiKey()) {
     status.textContent = $('#remember-key').checked
-      ? 'Remembered on this browser. It is sent only to Anthropic, straight from this page.'
-      : 'Kept for this tab only. It is sent only to Anthropic, straight from this page.';
+      ? `Remembered on this browser. It is sent only to ${chosen.vendor}, straight from this page.`
+      : `Kept for this tab only. It is sent only to ${chosen.vendor}, straight from this page.`;
   } else {
     status.replaceChildren('Needed to read the problem, search, and extract. Create one in the ',
-      h('a', { href: 'https://console.anthropic.com/settings/keys', target: '_blank', rel: 'noopener' }, 'Anthropic Console'), '.');
+      h('a', { href: chosen.console[0], target: '_blank', rel: 'noopener' }, chosen.console[1]), '.');
   }
 }
 
@@ -157,9 +227,10 @@ async function checkKey() {
   const button = $('#check-key');
   const status = $('#key-status');
   button.disabled = true;
-  status.textContent = 'Checking the key with Anthropic…';
+  const chosen = provider();
+  status.textContent = `Checking the key with ${chosen.vendor}…`;
   try {
-    const results = await new Claude({ apiKey: apiKey() }).checkAccess();
+    const results = await chosen.client(apiKey()).checkAccess();
     const failed = results.filter((r) => !r.ok);
     $('.keybox').dataset.missing = String(failed.length > 0);
     status.textContent = failed.length
@@ -167,7 +238,7 @@ async function checkKey() {
       : `The key works, and it may use ${results.map((r) => r.name).join(', ')}.`;
   } catch (error) {
     $('.keybox').dataset.missing = 'true';
-    status.textContent = `Could not reach Anthropic: ${error?.message || error}`;
+    status.textContent = `Could not reach ${chosen.vendor}: ${error?.message || error}`;
   } finally {
     button.disabled = false;
   }
@@ -178,7 +249,7 @@ function haveKey() {
   if (apiKey()) return true;
   selectStep('setup');
   $('.keybox').dataset.missing = 'true';
-  $('#key-status').textContent = 'Enter your Anthropic API key first.';
+  $('#key-status').textContent = `Enter your ${provider().keyName} first.`;
   $('#api-key').focus();
   return false;
 }
@@ -188,18 +259,19 @@ function haveKey() {
 const literature = () => new Sources({ email: $('#contact-email').value.trim(), ncbiApiKey: $('#ncbi-key').value.trim() });
 
 function pipeline(projectId) {
-  const claude = new Claude({ apiKey: apiKey() });
+  const llm = provider().client(apiKey());
   const activity = new Activity(store, projectId);
   const sources = new Sources({
     email: $('#contact-email').value.trim(),
     ncbiApiKey: $('#ncbi-key').value.trim(),
-    proxy: (url) => activity.track(
-      { agent: 'sonnet', step: 'fetch', text: `Fetching ${short(url.replace(/^https?:\/\//, ''), 70)} for the browser` },
-      (step) => claude.fetchUrl(url, { sink: step.meter((callStep, model, usage) => store.addUsage(projectId, callStep, model, usage)) }),
+    // Only Claude can download what the browser may not; without it such a PDF waits for an upload.
+    proxy: llm.canFetch ? (url) => activity.track(
+      { agent: 'fetcher', step: 'fetch', text: `Fetching ${short(url.replace(/^https?:\/\//, ''), 70)} for the browser` },
+      (step) => llm.fetchUrl(url, { sink: step.meter((callStep, model, usage) => store.addUsage(projectId, callStep, model, usage)) }),
       (doc) => (doc.kind === 'pdf' ? `PDF, ${Math.round((doc.base64.length * 3) / 4 / 1024)} KB` : `text, ${Math.round(doc.text.length / 1024)} KB`),
-    ),
+    ) : null,
   });
-  return new Pipeline({ store, claude, sources, activity });
+  return new Pipeline({ store, llm, sources, activity });
 }
 
 // `then(projectId)` runs after the job, once the page shows its results: that is where the page
@@ -309,7 +381,7 @@ async function refresh() {
       state.papers = await store.papers(id);
       state.decisions = await store.decisions(id);
       state.usage = await store.usage(id);
-      state.events = await store.events(id);
+      state.events = (await store.events(id)).map((e) => ({ ...e, agent: roleOf(e.agent) }));
       renderProblem(project);
       renderSpec(project);
       renderProgress(project);
@@ -410,7 +482,7 @@ function tabKeys(event) {
 // -- agent activity --------------------------------------------------------------------
 
 const STEP_AGENT = {
-  spec: 'opus', search: 'opus', adjudicate: 'opus', overlap: 'opus', summarize: 'opus', fetch: 'sonnet', screen: 'haiku', extract: 'haiku',
+  spec: 'manager', search: 'manager', adjudicate: 'manager', overlap: 'manager', summarize: 'manager', fetch: 'fetcher', screen: 'worker', extract: 'worker',
 };
 const seconds = (since) => `${Math.max(0, Math.round((Date.now() - since) / 1000))} s`;
 const duration = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
@@ -428,8 +500,8 @@ function setActivityOpen(open, remember = true) {
 
 // Which agent the page's progress stage belongs to, for the progress line on its card.
 const STAGE_AGENT = {
-  'planning the search': 'opus', 'running the search': 'code', "reading the reviews' references": 'code', 'checking for overlap': 'opus',
-  screening: 'haiku', extracting: 'haiku',
+  'planning the search': 'manager', 'running the search': 'code', "reading the reviews' references": 'code', 'checking for overlap': 'manager',
+  screening: 'worker', extracting: 'worker',
 };
 const MAX_JOBS = 8; // jobs listed per agent; the rest are counted
 
@@ -461,7 +533,7 @@ function renderAgents() {
   const progress = state.project?.progress;
   const running = jobs.has(state.id);
   const liveIds = new Set(busy.map((task) => task.id));
-  $('#agents').replaceChildren(...(state.id ? AGENTS : []).map(([key, name, role, does]) => {
+  $('#agents').replaceChildren(...(state.id ? agents() : []).map(([key, name, role, does]) => {
     const mine = busy.filter((task) => task.agent === key);
     // Jobs that are part of another live job are listed under it.
     const top = mine.filter((task) => !liveIds.has(task.parent));
@@ -501,7 +573,7 @@ function renderActivity() {
   $('#activity-empty').hidden = Boolean(state.id);
   const counts = { all: state.events.length };
   for (const e of state.events) counts[e.agent] = (counts[e.agent] || 0) + 1;
-  $('#activity-filter').replaceChildren(...(state.id ? [['all', 'All'], ...AGENTS.map(([key, name]) => [key, name])] : [])
+  $('#activity-filter').replaceChildren(...(state.id ? [['all', 'All'], ...agents().map(([key, name]) => [key, name])] : [])
     .map(([key, label]) => h('button', {
       type: 'button', 'aria-pressed': String(state.filter === key), 'data-agent': key === 'all' ? null : key,
       onclick: () => { state.filter = key; renderActivity(); },
@@ -520,7 +592,7 @@ const TIMELINE_SHOWN = 250;
 // The whole agent activity log of the open search, oldest first, as CSV (a row per step) or JSON.
 async function exportLog(format) {
   const id = state.id;
-  const events = (await store.events(id)).reverse();
+  const events = (await store.events(id)).reverse().map((e) => ({ ...e, agent: roleOf(e.agent) }));
   const name = `agent-log-${id}`;
   if (format === 'csv') {
     download(`${name}.csv`, csvOf(LOG_COLUMNS, logRows(events, state.papers)), 'text/csv');
@@ -530,7 +602,7 @@ async function exportLog(format) {
   const body = {
     search: { id, created_at: state.project.created_at, paragraph: state.project.paragraph },
     exported_at: new Date().toISOString(),
-    agents: AGENT_NAMES,
+    agents: names(),
     events: events.map(({ project_id: _, ...e }) => ({ ...e, paper_title: e.paper_title || titles.get(e.paper_id) || null })),
   };
   download(`${name}.json`, JSON.stringify(body, null, 2), 'application/json');
@@ -542,7 +614,7 @@ function timelineItem(e) {
   const [first, ...rest] = (e.phase === 'error' ? `Failed: ${e.detail}` : e.detail || '').split('\n');
   return h('li', { 'data-agent': e.agent, 'data-phase': e.phase },
     h('span', { class: 'when' }, new Date(e.at).toLocaleTimeString()),
-    h('span', { class: 'who' }, AGENT_NAMES[e.agent] || e.agent),
+    h('span', { class: 'who' }, whoDid(e, names())),
     e.ms != null && h('span', { class: 'when' }, ` · ${duration(e.ms)}`),
     e.usage && h('span', { class: 'when' }, ` · ${tokens(e.usage.input)} in · ${tokens(e.usage.output)} out`),
     h('span', { class: 'what' }, e.text),
@@ -559,7 +631,7 @@ function renderProblem(project) {
   paragraph.readOnly = true;
   $('#read').hidden = true;
   $('#delete-project').hidden = jobs.has(project.id);
-  $('#read-status').textContent = project.status === 'reading' ? 'Opus is reading the problem…' : '';
+  $('#read-status').textContent = project.status === 'reading' ? `${names().manager} is reading the problem…` : '';
   showError($('#problem-error'), !project.spec && project.error ? project.error : '');
   if (!project.spec && project.status === 'interrupted') {
     $('#read').hidden = false;
@@ -649,7 +721,7 @@ function renderProgress(project) {
   state.available.progress = Boolean(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
   if (!state.available.progress) return;
 
-  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running, fetcher: true }));
+  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running, fetcher: provider().canFetch, names: names() }));
 
   const progress = project.progress || {};
   const bar = $('#progress');
@@ -809,7 +881,7 @@ function renderSummary(project) {
   const running = summary?.status === 'running' || jobs.has(`summary-${project.id}`);
   $('#summarize').disabled = running || jobs.has(project.id);
   $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
-  $('#summarize-status').textContent = running ? 'Opus is checking for overlap and writing the summary…'
+  $('#summarize-status').textContent = running ? `${names().manager} is checking for overlap and writing the summary…`
     : jobs.has(project.id) ? 'Wait until the search finishes.' : '';
   showError($('#summary-error'), summary?.status === 'error' ? summary.error
     : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
@@ -829,6 +901,9 @@ function writeSummary() {
   startJob(`summary-${id}`, () => pipeline(id).summarize(id));
   refresh();
 }
+
+// The model that made a paper's extraction, or, for one saved without it, the role's current name.
+const extractor = (paper) => (paper.extracted_model ? modelLabel(paper.extracted_model) : names()[paper.extracted_by] || paper.extracted_by);
 
 function badge(text, kind = '') {
   return h('span', { class: `badge ${kind}`.trim() }, text);
@@ -864,7 +939,7 @@ function paperCard(paper, trials) {
   const head = [
     ...paperHeader(paper, links(paper), {
       action: exclude,
-      loadAuthors: (p) => new Pipeline({ store, claude: null, sources: literature() }).authorList(p.id),
+      loadAuthors: (p) => new Pipeline({ store, llm: null, sources: literature() }).authorList(p.id),
       warnings: [
         paper.ext_id.startsWith('PPR') && badge('Preprint, not peer reviewed', 'warn'),
         paper.fulltext_kind === 'abstract' && badge('Abstract only', 'warn'),
@@ -883,12 +958,13 @@ function paperCard(paper, trials) {
       paper.source !== 'clinicaltrials' && LEVEL_SHORT[paper.found_in?.[0]]
         && h('span', { class: 'badge', title: (paper.found_by || []).join('\n') }, LEVEL_SHORT[paper.found_in[0]]),
       paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind),
-      paper.fetched_by === 'sonnet' && badge('Fetched by Sonnet'),
-      paper.extracted_by === 'manager' && badge('Reviewed by Opus', 'accent'),
-      paper.extracted_by === 'worker' && badge('Extracted by Haiku'),
+      roleOf(paper.fetched_by) === 'fetcher' && badge(`Fetched by ${names().fetcher || 'Claude'}`),
+      paper.extracted_by === 'manager' && badge(`Reviewed by ${extractor(paper)}`, 'accent'),
+      paper.extracted_by === 'worker' && badge(`Extracted by ${extractor(paper)}`),
       paper.escalation?.audit && badge('Audit sample')),
+    paper.fulltext_note && h('p', { class: 'reason' }, paper.fulltext_note),
     extracted && screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
-    reasons.length > 0 && h('p', { class: 'reason' }, `Why Opus reviewed it: ${reasons.join('; ')}`),
+    reasons.length > 0 && h('p', { class: 'reason' }, `Why ${paper.extracted_by === 'manager' ? extractor(paper) : names().manager} reviewed it: ${reasons.join('; ')}`),
     differs && h('p', { class: 'reason' }, `Differs from the plan: ${paper.extraction.mismatch_reasons.join('; ')}`),
     extracted && paper.extraction.notes && h('p', { class: 'reason' }, `Notes: ${paper.extraction.notes}`),
     extracted && !busy && paper.source !== 'clinicaltrials' && h('div', { class: 'paper-actions' },
@@ -1012,7 +1088,7 @@ function exportCsv(includedOnly) {
 async function exportJson() {
   const { id, created_at, paragraph, spec, search_plan, search_log, overlap, summary } = state.project;
   const papers = state.papers.map((p) => ({ ...p, decisions: state.decisions[p.id] || {}, links: links(p) }));
-  const activity = (await store.events(id)).reverse().map(({ project_id: _, ...e }) => e);
+  const activity = (await store.events(id)).reverse().map(({ project_id: _, ...e }) => ({ ...e, agent: roleOf(e.agent) }));
   const body = { project: { id, created_at, paragraph, spec, search_plan, search_log, overlap, summary }, papers, usage: state.usage, activity };
   download(`effect-sizes-${id}.json`, JSON.stringify(body, null, 2), 'application/json');
 }
@@ -1049,8 +1125,9 @@ async function start() {
     if (!haveKey()) return;
     selectStep(state.project ? defaultStep(state.project) : 'problem', true);
   });
-  $('#roles').replaceChildren(...AGENTS.map(([key, name, role, does]) => h('li', { 'data-agent': key },
-    h('strong', {}, `${name} · ${role}`), does)));
+  for (const input of document.querySelectorAll('input[name="provider"]')) {
+    input.addEventListener('change', () => chooseProvider(input.value));
+  }
   $('#activity-toggle').addEventListener('click', () => setActivityOpen($('#activity').hidden));
   $('#activity-close').addEventListener('click', () => setActivityOpen(false));
   document.addEventListener('keydown', (event) => {
@@ -1063,9 +1140,6 @@ async function start() {
   window.addEventListener('beforeunload', (event) => {
     if (jobs.size) event.preventDefault();
   });
-  $('#models').textContent = `Opus ${MODELS.manager.replace('claude-opus-', '').replace('-', '.')} plans and reviews · `
-    + `Sonnet ${MODELS.fetcher.replace('claude-sonnet-', '').replace('-', '.')} fetches · `
-    + `Haiku ${MODELS.worker.replace('claude-haiku-', '').replace('-', '.')} screens and reads`;
   loadSettings();
   showKeyStatus();
   // Setup comes first until there is a key; after that, a new visit starts at Describe.

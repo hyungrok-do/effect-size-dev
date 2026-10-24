@@ -19,7 +19,7 @@ from . import prompts
 from .config import Settings
 from .evidence import build_evidence, decisions_basis, overlap_records
 from .fulltext import FullText, get_fulltext
-from .llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
+from .llm import LLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
 from .sources import Record, SourceError, Sources, europepmc_pmid, europepmc_record, trial_record
 from .store import Store
@@ -99,14 +99,15 @@ def previous_summary(summary: dict | None) -> dict | None:
 
 
 class Pipeline:
-    def __init__(self, store: Store, llm: ClaudeLLM, sources: Sources, settings: Settings):
+    def __init__(self, store: Store, llm: LLM, sources: Sources, settings: Settings):
         self.store = store
         self.llm = llm
         self.sources = sources
         self.settings = settings
 
-    def using(self, llm: ClaudeLLM) -> "Pipeline":
-        """The same pipeline calling Claude through another client, e.g. one holding a user's API key."""
+    def using(self, llm: LLM) -> "Pipeline":
+        """The same pipeline calling the models through another client: one holding a user's API key,
+        or OpenAI models on a ChatGPT plan."""
         clone = copy.copy(self)
         clone.llm = llm
         return clone
@@ -484,7 +485,7 @@ class Pipeline:
         path.write_text(fulltext.text, encoding="utf-8")
         self.store.update_paper(paper_id, status="extracting", fulltext_kind=fulltext.kind, fulltext_url=fulltext.url)
 
-        document = fulltext.document_block(paper["title"] or paper["ext_id"])
+        document = self.llm.document(fulltext, paper["title"] or paper["ext_id"])
         quotes_reliable = fulltext.kind != "oa_pdf" and bool(fulltext.text.strip())
         worker, report, worker_error = self._worker_pass(spec, document, fulltext, quotes_reliable, sink)
         reasons = escalation_reasons(worker, report)
@@ -517,6 +518,7 @@ class Pipeline:
             status="extracted",
             extraction=final.model_dump(),
             extracted_by=extracted_by,
+            extracted_model=getattr(self.llm, f"{extracted_by}_model", None),
             verification=final_report.to_dict(),
             escalation={"reasons": reasons, "audit": audited} if reasons else None,
         )
@@ -529,7 +531,7 @@ class Pipeline:
         except ModelDeclined as exc:
             return None, None, f"the worker {exc}"
         except ModelTruncated:
-            return None, None, "the worker's extraction was cut off at max_tokens"
+            return None, None, "the worker's extraction was cut off before it finished"
         except Exception as exc:
             return None, None, f"the worker failed: {describe_error(exc)}"
         return worker, verify(worker, fulltext.text, quotes_reliable), None

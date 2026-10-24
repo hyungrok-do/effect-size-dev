@@ -30,7 +30,7 @@ from esf.schemas import upgrade_spec
 from esf.verify import in_audit_sample, numbers_in, verify
 from fixtures import (
     ABSTRACT_LINE, EUROPEPMC, EUROPEPMC_QUERY, JATS, PDF_LINE, PLAN, PMC_ONLY, PREPRINT, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL,
-    FakeLLM, LiteratureAPIs, _extraction, _result, _value, make_pdf, streamed,
+    FakeLLM, FakeOpenAI, LiteratureAPIs, _extraction, _result, _value, make_pdf, streamed,
 )
 
 sync_api = pytest.importorskip("playwright.sync_api")
@@ -39,6 +39,7 @@ if not (SITE / "vendor" / "anthropic-sdk.mjs").exists():
     pytest.skip("build the site first: cd site && npm ci && npm run build", allow_module_level=True)
 
 KEY = "sk-ant-test-site"
+OPENAI_KEY = "sk-proj-test-site-0123456789"
 
 def _paper(pid, values, status="extracted", **fields):
     """A paper as the stores hold it, with one result per list in `values` (group, statistic, value)."""
@@ -141,6 +142,8 @@ class Network:
         self.refuse = set(refuse_web_pages)
         self.llm = FakeLLM()
         self.claude: list[tuple[dict, dict]] = []
+        self.openai = FakeOpenAI()
+        self.openai_calls: list[tuple[dict, dict]] = []
         self.refused: list[str] = []
 
     def __call__(self, route, request):
@@ -151,6 +154,8 @@ class Network:
             return route.fulfill(status=204, headers=PREFLIGHT)
         if host == "api.anthropic.com":
             return self.anthropic(route, request)
+        if host == "api.openai.com":
+            return self.openai_api(route, request)
         if host in self.refuse:
             self.refused.append(request.url)
             return route.abort("failed")
@@ -179,6 +184,19 @@ class Network:
         tools = body.get("tools") or []
         reply = self.fetch(body) if any(t.get("type") == "web_fetch_20250910" for t in tools) else self.search_turn(body)
         route.fulfill(status=200, headers={**CORS, "content-type": "application/json"}, body=json.dumps(reply))
+
+    def openai_api(self, route, request):
+        if request.headers.get("authorization") != f"Bearer {OPENAI_KEY}":
+            error = {"error": {"message": "Incorrect API key provided.", "type": "invalid_request_error", "code": "invalid_api_key"}}
+            return route.fulfill(status=401, headers={**CORS, "content-type": "application/json", "x-request-id": "req_openai"}, body=json.dumps(error))
+        path = urlparse(request.url).path
+        if request.method == "GET" and path.startswith("/v1/models/"):
+            model = path.rsplit("/", 1)[1]
+            return route.fulfill(status=200, headers={**CORS, "content-type": "application/json"},
+                                 body=json.dumps({"id": model, "object": "model", "owned_by": "openai"}))
+        body = json.loads(request.post_data)
+        self.openai_calls.append((request.headers, body))
+        route.fulfill(status=200, headers={**CORS, "content-type": "text/event-stream"}, body=self.openai.respond(body))
 
     def structured(self, body):
         system = body["system"][0]["text"]
@@ -503,11 +521,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert "Animal studies" in page.inner_text("[data-part='screening']")
     assert "1 to include · 1 to exclude" in page.inner_text("[data-part='screening'] summary")
     page.click("#run")
-    # While Opus plans, the searches it runs show as its jobs, under the planning job, as they happen.
-    page.wait_for_selector("#agents [data-agent='opus'] .job[data-depth='1']", timeout=15000)
-    opus_jobs = page.locator("#agents [data-agent='opus'] .job .what").all_inner_texts()
+    # While Opus (the manager) plans, the searches it runs show as its jobs, under the planning job, as they happen.
+    page.wait_for_selector("#agents [data-agent='manager'] .job[data-depth='1']", timeout=15000)
+    opus_jobs = page.locator("#agents [data-agent='manager'] .job .what").all_inner_texts()
     assert opus_jobs[0] == "Planning the search" and opus_jobs[1].startswith("Counts 2 PubMed queries"), opus_jobs
-    assert "at work" in page.inner_text("#agents [data-agent='opus'] .state")
+    assert "at work" in page.inner_text("#agents [data-agent='manager'] .state")
     # The search map shows Opus planning, and every later stage still to come.
     states = page.evaluate("[...document.querySelectorAll('#map-body .map-stage')].map((li) => [li.dataset.stage, li.dataset.state])")
     assert states == [["plan", "active"], ["search", "pending"], ["screen", "pending"], ["follow", "pending"],
@@ -583,7 +601,8 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert "Extracted 8" in extract and "downloaded by Sonnet" in extract and "re-extracted by Opus" in extract
     assert "1 study reported more than once" in page.inner_text("#map-body [data-stage='overlap']")
     assert [x.get_attribute("data-agent") for x in page.locator("#map-body [data-stage='extract'] .map-agent").all()] == [
-        "code", "sonnet", "haiku", "opus"]
+        "code", "fetcher", "worker", "manager"]
+    assert page.locator("#map-body [data-stage='extract'] .map-agent").all_inner_texts() == ["Code", "Sonnet 5.5", "Haiku 5.5", "Opus 5.5"]
     page.click("#plan-details summary")
     strategy = page.locator("#plan-queries li").all_inner_texts()
     assert strategy[0].startswith("Reviews and meta-analyses · Pooled effects.") and strategy[1].startswith("Studies in the target population")
@@ -752,7 +771,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert list(log[0]) == ["at", "started", "agent", "models", "step", "phase", "job", "parent", "paper_id", "paper_title",
                             "text", "detail", "ms", "calls", "input_tokens", "output_tokens"]
     summarized = next(r for r in log if r["step"] == "summarize")
-    assert summarized["agent"] == "opus" and summarized["models"] == OPUS and int(summarized["input_tokens"]) > 0
+    assert summarized["agent"] == "manager" and summarized["models"] == OPUS and int(summarized["input_tokens"]) > 0
     assert summarized["started"] <= summarized["at"] and summarized["phase"] == "done"
     read = next(r for r in log if r["step"] == "extract" and "Brief mindfulness" in r["text"])
     assert read["models"] == HAIKU and read["paper_title"].startswith("Brief mindfulness") and "PHQ-9" in read["detail"]
@@ -760,7 +779,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
         page.click("#export-log-json")
     exported = json.loads(open(download.value.path(), encoding="utf-8").read())
     events = exported["events"]
-    assert exported["search"]["id"] == page.url.split("#")[1] and exported["agents"]["opus"] == "Opus 5.5"
+    assert exported["search"]["id"] == page.url.split("#")[1] and exported["agents"]["manager"] == "Opus 5.5"
     assert len(events) == total and "project_id" not in events[0]
     jobs = {e["job"] for e in events}
     searches = [e for e in events if e["parent"]]  # the searches Opus ran while planning
@@ -865,3 +884,92 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     page.wait_for_function("document.querySelector('#key-status').textContent.startsWith('The key works')")
     assert page.inner_text("#key-status") == "The key works, and it may use Claude Opus 5.5, Claude Sonnet 5.5, Claude Haiku 5.5."
     context.close()
+
+
+def test_the_page_runs_on_openai_models(browser, site_url):
+    """With OpenAI chosen in Setup, every step runs on OpenAI's Responses API with the user's key, the
+    page names the OpenAI models, and nothing is fetched through a model (OpenAI has no web fetch)."""
+    network = Network()
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    context.route("**/*", network)
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(site_url)
+    page.fill("#api-key", KEY)  # a Claude key first: switching keeps each provider's key apart
+    page.check("input[name='provider'][value='openai']")
+    assert page.inner_text("#api-key-label") == "OpenAI API key" and page.input_value("#api-key") == ""
+    assert page.is_visible("#provider-note") and "Sign in with ChatGPT" in page.inner_text("#provider-note")
+    page.fill("#api-key", "sk-ant-api03-wrong-provider")
+    assert "doesn't look like an OpenAI API key" in page.inner_text("#key-status")
+    page.fill("#api-key", "sk-proj-not-the-right-key-000")
+    page.click("#check-key")
+    page.wait_for_function("document.querySelector('#key-status').textContent.includes('did not accept')")
+    assert "gpt-6.1-sol: OpenAI did not accept the API key" in page.inner_text("#key-status")
+    page.fill("#api-key", OPENAI_KEY)
+    page.click("#check-key")
+    page.wait_for_function("document.querySelector('#key-status').textContent.startsWith('The key works')")
+    assert page.inner_text("#key-status") == "The key works, and it may use GPT-6.1 Sol, GPT-6 Luna."
+    assert page.locator("#roles li strong").all_inner_texts() == ["GPT-6.1 Sol · manager", "GPT-6 Luna · workers", "Code · search and checks"]
+    assert page.inner_text("#models") == "GPT-6.1 Sol plans and reviews · GPT-6 Luna screens and reads"
+    assert "sent to OpenAI's API" in page.inner_text("#setup .notice")
+    page.check("input[name='provider'][value='anthropic']")
+    assert page.input_value("#api-key") == KEY and page.inner_text("#models").startswith("Opus 5.5 plans")
+    page.check("input[name='provider'][value='openai']")
+    assert page.input_value("#api-key") == OPENAI_KEY
+
+    page.fill("#contact-email", "test@example.com")
+    page.dispatch_event("#contact-email", "change")
+    page.click("#setup-done")
+    page.fill("#paragraph", "We propose a two-arm randomized trial of a 12-week mindfulness app versus waitlist for PHQ-9 in students.")
+    page.click("#read")
+    page.wait_for_selector("#spec:not([hidden])")
+    assert "How GPT-6.1 Sol read your paragraph" in page.inner_text("#spec .summary")
+    page.click("#run")
+    page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
+    page.wait_for_selector("#review:not([hidden]) .paper")
+
+    # The PDF the page may not download was not fetched through a model: that paper was read from its abstract.
+    assert network.refused == [PDF_URL] and not network.claude
+    pdf_paper = open_paper(page, "Brief mindfulness training")
+    assert pdf_paper.locator(".badge", has_text="Fetched by").count() == 0
+    assert pdf_paper.locator(".paper-details .badge", has_text="Abstract only").count() == 1
+    pdf_paper.locator(".paper-details summary").click()
+    assert "The open-access PDF could not be downloaded (example.org doesn't accept requests from web pages)" in pdf_paper.inner_text()
+    assert open_paper(page, "Mindfulness groups and depressive").locator(".badge", has_text="Reviewed by GPT-6.1 Sol").count() == 1
+    assert open_paper(page, "A mindfulness app for depressive").locator(".badge", has_text="Extracted by GPT-6 Luna").count() == 1
+    names = [" ".join(x.split()) for x in page.locator("#agents .agent h3").all_inner_texts()]
+    assert names == ["GPT-6.1 Sol manager", "GPT-6 Luna workers", "Code search and checks"], names
+    assert "GPT-6.1 Sol" in page.locator("#timeline li .who").all_inner_texts()
+    assert [x.inner_text() for x in page.locator("#map-body [data-stage='extract'] .map-agent").all()] == ["Code", "GPT-6 Luna", "GPT-6.1 Sol"]
+
+    page.click("#tab-summary")
+    assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol describes what the papers you kept report")
+    page.click("#summarize")
+    page.wait_for_selector("#summary-body .summary-overview", timeout=15000)
+
+    calls = network.openai_calls
+    assert calls and all(h["authorization"] == f"Bearer {OPENAI_KEY}" for h, _ in calls)
+    steps = {}
+    for _, body in calls:
+        assert body["store"] is False and body["stream"] is True and "max_output_tokens" not in body and "temperature" not in body
+        assert all(item.get("role") != "system" for item in body["input"])
+        step = next(s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "SUMMARIZE")
+                    if body["instructions"].startswith(getattr(prompts, s)))
+        steps.setdefault(step, body)
+    expected = {"SPEC": ("gpt-6.1-sol", "high"), "SEARCH": ("gpt-6.1-sol", "high"), "ADJUDICATE": ("gpt-6.1-sol", "xhigh"),
+                "OVERLAP": ("gpt-6.1-sol", "high"), "SUMMARIZE": ("gpt-6.1-sol", "high"), "SCREEN": ("gpt-6-luna", "low"),
+                "EXTRACT": ("gpt-6-luna", "medium")}
+    assert set(steps) == set(expected)
+    for step, (model, effort) in expected.items():
+        assert (steps[step]["model"], steps[step]["reasoning"]["effort"]) == (model, effort), step
+        if step != "SEARCH":
+            assert steps[step]["text"]["format"]["strict"] is True and steps[step]["text"]["format"]["type"] == "json_schema"
+    search = steps["SEARCH"]
+    assert [t["name"] for t in search["tools"]] == ["count_pubmed", "search_pubmed", "search_europepmc", "search_clinicaltrials", "submit_search_plan"]
+    assert all(t["type"] == "function" and t["strict"] for t in search["tools"])
+    assert search["include"] == ["reasoning.encrypted_content"]
+    # The searches the model asked for ran in the page, a null max_results taking the default.
+    assert network.openai.tool_outputs["c1"] == f"#1 4 | mindfulness[tiab]\n#2 1 | mindfulness[tiab] AND {REVIEW_FILTER}"
+    assert "| PPR | preprint |" in network.openai.tool_outputs["c2"]
+    assert not errors, errors

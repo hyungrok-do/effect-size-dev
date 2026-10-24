@@ -1002,6 +1002,204 @@ export const SEARCH_TOOLS = [
   }
 ];
 
+export const OPENAI_TOOLS = [
+  {
+    "type": "function",
+    "name": "count_pubmed",
+    "description": "Count the PubMed hits of several queries at once, like a PubMed search history.\n\nUse it to check each concept block alone and to compare the levels before reading titles.",
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "queries": {
+          "description": "Up to 12 E-utilities queries, e.g. ['mindfulness[mh] OR mindfulness[tiab]', 'depression[mh] OR depress*[tiab]'].",
+          "items": {
+            "type": "string"
+          },
+          "title": "Queries",
+          "type": "array"
+        }
+      },
+      "required": [
+        "queries"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "type": "function",
+    "name": "search_pubmed",
+    "description": "Run a PubMed search and list the top records by relevance.\n\nReturns the total number of hits and, for each listed record: PMID | year | publication types | title.",
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "description": "An E-utilities query, e.g. '\"mindfulness\"[tiab] AND depress*[tiab] AND randomized controlled trial[pt]'.",
+          "title": "Query",
+          "type": "string"
+        },
+        "max_results": {
+          "description": "How many records to list, at most 50.",
+          "title": "Max Results",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "query",
+        "max_results"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "type": "function",
+    "name": "search_europepmc",
+    "description": "Search Europe PMC, which also searches the full text of open-access articles section by section, and preprints.\n\nReturns the total number of hits and, for each listed record: ID | year | kind | publication types | title. Kind MED is a PubMed record (the ID is its PMID), PMC an article only in PubMed Central, PPR a preprint.",
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "description": "A Europe PMC query, e.g. 'mindfulness AND depress* AND (METHODS:\"PHQ-9\" OR RESULTS:\"PHQ-9\")'.",
+          "title": "Query",
+          "type": "string"
+        },
+        "max_results": {
+          "description": "How many records to list, at most 50.",
+          "title": "Max Results",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "query",
+        "max_results"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "type": "function",
+    "name": "search_clinicaltrials",
+    "description": "Search ClinicalTrials.gov for studies with posted results.\n\nReturns the total number of matching studies and, for each listed study: NCT ID | status | start year | title.",
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "description": "A ClinicalTrials.gov search expression, e.g. 'mindfulness AND depression'.",
+          "title": "Query",
+          "type": "string"
+        },
+        "max_results": {
+          "description": "How many studies to list, at most 50.",
+          "title": "Max Results",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "query",
+        "max_results"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  },
+  {
+    "type": "function",
+    "name": "submit_search_plan",
+    "description": "Record the final search plan. Call this exactly once, when the levels are final.",
+    "parameters": {
+      "$defs": {
+        "SearchLevel": {
+          "properties": {
+            "level": {
+              "description": "reviews: systematic reviews and meta-analyses; primary: studies of the planned design in the target population; full_text: studies whose full text names the outcome, searched in Europe PMC; wider: the primary level with its narrowest concept relaxed; outcome_data: studies reporting the outcome in the target population, any design.",
+              "enum": [
+                "reviews",
+                "primary",
+                "full_text",
+                "wider",
+                "outcome_data"
+              ],
+              "title": "Level",
+              "type": "string"
+            },
+            "query": {
+              "description": "The query for this level: Europe PMC syntax for full_text, PubMed for the others.",
+              "title": "Query",
+              "type": "string"
+            },
+            "why": {
+              "description": "One sentence on what this level adds.",
+              "title": "Why",
+              "type": "string"
+            }
+          },
+          "required": [
+            "level",
+            "query",
+            "why"
+          ],
+          "title": "SearchLevel",
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "levels": {
+          "description": "The levels from the top down (reviews, primary, then full_text, wider or outcome_data if used); the top records of each are screened.",
+          "items": {
+            "$ref": "#/$defs/SearchLevel"
+          },
+          "title": "Levels",
+          "type": "array"
+        },
+        "clinicaltrials_queries": {
+          "description": "The final ClinicalTrials.gov queries (studies with posted results).",
+          "items": {
+            "type": "string"
+          },
+          "title": "Clinicaltrials Queries",
+          "type": "array"
+        },
+        "extra_ids": {
+          "description": "Specific PMIDs or NCT IDs to include regardless of the queries.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Extra Ids",
+          "type": "array"
+        },
+        "summary": {
+          "description": "Two or three sentences on the strategy, for the methods section.",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "levels",
+        "clinicaltrials_queries",
+        "extra_ids",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "strict": true
+  }
+];
+
+export const TOOL_NAMESPACE = "literature";
+
 export const SEARCH_PLAN_RECORDED = "Recorded. Reply with a one-paragraph summary and stop.";
 
 export const MAX_COUNTED = 12;
