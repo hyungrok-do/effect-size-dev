@@ -38,6 +38,8 @@ function send(data) {
 }
 
 async function api(path, body) {
+  // The one-time installer/helper open can pair another tab while this companion is already open.
+  try { accessKey = localStorage.getItem('esf-access-key') || ''; } catch { /* use the key already read */ }
   const response = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'Content-Type': 'application/json', 'X-ESF-Token': accessKey },
@@ -47,7 +49,10 @@ async function api(path, body) {
   const result = await response.json();
   if (!response.ok) {
     const detail = result.error || {};
-    throw Object.assign(new Error(detail.message || result.detail || 'The local helper could not complete this request.'),
+    const message = result.code === 'access_key'
+      ? 'Pair this browser with esf helper open, then connect again. For a manually started helper, open the address printed by esf serve.'
+      : detail.message || result.detail || 'The local helper could not complete this request.';
+    throw Object.assign(new Error(message),
       { status: response.status, code: detail.code || result.code || 'bridge_error', retryable: Boolean(detail.retryable) });
   }
   return result;

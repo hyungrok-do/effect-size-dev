@@ -487,12 +487,12 @@
   </div>
   <div id="local-box" class="local-box" data-missing="false" hidden>
     <h3 id="local-title" tabindex="-1">Use your ChatGPT subscription here</h3>
-    <p>The local helper handles ChatGPT sign-in and model calls on your computer. Your searches and results stay in this browser. Start the helper, connect below, then allow this website and sign in in the companion window. Usage counts against your ChatGPT plan.</p>
+    <p>The local helper handles ChatGPT sign-in and model calls on your computer. Set it up once to start automatically on macOS or Linux, then connect below and sign in in the companion window. Your searches stay in this browser, and usage counts against your ChatGPT plan.</p>
     <label for="helper-address">Local helper address</label>
     <input id="helper-address" type="url" value="http://127.0.0.1:8000" spellcheck="false" aria-describedby="chatgpt-status">
     <div class="actions"><button id="connect-chatgpt" type="button" class="primary">Connect ChatGPT</button><button id="disconnect-chatgpt" type="button" class="secondary" hidden>Disconnect</button></div>
     <p id="chatgpt-status" class="hint" role="status"></p>
-    <details id="helper-setup"><summary>First time? Install and start the helper</summary>
+    <details id="helper-setup"><summary>One-time setup: install the automatic helper</summary>
     <ol class="local-steps">
       <li>Get the code:<div class="cmd"><pre><code>git clone https://github.com/hyungrok-do/effect-size-dev.git
 cd effect-size-dev</code></pre><button type="button" class="secondary small copy" aria-label="Copy the commands of step 1">Copy</button></div></li>
@@ -500,11 +500,12 @@ cd effect-size-dev</code></pre><button type="button" class="secondary small copy
 .venv/bin/python -m pip install -e .</code></pre><button type="button" class="secondary small copy" aria-label="Copy the macOS and Linux commands of step 2">Copy</button></div>
         <span class="os">or on Windows:</span><div class="cmd"><pre><code>py -m venv .venv
 .venv\Scripts\python -m pip install -e .</code></pre><button type="button" class="secondary small copy" aria-label="Copy the Windows commands of step 2">Copy</button></div></li>
-      <li>Start it, on macOS or Linux:<div class="cmd"><pre><code>.venv/bin/esf serve</code></pre><button type="button" class="secondary small copy" aria-label="Copy the macOS and Linux command of step 3">Copy</button></div>
-        <span class="os">or on Windows:</span><div class="cmd"><pre><code>.venv\Scripts\esf serve</code></pre><button type="button" class="secondary small copy" aria-label="Copy the Windows command of step 3">Copy</button></div></li>
+      <li>Enable automatic startup on macOS or Linux with systemd (stop an earlier <code>esf serve</code> with Ctrl+C first):<div class="cmd"><pre><code>.venv/bin/esf helper install</code></pre><button type="button" class="secondary small copy" aria-label="Copy the macOS and Linux command of step 3">Copy</button></div>
+        <span class="os">On Windows, start it manually and keep its terminal open:</span><div class="cmd"><pre><code>.venv\Scripts\esf serve</code></pre><button type="button" class="secondary small copy" aria-label="Copy the Windows command of step 3">Copy</button></div></li>
     </ol>
-    <p><code>esf serve</code> opens a local page in your browser. If it doesn't, open the address it prints; it carries the server's access key. Use this same browser, return here, and click Connect ChatGPT. Keep the helper and companion window open while searching.</p>
-    <p>Already installed? Run <code>git pull --ff-only</code> in its folder, then restart the helper to get the companion connection.</p>
+    <p>Setup opens a local page to pair this browser once; it carries the server's access key. Use this same browser, return here, and click Connect ChatGPT. After automatic setup, you can close the terminal: the helper runs in the background and starts when you log in. Keep the companion window open while searching.</p>
+    <p>Using another browser? Run <code>.venv/bin/esf helper open</code> to pair it. Check the helper with <code>.venv/bin/esf helper status</code>. ChatGPT sign-in is needed again after the helper restarts.</p>
+    <p>After <code>git pull --ff-only</code>, use <code>.venv/bin/esf helper restart</code> to load updates. Remove automatic startup with <code>.venv/bin/esf helper uninstall</code>. Manual startup with <code>esf serve</code> remains available.</p>
     </details>
     <p><button id="forget-saved" type="button" class="secondary small">Forget saved keys</button> Removes any Anthropic, OpenAI or NCBI API key this page keeps, in this tab and on this browser.</p>
     <p id="local-status" class="hint" aria-live="polite"></p>

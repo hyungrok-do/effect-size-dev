@@ -19,7 +19,7 @@ This project was largely generated with Claude Code and is under validation.
 | | Browser edition (`site/`) | Local server (`python/`, `web/`) |
 |---|---|---|
 | Runs | Searches in the page, published on GitHub Pages; ChatGPT calls use a local helper | A Python server on your computer |
-| Install | None for API keys; install and start the helper for a ChatGPT subscription | `pip install -e .` and `esf serve` |
+| Install | None for API keys; one-time helper setup for a ChatGPT subscription | `pip install -e .` and `esf serve` |
 | Agents | Claude API, OpenAI API, or OpenAI subscription through the companion window | Claude API, OpenAI API, or OpenAI subscription (Sign in with ChatGPT, no key) |
 | API key | Each person pastes their own; it goes only to Anthropic or OpenAI | Pasted in the page, or set on the server; none with a subscription |
 | Searches stored | In that person's browser (IndexedDB) | In `data/` on the server |
@@ -160,13 +160,50 @@ Haiku.
 
 ### Sign in with ChatGPT
 
-In the **browser edition**, choose the third card, **OpenAI subscription**. Install this project and
-start `esf serve` on the same computer. Open the address it prints in this same browser once, so the
-local page receives its server access key. Return to the hosted page and click **Connect ChatGPT**
+In the **browser edition**, choose the third card, **OpenAI subscription**. Install this project on
+the same computer, then run `.venv/bin/esf helper install` once on macOS or Linux with systemd.
+It starts the helper in the background, enables startup at login, and opens a local page to pair
+this browser. You can then close the terminal. Return to the hosted page and click **Connect ChatGPT**
 (the helper defaults to `http://127.0.0.1:8000`; change it if you chose another port). In the companion
 window, check the website address, click **Allow this website**, and **Sign in with ChatGPT**. Then
-choose models and run searches in the hosted page. Keep the helper and companion window open.
-An existing installation needs `git pull --ff-only` and a restart to add the companion endpoint.
+choose models and run searches in the hosted page. Keep the companion window open while searching.
+The helper runs in the background. Windows and systems without a user service manager can use
+`esf serve` instead; keep that terminal open, and open the address it prints to pair the browser.
+
+If an earlier `esf serve` is running, stop it with Ctrl+C before installing automatic startup.
+The browser's first pairing and ChatGPT sign-in still require your action; a web page cannot silently
+install a local service. The helper's local connection key is saved in a private file, so the browser
+stays paired across restarts. OAuth access and refresh tokens are **not** saved by this feature:
+sign in with ChatGPT again after the helper restarts (including after logging out or rebooting).
+
+### Automatic helper commands (macOS and Linux)
+
+Run these from the project folder after installing into `.venv`:
+
+```bash
+.venv/bin/esf helper install       # one-time setup; starts now and at login, without sudo
+.venv/bin/esf helper status        # check the running helper
+.venv/bin/esf helper open          # pair a new browser, or pair again after clearing browser data
+.venv/bin/esf helper restart       # load changes after git pull --ff-only
+.venv/bin/esf helper uninstall     # stop and remove automatic startup; keep data and settings
+```
+
+Use `helper install --port 8123` if port 8000 is in use, then set that address on the Agents page.
+`--no-browser` skips the first pairing page; use `helper open` later. Repeating installation with
+unchanged settings leaves an already running helper and its ChatGPT session alone. Keep the checkout
+and virtual environment in place; if you move them, run `helper install` from the new installation.
+
+On macOS this installs only your `~/Library/LaunchAgents/org.effectsizefinder.helper.plist`, using
+`launchd`. Its private connection settings and log are in
+`~/Library/Application Support/Effect Size Finder/`. On Linux it installs a systemd **user** service,
+`effect-size-finder.service`, under `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`),
+with private connection settings under `$XDG_DATA_HOME/effect-size-finder` (default
+`~/.local/share/effect-size-finder`). Logs are available with
+`journalctl --user -u effect-size-finder.service`. No system service, administrator access or browser
+extension is needed. The helper binds only to `127.0.0.1`; its access key appears in neither service
+arguments nor service definitions. The installer preserves the project's data and web folders.
+
+### Subscription connection and credentials
 
 The companion makes same-origin requests to the helper, which holds the OAuth credentials and calls
 OpenAI. Only the account display information, model list, prompts and model responses cross the
@@ -495,4 +532,8 @@ missing. `tests/test_web.py` drives the local page against the server: signing i
 browser's trip to ChatGPT answered with its redirect back) and searching on the plan.
 `tests/test_companion.py` runs a hosted HTTPS page through the local companion, including consent,
 sign-in, search, extraction, summary, reconnecting, credential isolation and the endpoint's access
-checks. All OpenAI calls in these tests are mocked. Set `ESF_CHROMIUM` to use a particular Chromium binary.
+checks. `tests/test_helper.py` checks private configuration, stable pairing, service definitions,
+installation rollback and removal without touching a real startup service. A separate macOS CI job
+opts into its native lifecycle test with `ESF_TEST_LOGIN_SERVICE=1` and actually starts, probes,
+restarts and unloads a launch agent on the runner. All OpenAI calls in these tests are mocked.
+Set `ESF_CHROMIUM` to use a particular Chromium binary.

@@ -389,12 +389,12 @@ function showChatGPT() {
   $('#helper-address').disabled = chatgpt.phase !== 'disconnected';
   const who = [chatgpt.state?.name, chatgpt.state?.email].filter(Boolean).join(' · ');
   $('#chatgpt-status').textContent = chatgpt.error || chatgpt.state?.error || (chatgpt.ready
-    ? `Connected${who ? ` as ${who}` : ''}. Keep the companion window and helper open while searching.`
+    ? `Connected${who ? ` as ${who}` : ''}. Keep the companion window open while searching.`
     : linked ? chatgpt.state?.status === 'connected' ? 'Refresh the model list in the companion window.'
       : 'Sign in with ChatGPT in the companion window.'
       : chatgpt.phase === 'waiting' ? 'Allow this website in the companion window, then sign in.'
         : chatgpt.phase === 'connecting' ? 'Opening the local companion…'
-          : 'Start the helper once, then connect to use your ChatGPT plan in this page.');
+          : 'After the one-time helper setup, connect to use your ChatGPT plan in this page.');
   if (chatgpt.ready) { $('#local-box').dataset.missing = 'false'; $('#local-status').textContent = ''; }
 }
 

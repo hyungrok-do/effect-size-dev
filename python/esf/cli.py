@@ -34,10 +34,41 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--no-browser", action="store_true", help="don't open the page in the default browser")
+    helper = commands.add_parser("helper", help="manage the automatic local helper (macOS or Linux)")
+    actions = helper.add_subparsers(dest="action", required=True)
+    install = actions.add_parser("install", help="start now and automatically at login; pair this browser once")
+    install.add_argument("--port", type=int, help="local port (8000 on first installation)")
+    install.add_argument("--no-browser", action="store_true", help="pair later with esf helper open")
+    for action, description in (("status", "check whether the helper is running"),
+                                ("open", "pair this browser with the running helper"),
+                                ("restart", "restart the helper after updating the code"),
+                                ("uninstall", "stop the helper and remove automatic startup; keep your data")):
+        actions.add_parser(action, help=description)
+    run = actions.add_parser("run", help="run the installed helper (used by the startup service)")
+    run.add_argument("--config", type=Path, required=True)
     args = parser.parse_args(argv)
 
     if args.command == "serve":
         serve_app(args.host, args.port, open_browser=not args.no_browser)
+    elif args.command == "helper":
+        from .helper import Helper, HelperError, run_helper
+
+        try:
+            if args.action == "run":
+                run_helper(args.config)
+            else:
+                automatic = Helper()
+                if args.action == "install":
+                    automatic.install(args.port, open_browser=not args.no_browser)
+                elif args.action == "status":
+                    if not automatic.status():
+                        raise SystemExit(1)
+                elif args.action == "open":
+                    automatic.open()
+                else:
+                    getattr(automatic, args.action)()
+        except (HelperError, OSError) as exc:
+            parser.exit(1, f"{exc}\n")
 
 
 def access_token() -> str:
@@ -140,7 +171,7 @@ def announce(server, address: str, launcher: Path | None, address_file: Path | N
         pass  # the printed address still works
 
 
-def serve_app(host: str, port: int, open_browser: bool = True) -> None:
+def serve_app(host: str, port: int, open_browser: bool = True, *, token: str | None = None, settings=None) -> None:
     import uvicorn
 
     from .config import Settings
@@ -149,8 +180,8 @@ def serve_app(host: str, port: int, open_browser: bool = True) -> None:
     # Everything the server writes (the searches, the sign-in's settings) is for this user only.
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    settings = Settings.from_env()
-    token = access_token()
+    settings = Settings.from_env() if settings is None else settings
+    token = access_token() if token is None else token
     config = uvicorn.Config(create_app(settings, access_token=token), host=host, port=port)
     # Added once Config has set up uvicorn's loggers, so that setup can't leave it out.
     logging.getLogger("uvicorn.access").addFilter(HideCallbackQuery())

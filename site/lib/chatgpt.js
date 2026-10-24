@@ -48,7 +48,7 @@ export class ChatGPTConnection {
     this.error = '';
     this.onChange();
     this.startTimer = setTimeout(() => {
-      this.error = 'The helper did not answer. Start esf serve, open its address in this browser, then connect again.';
+      this.error = 'The helper did not answer. Check esf helper status, or follow the one-time setup below, then connect again.';
       this.onChange();
     }, 10000);
     this.monitor = setInterval(() => {

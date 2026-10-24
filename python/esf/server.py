@@ -467,6 +467,12 @@ def create_app(
             raise HTTPException(404, "No such paper.")
         return paper
 
+    @app.get("/api/helper")
+    def helper_health(request: Request) -> Response:
+        """The startup command checks its own authenticated loopback process, never another service."""
+        _loopback_only(request)
+        return JSONResponse({"app": "effect-size-finder", "version": 1}, headers={"Cache-Control": "no-store"})
+
     @app.get("/api/config")
     def config() -> dict:
         return {

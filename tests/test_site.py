@@ -1300,7 +1300,7 @@ def test_the_subscription_requires_a_companion_before_starting_work(browser, sit
     steps = ["git clone https://github.com/hyungrok-do/effect-size-dev.git\ncd effect-size-dev",
              "python3 -m venv .venv\n.venv/bin/python -m pip install -e .",
              "py -m venv .venv\n.venv\\Scripts\\python -m pip install -e .",
-             ".venv/bin/esf serve", ".venv\\Scripts\\esf serve"]
+             ".venv/bin/esf helper install", ".venv\\Scripts\\esf serve"]
     assert page.locator("#local-box pre").all_inner_texts() == steps
     for n in (1, 2, 4):
         page.locator("#local-box .copy").nth(n).click()
