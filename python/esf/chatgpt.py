@@ -2,7 +2,7 @@
 
 The browser does OpenAI's sign-in (OAuth with PKCE and an OIDC nonce) and comes back to this
 server's loopback callback. Tokens live in this process's memory only and are never written to
-disk; the settings file holds the app's issued client ID and the chosen models, none of them secret.
+disk; the settings file holds the host ID, registration/account binding and chosen models.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import secrets
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -47,6 +48,10 @@ ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,100}")
 REAUTH_CODES = frozenset({
     "invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired",
     "refresh_token_invalidated", "refresh_token_reused",
+})
+API_REAUTH_CODES = REAUTH_CODES | frozenset({
+    "invalid_token", "invalid_api_key", "invalid_authorization_context",
+    "subscription_sharing_invalid_user", "chatpass_v2_scope_not_authorized",
 })
 
 AGAIN = "Sign in with ChatGPT again."
@@ -281,6 +286,8 @@ class ChatGPTSession:
         self._refresh_lock = threading.Lock()
         self._discovered: dict[str, str] | None = None
         self._client_id: str | None = None
+        self._host_id: str | None = None
+        self._registered_subject: str | None = None
         self._manager_model = manager_model
         self._worker_model = worker_model
         self._models_chosen = False  # saved only once chosen, so until then the settings' defaults apply
@@ -309,6 +316,15 @@ class ChatGPTSession:
         client_id = saved.get("client_id")
         if isinstance(client_id, str) and CLIENT_ID.fullmatch(client_id) and client_id != REGISTRATION_ENTRY:
             self._client_id = client_id
+            subject = saved.get("subject")
+            if isinstance(subject, str) and subject:
+                self._registered_subject = subject
+        host_id = saved.get("host_id")
+        if isinstance(host_id, str) and host_id.startswith("urn:uuid:"):
+            try:
+                self._host_id = uuid.UUID(host_id).urn
+            except ValueError:
+                pass
         manager, worker = saved.get("manager_model"), saved.get("worker_model")
         if isinstance(manager, str) and manager.strip() and isinstance(worker, str) and worker.strip():
             self._manager_model, self._worker_model, self._models_chosen = manager, worker, True
@@ -316,6 +332,10 @@ class ChatGPTSession:
     def _save(self) -> None:
         """Write the settings file atomically. Called with _lock held."""
         data: dict[str, Any] = {"client_id": self._client_id}
+        if self._host_id is not None:
+            data["host_id"] = self._host_id
+        if self._client_id is not None and self._registered_subject is not None:
+            data["subject"] = self._registered_subject
         if self._models_chosen:
             data.update(manager_model=self._manager_model, worker_model=self._worker_model)
         try:
@@ -459,7 +479,9 @@ class ChatGPTSession:
         response = self._request("GET", MODELS_URL, headers={"Authorization": f"Bearer {access_token}"})
         body = _json(response)
         if not response.is_success:
-            raise api_error(body, response.status_code)
+            error = api_error(body, response.status_code)
+            self.handle_api_error(access_token, error.code, error.status)
+            raise error
         return _parse_models(body)
 
     def _revoke(self, refresh_token: str, client_id: str | None) -> bool:
@@ -485,12 +507,21 @@ class ChatGPTSession:
             port=port, started_at=self._clock(),
         )
         with self._lock:
+            if self._host_id is None:
+                self._host_id = uuid.uuid4().urn
+                try:
+                    self._save()
+                except ChatGPTError:
+                    self._host_id = None
+                    raise
             client_id = self._client_id
+            host_id = self._host_id
             # Earlier attempts stay valid (a second click, a closed tab): whichever finishes first wins.
             self._attempts = [a for a in self._attempts if not self._expired(a)][-(MAX_PENDING - 1):] + [attempt]
             self._error = None
         params = {
             "client_id": client_id or REGISTRATION_ENTRY,
+            "ext_agent_host_id": host_id,
             "response_type": "code",
             "redirect_uri": redirect_uri(port),
             "scope": SCOPES,
@@ -592,27 +623,39 @@ class ChatGPTSession:
             raise ChatGPTError("invalid_id_token", INVALID_IDENTITY)
         claims = self._verify(id_token, client_id, attempt.nonce)
         with self._refresh_lock:
-            with self._lock:
-                discarded = generation != self._generation
-                if not discarded:
+            try:
+                with self._lock:
+                    if generation != self._generation:
+                        raise ChatGPTError("canceled", f"Sign-in was canceled in {APP_NAME} before it finished.")
+                    if self._registered_subject is not None and claims["sub"] != self._registered_subject:
+                        raise ChatGPTError("account_mismatch", "Sign in with the ChatGPT account originally used to register this app.")
+                    if self._registered_subject is None:
+                        # Also migrates registrations saved before account binding was recorded.
+                        self._registered_subject = claims["sub"]
+                        try:
+                            self._save()
+                        except ChatGPTError:
+                            self._registered_subject = None
+                            raise
                     self._tokens, self._rotation = tokens, None
                     self._status, self._error = "connected", None
                     self._subject = claims["sub"]
                     self._name = claims["name"] if isinstance(claims.get("name"), str) else None
                     self._email = claims["email"] if isinstance(claims.get("email"), str) else None
                     self._models = []
-            if discarded:
-                # Signed out (or canceled) while the code was being exchanged: that wins.
+            except ChatGPTError:
                 self._revoke(tokens.refresh_token, client_id)
-                raise ChatGPTError("canceled", f"Sign-in was canceled in {APP_NAME} before it finished.")
+                raise
         try:
             models = self._fetch_models(tokens.access_token)
         except ChatGPTError as exc:
             with self._lock:
-                self._error = f"You are signed in, but the list of ChatGPT models could not be loaded. {exc}"
+                if self._tokens is tokens:
+                    self._error = f"You are signed in, but the list of ChatGPT models could not be loaded. {exc}"
         else:
             with self._lock:
-                self._models = models
+                if self._tokens is tokens:
+                    self._models = models
 
     # -- tokens -------------------------------------------------------------------
 
@@ -703,6 +746,7 @@ class ChatGPTSession:
         """Forget a registration ChatGPT rejects for good, so the next sign-in registers the app again."""
         with self._lock:
             self._client_id = None
+            self._registered_subject = None
             # Tokens held from before were issued to the rejected registration, so they go too.
             if self._tokens is not None or self._rotation is not None:
                 self._tokens = self._rotation = None
@@ -727,10 +771,31 @@ class ChatGPTSession:
 
     # -- models -------------------------------------------------------------------
 
+    def handle_api_error(self, access_token: str, code: str, status: int | None) -> None:
+        """Invalidate only the credential rejected by the API, never a newer sign-in or refresh."""
+        code = code.replace("subscription_sharing_v2_", "subscription_sharing_")
+        if status != 401 and code not in API_REAUTH_CODES:
+            return
+        with self._refresh_lock:
+            with self._lock:
+                if self._tokens is None or self._tokens.access_token != access_token or self._rotation is not None:
+                    return
+                self._tokens = None
+                self._models = []
+                self._status, self._error = "reauth_required", SIGN_IN_AGAIN
+
     def refresh_models(self) -> list[dict]:
-        models = self._fetch_models(self.access_token())
+        token = self.access_token()
+        try:
+            models = self._fetch_models(token)
+        except ChatGPTError as exc:
+            with self._lock:
+                if self._tokens is not None and self._tokens.access_token == token:
+                    self._error = str(exc)
+            raise
         with self._lock:
-            self._models, self._error = models, None
+            if self._tokens is not None and self._tokens.access_token == token:
+                self._models, self._error = models, None
         return self.state()["models"]
 
     def reasoning_levels(self, model: str) -> list[str] | None:

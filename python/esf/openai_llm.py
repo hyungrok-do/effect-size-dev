@@ -259,6 +259,7 @@ class Responses:
         base_url: str = API,
         retries: int = 3,
         sleep: Callable[[float], None] = time.sleep,
+        on_error: Callable[[str, str, int | None], None] | None = None,
     ):
         self.token = token
         # Long documents and high reasoning effort can take minutes before the stream ends.
@@ -266,6 +267,7 @@ class Responses:
         self.base_url = base_url.rstrip("/")
         self.retries = retries
         self.sleep = sleep
+        self.on_error = on_error
 
     def create(self, body: dict) -> dict:
         for attempt in range(self.retries + 1):
@@ -281,17 +283,23 @@ class Responses:
         raise AssertionError("unreachable")
 
     def _once(self, body: dict) -> dict:
-        headers = {"Authorization": f"Bearer {self.token()}", "Accept": "text/event-stream", "Content-Type": "application/json"}
-        with self.client.stream("POST", f"{self.base_url}/responses", headers=headers, content=json.dumps(body)) as response:
-            request_id = response.headers.get("x-request-id")
-            if response.status_code >= 400:
-                response.read()
-                try:
-                    detail = response.json()
-                except ValueError:
-                    detail = None
-                raise api_error(detail, response.status_code, request_id)
-            return read_stream(response.iter_lines(), request_id)
+        token = self.token()
+        headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream", "Content-Type": "application/json"}
+        try:
+            with self.client.stream("POST", f"{self.base_url}/responses", headers=headers, content=json.dumps(body)) as response:
+                request_id = response.headers.get("x-request-id")
+                if response.status_code >= 400:
+                    response.read()
+                    try:
+                        detail = response.json()
+                    except ValueError:
+                        detail = None
+                    raise api_error(detail, response.status_code, request_id)
+                return read_stream(response.iter_lines(), request_id)
+        except OpenAIError as exc:
+            if self.on_error is not None:
+                self.on_error(token, exc.code, exc.status)
+            raise
 
 
 # -- the steps -------------------------------------------------------------------------------
@@ -328,11 +336,12 @@ class OpenAILLM:
         client: httpx.Client | None = None,
         reasoning_levels: Callable[[str], list[str] | None] | None = None,
         namespaced_tools: bool = True,
+        on_error: Callable[[str, str, int | None], None] | None = None,
     ):
         self.settings = settings
         self.manager_model = manager_model or settings.openai_manager_model
         self.worker_model = worker_model or settings.openai_worker_model
-        self.responses = Responses(token, client)
+        self.responses = Responses(token, client, on_error=on_error)
         self.reasoning_levels = reasoning_levels or (lambda model: None)
         self.namespaced_tools = namespaced_tools
         # Plan usage may not take PDF files; after the first refusal, PDFs go as their text layer.

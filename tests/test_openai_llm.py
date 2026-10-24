@@ -149,6 +149,26 @@ def test_plan_limits_are_not_retried_and_are_explained():
     assert "ChatGPT Settings" in describe_error(caught.value) and "429" in str(caught.value)
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+def test_responses_auth_errors_update_the_chatgpt_session(tmp_path, streamed):
+    from test_chatgpt import signed_in
+
+    session, _, _ = signed_in(tmp_path)
+    if streamed:
+        payload = b'event: error\ndata: {"type":"error","code":"invalid_token"}\n\n'
+        response = (200, payload)
+    else:
+        response = (401, {"error": {"code": "invalid_token"}})
+    api = Scripted([response])
+    llm = OpenAILLM(Settings(), session.access_token, client=httpx.Client(transport=httpx.MockTransport(api)),
+                    on_error=session.handle_api_error)
+    with pytest.raises(OpenAIError) as caught:
+        llm.screen(SPEC, "a paper")
+    assert caught.value.code == "invalid_token" and len(api.requests) == 1
+    assert session.state()["status"] == "reauth_required"
+    assert "Sign in with ChatGPT again" in session.state()["error"]
+
+
 def test_server_errors_and_cut_streams_are_retried():
     failed = openai_sse([], "gpt-6-luna").replace(b"response.completed", b"response.failed").replace(
         b'"status": "completed"', b'"status": "failed", "error": {"code": "server_error", "message": "boom"}')

@@ -189,7 +189,7 @@ def _links(paper: dict) -> dict[str, str]:
 EXPORT_COLUMNS = [
     "paper_id", "source", "id", "doi", "title", "year", "text_used", "extracted_by", "result", "outcome_measure",
     "timepoint", "analysis_population", "adjusted", "relevance", "confidence", "group", "statistic", "value",
-    "describes", "quote", "location", "quote_check", "number_in_quote", "concerns", "flags", "decision",
+    "ci_level", "describes", "quote", "location", "quote_check", "number_in_quote", "concerns", "flags", "decision",
     "decision_reason",
 ]
 
@@ -229,6 +229,7 @@ def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict
                         "group": value["group"],
                         "statistic": value["statistic"],
                         "value": value["value"],
+                        "ci_level": value.get("ci_level") if value.get("ci_level") is not None else "",
                         "describes": value["describes"],
                         "quote": value["quote"],
                         "location": value["location"],
@@ -280,6 +281,7 @@ def create_app(
             manager_model=chosen["manager_model"],
             worker_model=chosen["worker_model"],
             reasoning_levels=session.reasoning_levels,
+            on_error=session.handle_api_error,
         )
 
     llm_for_chatgpt = llm_for_chatgpt or plan_llm

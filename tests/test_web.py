@@ -57,7 +57,8 @@ def served(tmp_path, monkeypatch):
         chosen = chatgpt.state()
         plans.append((chosen["manager_model"], chosen["worker_model"]))
         return OpenAILLM(settings, chatgpt.access_token, chosen["manager_model"], chosen["worker_model"],
-                         client=httpx.Client(transport=httpx.MockTransport(responses)), reasoning_levels=chatgpt.reasoning_levels)
+                         client=httpx.Client(transport=httpx.MockTransport(responses)), reasoning_levels=chatgpt.reasoning_levels,
+                         on_error=chatgpt.handle_api_error)
 
     def on_key(key, manager, worker):
         keyed.append((key, manager, worker))
@@ -386,6 +387,28 @@ def test_sign_in_with_chatgpt_and_search_on_the_plan(browser, served):
     page.click("#agents-done")
     page.click("#summarize")
     assert page.is_visible("#agents-page") and page.inner_text("#chatgpt-status") == "Sign in with ChatGPT first."
+    assert not page.errors, page.errors
+    context.close()
+
+
+def test_rejected_catalog_credentials_show_the_sign_in_action(browser, served):
+    sign_in = served["sign_in"]
+    authorization = httpx.post(served["url"] + "api/chatgpt/sign-in").json()["url"]
+    callback = served["url"] + "auth/callback?" + sign_in.authorize(authorization)
+    assert httpx.get(callback).status_code == 200
+    context, page = open_page(browser, served)
+    page.wait_for_selector("#agents-page:not([hidden])")
+    card(page, "chatgpt").click()
+    page.wait_for_function("document.querySelector('#chatgpt-status').textContent.startsWith('Signed in as')")
+    assert page.is_hidden("#chatgpt-sign-in")
+    sign_in.catalog_status, sign_in.catalog = 401, {"error": {"code": "invalid_token"}}
+    card(page, "anthropic").click()
+    with page.expect_response("**/api/chatgpt?refresh=true"):
+        card(page, "chatgpt").click()
+    page.wait_for_selector("#chatgpt-sign-in:not([hidden])")
+    assert page.inner_text("#chatgpt-sign-in") == "Sign in with ChatGPT again"
+    assert page.is_disabled("#model-manager") and page.is_disabled("#model-worker")
+    assert "expired or was revoked" in page.inner_text("#chatgpt-status")
     assert not page.errors, page.errors
     context.close()
 

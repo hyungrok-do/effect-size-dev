@@ -281,6 +281,10 @@ def test_browser_ports_match_python(browser, site_url):
         ])]), text, False),
         (_extraction([_result([_value("Mindfulness", "mean", 7.7, ABSTRACT_LINE)])]), ABSTRACT_LINE, True),
     ]
+    negative = "The adjusted difference was −2.2 points and the study followed the participants for twelve weeks after treatment ended."
+    for quote in (negative, negative.replace("−2.2", "2.2")):
+        for reliable in (True, False):
+            cases.append((_extraction([_result([_value("A vs B", "mean_difference", 2.2, quote)])]), negative, reliable))
     keys = [f"project:{i}" for i in range(50)]
     g_cases = [0, 1.5, 100.0, 1234567, 0.00001, 0.0001, -2.2, 12.345678, 1e21]
     data = {
@@ -341,6 +345,41 @@ def test_browser_ports_match_python(browser, site_url):
     ]
 
 
+def test_confidence_levels_are_preserved_in_browser_display_export_and_evidence(browser, site_url):
+    page = browser.new_page()
+    page.goto(site_url)
+    paper = _paper(1, [("PHQ-9", "12 weeks", [("A vs B", "mean_difference", -2.2),
+                                             ("A vs B", "ci_lower", -3.4), ("A vs B", "ci_upper", -1)])])
+    result = page.evaluate("""async (paper) => {
+        const { groupLine } = await import('/lib/review-view.js');
+        const { exportRows } = await import('/lib/export.js');
+        const { buildEvidence, decisionsBasis } = await import('/lib/evidence.js');
+        const values = paper.extraction.results[0].values;
+        const outputs = [90, 95, 99, null].map((level) => {
+            for (const v of values.slice(1)) v.ci_level = level;
+            return {
+                line: groupLine(values).text,
+                loose: groupLine(values.slice(1)).text,
+                csv: exportRows([paper], {}, false).map((v) => v.ci_level),
+                evidence: buildEvidence([paper], {}, null).values.map((v) => v.ci_level),
+                basis: decisionsBasis([paper], {}),
+            };
+        });
+        values[1].ci_level = 90;
+        values[2].ci_level = 99;
+        return {outputs, conflicting: groupLine(values).text};
+    }""", paper)
+    for output, level in zip(result["outputs"], [90, 95, 99, None]):
+        prefix = f"{level}% " if level is not None else ""
+        assert output["line"] == f"MD -2.2 ({prefix}CI -3.4 to -1)"
+        assert output["loose"] == f"{prefix}CI -3.4 to -1"
+        assert output["csv"] == ["", level if level is not None else "", level if level is not None else ""]
+        assert output["evidence"] == [None, level, level]
+    assert result["outputs"][0]["basis"] != result["outputs"][1]["basis"]
+    assert result["conflicting"] == "MD -2.2 (CI -3.4 to -1)"
+    page.close()
+
+
 def test_results_read_as_a_line_per_group(browser, site_url):
     """The review shows each group's numbers in the usual shorthand, as printed, with n beside them."""
     page = browser.new_page()
@@ -369,16 +408,16 @@ def test_results_read_as_a_line_per_group(browser, site_url):
     assert lines == [
         {"text": "8.1 ± 4.2", "n": 100},
         {"text": "-1.5 ± 0.4 (SE)", "n": None},
-        {"text": "MD -2.2 (95% CI -3.4 to -1) · p = 0.001", "n": None},
+        {"text": "MD -2.2 (CI -3.4 to -1) · p = 0.001", "n": None},
         {"text": "12/100 events (12%)", "n": 100},
         {"text": "median 7 [4–11]", "n": 30},
-        {"text": "HR 0.71 (95% CI 0.55 to 0.92)", "n": None},
+        {"text": "HR 0.71 (CI 0.55 to 0.92)", "n": None},
         {"text": "change -3.1 ± 5 · ICC 0.05", "n": None},
         {"text": "n 100 · Other 3", "n": 98},
-        {"text": "MD -3.2 (95% CI -5.1 to -1.3) · SMD 0.45 (95% CI 0.1 to 0.8)", "n": None},
-        {"text": "mean 25.1 · change -3.2 (95% CI -4.5 to -1.9)", "n": None},
-        {"text": "8.1 ± 4.2 (95% CI 7.3 to 8.9)", "n": None},
-        {"text": "95% CI 1 to 2", "n": None},
+        {"text": "MD -3.2 (CI -5.1 to -1.3) · SMD 0.45 (CI 0.1 to 0.8)", "n": None},
+        {"text": "mean 25.1 · change -3.2 (CI -4.5 to -1.9)", "n": None},
+        {"text": "8.1 ± 4.2 (CI 7.3 to 8.9)", "n": None},
+        {"text": "CI 1 to 2", "n": None},
     ], lines
     # The search map's stages for searches in each state.
     plan = {"levels": [{"level": "primary", "query": "q"}], "clinicaltrials_queries": [], "extra_ids": []}

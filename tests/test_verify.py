@@ -19,8 +19,10 @@ def test_numbers_in_reads_journal_typography():
     assert numbers_in("PHQ-9 at 12 weeks: 8.1%") == [-9, 12, 8.1]
 
 
-def test_number_in_accepts_a_sign_written_in_words():
-    assert number_in(-3.1, "reduced by 3.1 points")
+def test_number_in_preserves_the_printed_sign():
+    assert not number_in(-3.1, "reduced by 3.1 points")
+    assert not number_in(2.2, "−2.2 (−3.4 to −1.0)")
+    assert number_in(-2.2, "−2.2 (−3.4 to −1.0)")
     assert number_in(4.2, "8.1 (4.2)")
     assert not number_in(4.25, "8.1 (4.2)")
 
@@ -38,6 +40,20 @@ def test_value_check_tolerates_scrambled_pdf_text_only():
     assert not check.ok(quotes_reliable=True)
     assert check.ok(quotes_reliable=False)
     assert not ValueCheck(quote="exact", number_in_quote=False, number_in_source=True).ok(False)
+    assert not ValueCheck(quote="approximate", number_in_quote=True, number_in_source=False).ok(False)
+
+
+def test_sign_errors_escalate_even_with_approximate_quotes_or_pdf_text():
+    source = "The adjusted difference was −2.2 points and the study followed the participants for twelve weeks after treatment ended."
+    for quote in (source, source.replace("−2.2", "2.2")):
+        extraction = _extraction([_result([_value("A vs B", "mean_difference", 2.2, quote)])])
+        for reliable in (True, False):
+            report = verify(extraction, source, quotes_reliable=reliable)
+            assert report.flags and escalation_reasons(extraction, report)
+            assert not report.values[0][0].number_in_source
+    assert Source(source).find_quote(source.replace("−2.2", "2.2")) == "approximate"
+    correct = _extraction([_result([_value("A vs B", "mean_difference", -2.2, source)])])
+    assert verify(correct, source).flags == []
 
 
 def test_plausibility_flags():

@@ -73,11 +73,12 @@ export function buildEvidence(papers, decisions, overlap) {
           group: v.group,
           statistic: v.statistic,
           value: v.value,
+          ci_level: v.ci_level ?? null,
           describes: v.describes,
           n: v.statistic === 'n' || !sizes.has(v.group) ? null : sizes.get(v.group),
           relevance: r.relevance,
           confidence: r.confidence,
-          quote_found: Boolean(check && check.quote !== 'missing' && check.number_in_quote),
+          quote_found: Boolean(check && check.quote !== 'missing' && check.number_in_quote && check.number_in_source),
           same_participants_as: useInstead.get(recordKey(p)) ?? null,
         });
       });
@@ -92,5 +93,5 @@ export function buildEvidence(papers, decisions, overlap) {
 export function decisionsBasis(papers, decisions) {
   return extracted(papers).map((p) => [p.id, p.status,
     Object.entries(decisions[p.id] || {}).map(([k, d]) => [Number(k), d.decision]).sort((a, b) => a[0] - b[0]),
-    p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value])])]);
+    p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value, v.ci_level ?? null])])]);
 }

@@ -10,7 +10,7 @@ export const effectiveDecision = (decisions, index) => decisions?.[index] || dec
 export const COLUMNS = [
   'paper_id', 'source', 'id', 'doi', 'title', 'year', 'text_used', 'extracted_by', 'result', 'outcome_measure',
   'timepoint', 'analysis_population', 'adjusted', 'relevance', 'confidence', 'group', 'statistic', 'value',
-  'describes', 'quote', 'location', 'quote_check', 'number_in_quote', 'concerns', 'flags', 'decision',
+  'ci_level', 'describes', 'quote', 'location', 'quote_check', 'number_in_quote', 'concerns', 'flags', 'decision',
   'decision_reason',
 ];
 
@@ -30,6 +30,7 @@ export function exportRows(papers, decisions, includedOnly) {
           result: index + 1, outcome_measure: result.outcome_measure, timepoint: result.timepoint,
           analysis_population: result.analysis_population, adjusted: result.adjusted, relevance: result.relevance,
           confidence: result.confidence, group: value.group, statistic: value.statistic, value: value.value,
+          ci_level: value.ci_level ?? '',
           describes: value.describes, quote: value.quote, location: value.location, quote_check: check.quote ?? '',
           number_in_quote: check.number_in_quote ?? '', concerns: result.concerns.join('; '),
           flags: flags.filter((f) => f.startsWith(`result ${index + 1} `)).join('; '),

@@ -90,11 +90,13 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                     "group": v["group"],
                     "statistic": v["statistic"],
                     "value": v["value"],
+                    "ci_level": v.get("ci_level"),
                     "describes": v["describes"],
                     "n": None if v["statistic"] == "n" else sizes.get(v["group"]),
                     "relevance": r["relevance"],
                     "confidence": r["confidence"],
-                    "quote_found": bool(check and check["quote"] != "missing" and check["number_in_quote"]),
+                    "quote_found": bool(check and check["quote"] != "missing" and check["number_in_quote"]
+                                        and check["number_in_source"]),
                     "same_participants_as": use_instead.get(record_key(p)),
                 })
     kept = {v["record"] for v in values}
@@ -108,7 +110,7 @@ def decisions_basis(papers: list[dict], decisions: dict) -> list:
 
 
 def _values_of(paper: dict) -> list:
-    return [[r["outcome_measure"], r["timepoint"], [[v["group"], v["statistic"], v["value"]] for v in r["values"]]]
+    return [[r["outcome_measure"], r["timepoint"], [[v["group"], v["statistic"], v["value"], v.get("ci_level")] for v in r["values"]]]
             for r in paper["extraction"]["results"]]
 
 

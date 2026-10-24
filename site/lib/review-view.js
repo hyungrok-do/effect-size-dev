@@ -236,12 +236,20 @@ const EFFECTS = {
   risk_difference: 'RD', icc: 'ICC', correlation: 'r',
 };
 
-// Statistics a 95% CI can be reported for, and the CI bounds.
+// Statistics a CI can be reported for, and the CI bounds.
 const ESTIMATES = new Set(['mean', 'mean_change', 'median', 'percent', ...Object.keys(EFFECTS)]);
 const BOUNDS = new Set(['ci_lower', 'ci_upper']);
 
+function intervalText(lower, upper) {
+  const bounds = [lower, upper].filter(Boolean);
+  const level = bounds[0]?.ci_level;
+  const known = typeof level === 'number' && level > 0 && level < 100
+    && bounds.every((v) => v.ci_level === level);
+  return `${known ? `${level}% ` : ''}CI ${lower?.value ?? '?'} to ${upper?.value ?? '?'}`;
+}
+
 // One group's numbers in the usual shorthand, as printed: mean ± SD, median [Q1–Q3], events/n, an
-// effect with its 95% CI, p. A CI goes with the estimate it follows in the paper (else the one after
+// effect with its reported CI, p. A CI goes with the estimate it follows in the paper (else the one after
 // it). Returns {text, n}; anything else is listed by name.
 export function groupLine(values) {
   const ciOf = new Map(); // estimate -> {ci_lower, ci_upper}
@@ -252,7 +260,7 @@ export function groupLine(values) {
     const owner = before || values.slice(i + 1).find((x) => ESTIMATES.has(x.statistic));
     const ci = owner && (ciOf.get(owner) || {});
     if (ci && ci[v.statistic] === undefined) {
-      ci[v.statistic] = v.value;
+      ci[v.statistic] = v;
       ciOf.set(owner, ci);
     } else {
       loose.push(v);
@@ -260,7 +268,7 @@ export function groupLine(values) {
   });
   const ci = (estimate) => {
     const c = ciOf.get(estimate);
-    return c ? ` (95% CI ${c.ci_lower ?? '?'} to ${c.ci_upper ?? '?'})` : '';
+    return c ? ` (${intervalText(c.ci_lower, c.ci_upper)})` : '';
   };
   const left = values.filter((v) => !BOUNDS.has(v.statistic));
   const has = (stat) => left.some((v) => v.statistic === stat);
@@ -301,9 +309,9 @@ export function groupLine(values) {
     }
   }
   for (let i = 0; i < loose.length; i++) {
-    const lower = loose[i].statistic === 'ci_lower' ? loose[i].value : null;
-    const upper = lower == null ? loose[i].value : loose[i + 1]?.statistic === 'ci_upper' ? loose[++i].value : null;
-    parts.push(`95% CI ${lower ?? '?'} to ${upper ?? '?'}`);
+    const lower = loose[i].statistic === 'ci_lower' ? loose[i] : null;
+    const upper = lower == null ? loose[i] : loose[i + 1]?.statistic === 'ci_upper' ? loose[++i] : null;
+    parts.push(intervalText(lower, upper));
   }
   if (has('p_value')) parts.push(`p = ${take('p_value').value}`);
   for (const v of left) parts.push(`${STATISTICS[v.statistic] || v.statistic} ${v.value}`);
@@ -324,7 +332,7 @@ export function resultLines(result) {
 }
 
 // How many of a result's values did not pass the quote check (`checks` from the verification).
-const toCheck = (checks) => checks.filter((c) => c && (!c.number_in_quote || c.quote !== 'exact')).length;
+const toCheck = (checks) => checks.filter((c) => c && (!c.number_in_quote || !c.number_in_source || c.quote !== 'exact')).length;
 
 const POPULATIONS = {
   itt: 'ITT', modified_itt: 'Modified ITT', per_protocol: 'Per protocol', completers: 'Completers', unclear: 'Population unclear',
@@ -337,6 +345,7 @@ const EXCLUDE_REASONS = [
 function checkBadge(check) {
   if (!check) return '';
   if (!check.number_in_quote) return badge('number not in quote', 'err');
+  if (!check.number_in_source) return badge('number not in source', 'err');
   if (check.quote === 'exact') return badge('quote found', 'ok');
   if (check.quote === 'approximate') return badge('near match', 'warn');
   return check.number_in_source ? badge('number in text, quote not matched', 'warn') : badge('not found', 'err');

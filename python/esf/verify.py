@@ -37,8 +37,8 @@ def _same(a: float, b: float) -> bool:
 
 
 def number_in(value: float, text: str) -> bool:
-    """Is the value printed in the text? A sign written in words ('reduced by 3.1') still counts."""
-    return any(_same(n, value) or _same(abs(n), abs(value)) for n in numbers_in(text))
+    """Is the value printed in the text, including its sign? Never infer a sign from prose."""
+    return any(_same(n, value) for n in numbers_in(text))
 
 
 class Source:
@@ -63,7 +63,7 @@ class Source:
         return "missing"
 
     def has_number(self, value: float) -> bool:
-        return any(_same(n, value) or _same(abs(n), abs(value)) for n in self.numbers)
+        return any(_same(n, value) for n in self.numbers)
 
 
 @dataclass
@@ -73,7 +73,7 @@ class ValueCheck:
     number_in_source: bool
 
     def ok(self, quotes_reliable: bool) -> bool:
-        if not self.number_in_quote:
+        if not self.number_in_quote or not self.number_in_source:
             return False
         if self.quote != "missing":
             return True

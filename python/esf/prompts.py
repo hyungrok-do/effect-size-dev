@@ -104,8 +104,9 @@ result, list every reported number as its own value with the verbatim text it ap
 location. For a number in a table, quote the whole table row it sits in, as written. Group sizes \
 (n) belong in the same result as the means they go with.
 
-Label statistics exactly as the document does: an SE is "se", not "sd"; a 95% CI bound is ci_lower \
-or ci_upper, with describes saying what the interval is for. Keep the sign of a value as printed. \
+Label statistics exactly as the document does: an SE is "se", not "sd"; a confidence interval bound is ci_lower \
+or ci_upper, with describes saying what the interval is for. Set ci_level to the reported confidence \
+level in percent (90, 95, 99, etc.), or null if unstated or not a CI bound; never assume 95%. Keep the sign of a value as printed. \
 List anything a statistician should double-check under concerns: an SD that may be an SE, \
 change-from-baseline versus endpoint values, values read from a figure, a multi-arm trial, \
 cluster or crossover designs, imputed data.
@@ -117,7 +118,8 @@ You are the senior reviewer for an extraction a junior reviewer made from the do
 automatic checks raised the flags listed. Re-read the document, then return a corrected, complete \
 extraction in the same format: fix wrong numbers, labels, groups, and quotes; add missed results; \
 remove values the document does not print. Every value must carry verbatim text from the document \
-that contains it. Never compute or convert values yourself.
+that contains it. Preserve the printed sign. For CI bounds, record the stated confidence level in \
+ci_level as a percent; use null if unstated or not a CI bound, never a default of 95%. Never compute or convert values yourself.
 
 If a flag turns out to be a false alarm, keep the value and say so in notes. Note anything the \
 investigator should check by hand, such as values only readable from a figure.

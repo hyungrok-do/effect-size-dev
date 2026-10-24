@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Design = Literal[
     "parallel_rct",
@@ -221,11 +221,25 @@ class ReportedValue(BaseModel):
     )
     statistic: Statistic
     value: float = Field(description="The number exactly as printed (percent as 23.5, not 0.235).")
+    ci_level: float | None = Field(
+        gt=0, lt=100,
+        description="For ci_lower/ci_upper only: the reported confidence level as a percent (e.g. 90, 95, 99). "
+        "Null for other statistics or when the level is not stated. Never assume 95%.",
+    )
     describes: str = Field(
         description="What the number is, e.g. 'PHQ-9 at 12 weeks', '95% CI of the mean difference'."
     )
     quote: str = Field(description="Verbatim text from the document that contains this number.")
     location: str = Field(description="Where it is: 'Table 2', 'Abstract', 'Results, paragraph 3'.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_confidence_level(cls, data):
+        # Existing saved extractions have no structured confidence level. Keep that unknown while
+        # requiring new model outputs to explicitly supply the nullable field in their JSON schema.
+        if isinstance(data, dict) and "ci_level" not in data:
+            return {**data, "ci_level": None}
+        return data
 
 
 class OutcomeResult(BaseModel):

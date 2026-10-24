@@ -6,6 +6,7 @@ import secrets
 import stat
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, urlencode
 
@@ -91,6 +92,7 @@ class FakeOpenAI:
         parsed = httpx.URL(url)
         assert (parsed.scheme, parsed.host, parsed.path) == ("https", "auth.openai.com", "/oauth/authorize")
         params = dict(parsed.params)
+        assert uuid.UUID(params["ext_agent_host_id"]).urn == params["ext_agent_host_id"]
         self.authorizations.append(params)
         registering = params["client_id"] == REGISTRATION_ENTRY
         if not registering:
@@ -191,6 +193,8 @@ def test_the_first_sign_in_registers_the_app_and_later_ones_reuse_its_client_id(
     assert params["redirect_uri"] == redirect_uri(PORT) == "http://127.0.0.1:8765/auth/callback"
     assert params["response_type"] == "code" and params["scope"] == SCOPES and params["resource"] == RESOURCE
     assert params["code_challenge_method"] == "S256" and len(params["state"]) >= 43 and len(params["nonce"]) >= 43
+    assert uuid.UUID(params["ext_agent_host_id"]).version == 4
+    assert saved(tmp_path)["host_id"] == params["ext_agent_host_id"]
 
     session.finish(api.authorize(url), HOST)
     exchange = api.token_forms[0]
@@ -205,10 +209,14 @@ def test_the_first_sign_in_registers_the_app_and_later_ones_reuse_its_client_id(
     assert again["redirect_uri"] == "http://127.0.0.1:9000/auth/callback"
     assert again["state"] != params["state"] and again["nonce"] != params["nonce"]
     assert again["code_challenge"] != params["code_challenge"]
+    assert again["ext_agent_host_id"] == params["ext_agent_host_id"]
 
     # A later process reads the registration from the settings file.
     later, _, _ = new_session(tmp_path, api)
     assert dict(httpx.URL(later.start(PORT)).params)["client_id"] == api.client_id
+    assert dict(httpx.URL(later.start(PORT)).params)["ext_agent_host_id"] == params["ext_agent_host_id"]
+    other, _, _ = new_session(tmp_path / "other-host", api)
+    assert dict(httpx.URL(other.start(PORT)).params)["ext_agent_host_id"] != params["ext_agent_host_id"]
 
 
 def test_discovery_is_checked_and_cached_only_once_it_succeeds(tmp_path):
@@ -241,7 +249,8 @@ def test_sign_in_connects_and_keeps_no_token_on_disk(tmp_path):
     state = session.state()
     assert state["status"] == "connected" and state["error"] is None
     assert (state["name"], state["email"]) == ("Ada Lovelace", "ada@example.com")
-    assert saved(tmp_path) == {"client_id": api.client_id}  # the models are saved only once chosen
+    assert saved(tmp_path) == {"client_id": api.client_id, "subject": api.subject,
+                               "host_id": api.authorizations[0]["ext_agent_host_id"]}
     path = tmp_path / "settings" / "chatgpt.json"
     if os.name == "posix":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -430,7 +439,7 @@ def test_the_issued_client_id_is_checked(tmp_path, changes):
     with pytest.raises(ChatGPTError) as caught:
         session.finish(api.authorize(session.start(PORT), **changes), HOST)
     assert caught.value.code == "registration_incomplete"
-    assert not (tmp_path / "settings" / "chatgpt.json").exists() and api.token_forms == []
+    assert saved(tmp_path)["client_id"] is None and "subject" not in saved(tmp_path) and api.token_forms == []
 
 
 def test_a_client_id_that_differs_from_the_saved_one_is_refused(tmp_path):
@@ -682,7 +691,9 @@ def test_sign_out_revokes_the_refresh_token_and_keeps_the_registration(tmp_path)
     assert state["status"] == "disconnected" and state["error"] is None
     assert state["name"] is None and state["email"] is None and state["models"] == []
     assert (state["manager_model"], state["worker_model"]) == ("gpt-6-luna", "gpt-6-mini")
-    assert saved(tmp_path) == {"client_id": api.client_id, "manager_model": "gpt-6-luna", "worker_model": "gpt-6-mini"}
+    assert saved(tmp_path) == {"client_id": api.client_id, "subject": api.subject,
+                               "host_id": api.authorizations[0]["ext_agent_host_id"],
+                               "manager_model": "gpt-6-luna", "worker_model": "gpt-6-mini"}
     with pytest.raises(ChatGPTError) as caught:
         session.access_token()
     assert caught.value.code == "signed_out"
@@ -725,7 +736,9 @@ def test_set_models_checks_the_catalog_and_persists(tmp_path):
     assert state["status"] == "disconnected" and state["models"] == []
     assert (state["manager_model"], state["worker_model"]) == ("gpt-6-luna", "gpt-6-mini")
     later.set_models("anything", "goes")  # no catalog loaded yet
-    assert saved(tmp_path) == {"client_id": api.client_id, "manager_model": "anything", "worker_model": "goes"}
+    assert saved(tmp_path) == {"client_id": api.client_id, "subject": api.subject,
+                               "host_id": api.authorizations[0]["ext_agent_host_id"],
+                               "manager_model": "anything", "worker_model": "goes"}
 
 
 def test_the_default_models_apply_until_a_choice_is_made(tmp_path):
@@ -759,3 +772,113 @@ def test_a_corrupt_settings_file_is_ignored(tmp_path):
     assert session.state()["manager_model"] == "gpt-6.1-sol"
     session.finish(api.authorize(session.start(PORT)), HOST)
     assert saved(tmp_path)["client_id"] == api.client_id
+
+
+@pytest.mark.parametrize("returning", ["connected", "signed_out", "restarted"])
+def test_returning_sign_in_cannot_replace_the_registered_account(tmp_path, returning):
+    session, api, clock = signed_in(tmp_path)
+    original = saved(tmp_path)
+    if returning == "signed_out":
+        session.sign_out()
+    elif returning == "restarted":
+        session, _, _ = new_session(tmp_path, api, clock)
+    api.subject = "another-account"
+    api.access, api.refresh = "other-access", "other-refresh"
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(session.start(PORT)), HOST)
+    assert caught.value.code == "account_mismatch"
+    assert saved(tmp_path) == original
+    assert api.revocations[-1]["token"] == "other-refresh"
+    if returning == "connected":
+        assert session.access_token() == "at-1"
+    else:
+        assert session.state()["status"] == "disconnected"
+    api.subject, api.access, api.refresh = "user-ada", "new-access", "new-refresh"
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    assert session.access_token() == "new-access"
+
+
+def test_legacy_registration_is_bound_after_verified_sign_in(tmp_path):
+    path = tmp_path / "settings" / "chatgpt.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"client_id": "app_Test123"}))
+    session, api, _ = new_session(tmp_path)
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    assert saved(tmp_path)["subject"] == api.subject
+    later, _, _ = new_session(tmp_path, api)
+    api.subject = "someone-else"
+    with pytest.raises(ChatGPTError) as caught:
+        later.finish(api.authorize(later.start(PORT)), HOST)
+    assert caught.value.code == "account_mismatch"
+
+
+def test_identity_binding_must_be_saved_before_tokens_are_installed(tmp_path, monkeypatch):
+    session, api, _ = new_session(tmp_path)
+    callback = api.authorize(session.start(PORT))
+    save = session._save
+
+    def fail_binding_save():
+        if session._registered_subject is not None:
+            raise ChatGPTError("storage_failed", "settings are read-only")
+        save()
+
+    monkeypatch.setattr(session, "_save", fail_binding_save)
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(callback, HOST)
+    assert caught.value.code == "storage_failed"
+    assert session.state()["status"] == "disconnected"
+    assert "subject" not in saved(tmp_path)
+    assert api.revocations[-1]["token"] == "rt-1"
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_catalog_401_requires_sign_in_again(tmp_path, initial):
+    session, api, _ = new_session(tmp_path)
+    if not initial:
+        session.finish(api.authorize(session.start(PORT)), HOST)
+    api.catalog_status, api.catalog = 401, {"error": {"code": "invalid_token"}}
+    if initial:
+        session.finish(api.authorize(session.start(PORT)), HOST)
+    else:
+        with pytest.raises(ChatGPTError):
+            session.refresh_models()
+    assert session.state()["status"] == "reauth_required"
+    assert "Sign in with ChatGPT again" in session.state()["error"]
+    assert session.state()["models"] == []
+    with pytest.raises(ChatGPTError) as caught:
+        session.access_token()
+    assert caught.value.code == "reauth_required"
+
+
+def test_catalog_temporary_error_is_visible_without_disconnecting(tmp_path):
+    session, api, _ = signed_in(tmp_path)
+    api.catalog_status, api.catalog = 503, {}
+    with pytest.raises(ChatGPTError):
+        session.refresh_models()
+    assert session.state()["status"] == "connected"
+    assert "503" in session.state()["error"]
+    api.catalog_status, api.catalog = 200, CATALOG
+    assert session.refresh_models()
+    assert session.state()["error"] is None
+
+
+def test_late_auth_failure_cannot_invalidate_a_refreshed_token(tmp_path):
+    session, _, clock = signed_in(tmp_path)
+    old = session.access_token()
+    clock.now += 3600
+    fresh = session.access_token()
+    session.handle_api_error(old, "invalid_token", 401)
+    assert session.access_token() == fresh
+    assert session.state()["error"] is None
+    session.handle_api_error(fresh, "invalid_token", 401)
+    assert session.state()["status"] == "reauth_required"
+
+
+@pytest.mark.parametrize("code,status", [
+    ("subscription_sharing_usage_limit_exceeded", 429), ("model_not_found", 403),
+    ("insufficient_quota", 429), ("server_error", 503),
+])
+def test_non_auth_api_errors_keep_the_session(tmp_path, code, status):
+    session, _, _ = signed_in(tmp_path)
+    session.handle_api_error(session.access_token(), code, status)
+    assert session.access_token() == "at-1" and session.state()["status"] == "connected"

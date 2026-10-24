@@ -171,10 +171,10 @@ OpenAI offers this self-serve to open-source apps that run on your own computer:
 the subscription is shown but can't be chosen; use the OpenAI API with a key, or the local edition. Open the local page on the computer that runs the server (the server
 refuses a sign-in started from another machine). The sign-in uses OAuth with PKCE and an OIDC nonce,
 and the identity token is verified against OpenAI's signing keys (`python/esf/chatgpt.py`). Only the
-app's registration (its issued client ID) and your choice of models are saved, in
+app's stable host ID, registration (its issued client ID and verified account subject), and your choice of models are saved, in
 `data/chatgpt.json`; the tokens stay in the server's memory, are renewed as they expire, and are gone
 when the server stops, so you sign in again after a restart. **Sign out** revokes them; you can also
-disconnect the app in ChatGPT Settings.
+disconnect the app in ChatGPT Settings. Returning sign-ins must use the account that registered this app.
 
 While a sign-in waits in the ChatGPT tab, **Cancel** drops it; starting it again keeps the first tab
 valid. If the plan's share runs out, or the sign-in expires, during a search, the search stops and

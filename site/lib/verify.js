@@ -23,7 +23,7 @@ export const squash = (text) => normalize(text).replace(/[^a-z0-9.%-]/g, '');
 export const numbersIn = (text) => [...normalize(text).matchAll(NUMBER)].map((m) => parseFloat(m[0].replaceAll(',', '')));
 
 const same = (a, b) => Math.abs(a - b) <= Math.max(1e-9 * Math.max(Math.abs(a), Math.abs(b)), 1e-12);
-const matches = (value) => (n) => same(n, value) || same(Math.abs(n), Math.abs(value));
+const matches = (value) => (n) => same(n, value);
 // Python's format(x, 'g'): 6 significant digits, exponent below 1e-4 or from 1e6, no trailing zeros.
 export function g(x) {
   const n = Number(x);
@@ -35,7 +35,7 @@ export function g(x) {
   return String(rounded);
 }
 
-// Is the value printed in the text? A sign written in words ('reduced by 3.1') still counts.
+// Is the value printed in the text, including its sign? Never infer a sign from prose.
 export const numberIn = (value, text) => numbersIn(text).some(matches(value));
 
 export class Source {
@@ -64,7 +64,7 @@ export class Source {
 }
 
 export function checkOk(check, quotesReliable) {
-  if (!check.number_in_quote) return false;
+  if (!check.number_in_quote || !check.number_in_source) return false;
   if (check.quote !== 'missing') return true;
   // A PDF's text layer often scrambles tables; then accept a number that occurs in the text.
   return !quotesReliable && check.number_in_source;
