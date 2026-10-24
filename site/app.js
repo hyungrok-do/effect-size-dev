@@ -40,15 +40,24 @@ const LEVEL_SHORT = {
 // How the agents run, as the Agents page offers it (PROVIDER_INFO in providers.js): Claude's or
 // OpenAI's models with the person's own key. The third way, OpenAI's models on a ChatGPT
 // subscription, is in the local edition only: OpenAI allows that sign-in only for apps that run on
-// the person's own computer, and this page is served from the web.
+// the person's own computer, and this page is served from the web. It can still be chosen here,
+// so the page can say how to run the local edition; it has no client, so nothing runs on it.
 const PROVIDERS = {
   anthropic: {
     ...PROVIDER_INFO.anthropic, defaults: MODELS, roles: ['manager', 'fetcher', 'worker'], storage: 'esf-anthropic-api-key',
     canFetch: true, client: (apiKey, models) => new Claude({ apiKey, models }),
+    limit: 'Safest is a key from an Anthropic workspace with a monthly spend limit.',
   },
   openai: {
     ...PROVIDER_INFO.openai, defaults: OPENAI_MODELS, roles: ['manager', 'worker'], storage: 'esf-openai-api-key',
     canFetch: false, client: (apiKey, models) => new OpenAI({ apiKey, models }),
+    limit: 'Safest is a key from an OpenAI project with a budget of its own.',
+  },
+  // The OpenAI API's defaults name its roles where a line needs a name; the header and the Agents page
+  // name no model for it, since none runs here. The local edition offers the plan's own.
+  chatgpt: {
+    ...PROVIDER_INFO.chatgpt, defaults: OPENAI_MODELS, roles: ['manager', 'worker'], storage: null,
+    canFetch: false, client: null, localOnly: true,
   },
 };
 const PROVIDER = 'esf-provider';
@@ -64,16 +73,30 @@ function chosenModels(name = state.provider) {
   try {
     saved = JSON.parse(readSetting(modelsSetting(name)) || '{}') || {};
   } catch { /* a damaged setting: the defaults */ }
-  return Object.fromEntries(chosen.roles.map((role) => [role, MODEL_CHOICES[name].includes(saved[role]) ? saved[role] : chosen.defaults[role]]));
+  const choices = MODEL_CHOICES[name] || []; // none to choose from for the subscription here
+  return Object.fromEntries(chosen.roles.map((role) => [role, choices.includes(saved[role]) ? saved[role] : chosen.defaults[role]]));
 }
 const names = () => roleNames(chosenModels());
 // The model that did a step of the open search (the last that served it), for the lines about past
-// work: who read the problem, who wrote the summary. The chosen manager when no model has yet.
+// work: who read the problem, who wrote the summary. Null when no model has yet.
 function didBy(step) {
   const rows = (state.id ? state.runUsage : []).filter((u) => u.step === step && u.model);
-  return rows.length ? modelLabel(rows.at(-1).model) : names().manager;
+  return rows.length ? modelLabel(rows.at(-1).model) : null;
 }
-const client = () => provider().client(apiKey(), chosenModels());
+// With the subscription chosen no model runs here, so a line about what a role will do names the role
+// ("the manager"), capitalized where it starts a sentence.
+function roleWord(el, role) {
+  const word = role === 'worker' ? 'the workers' : `the ${role}`;
+  const before = (el.previousSibling?.textContent || '').trimEnd();
+  return !before || /[.!?]$/.test(before) ? word[0].toUpperCase() + word.slice(1) : word;
+}
+// The chosen provider's models, for a job. Every job asks haveKey() first, which stops it for the
+// subscription (no client here); the error is a last guard, so no model is ever called with it.
+function client() {
+  const chosen = provider();
+  if (!chosen.client) throw new Error(`${chosen.label} runs in the local edition only.`);
+  return chosen.client(apiKey(), chosenModels());
+}
 const ROLE_ORDER = ['manager', 'fetcher', 'worker', 'code'];
 // The roles' names for a job running in this tab: the models it started with, whatever is chosen since.
 const jobNames = (key) => jobs.get(key) || names();
@@ -99,8 +122,9 @@ const agents = () => {
   const roles = new Set([...provider().roles, 'code', ...ROLE_ORDER.filter((role) => role !== 'code' && n[role] && n[role] !== names()[role])]);
   return ROLE_ORDER.filter((role) => roles.has(role) && n[role]).map((role) => [role, n[role], ROLE_TITLES[role], ROLE_INFO[role][1]]);
 };
-// Whether the chosen provider has a key to send: never one that is surely another (keyProblem).
-const keyReady = () => Boolean(apiKey()) && !keyProblem(state.provider, apiKey())?.wrong;
+// Whether the chosen provider can run here with a key to send: never one that is surely another
+// (keyProblem), and never the subscription, which runs in the local edition only.
+const keyReady = () => Boolean(provider().client) && Boolean(apiKey()) && !keyProblem(state.provider, apiKey())?.wrong;
 const ACTIVITY_OPEN = 'esf-activity-open';
 const EMAIL = 'esf-contact-email';
 const NCBI_KEY = 'esf-ncbi-api-key';
@@ -167,26 +191,70 @@ function writeSetting(name, value) {
   } catch { /* storage unavailable: the value lives only in the field */ }
 }
 
+// The secrets: the model keys and the NCBI key. Each is kept for this tab (sessionStorage) or, when
+// Remember is ticked, on this browser (localStorage); never in both, and not at all when empty.
+const SECRETS = () => [...Object.values(PROVIDERS).map((p) => p.storage).filter(Boolean), NCBI_KEY];
+
+function keepSecret(name, value, remember) {
+  try {
+    storage('local')?.removeItem(name);
+    storage('session')?.removeItem(name);
+    if (value) storage(remember ? 'local' : 'session')?.setItem(name, value);
+  } catch { /* storage unavailable: the value lives only in the field */ }
+}
+
+// A secret as kept, and whether it is kept on this browser.
+function readSecret(name) {
+  try {
+    const remembered = storage('local')?.getItem(name);
+    if (remembered) return { value: remembered, remembered: true };
+    return { value: storage('session')?.getItem(name) || '', remembered: false };
+  } catch {
+    return { value: '', remembered: false };
+  }
+}
+
 function loadSettings() {
   state.provider = PROVIDERS[readSetting(PROVIDER)] ? readSetting(PROVIDER) : 'anthropic';
+  loadNcbiKey();
   loadKey();
   $('#contact-email').value = readSetting(EMAIL);
-  $('#ncbi-key').value = readSetting(NCBI_KEY);
   showNcbiStatus();
 }
 
-// The chosen provider's key, from this tab or (if remembered) this browser.
+// The chosen provider's key, from this tab or (if remembered) this browser. A key kept before the page
+// refused it (an admin key, or the other vendor's) is never sent, so it is not kept either: it is
+// dropped from both, and stays in the box so the page says what is wrong with it.
 function loadKey() {
   const { storage: name } = provider();
-  let remembered = null;
-  let tab = null;
-  try {
-    remembered = storage('local')?.getItem(name);
-    tab = storage('session')?.getItem(name);
-  } catch { /* storage unavailable */ }
-  $('#api-key').value = remembered || tab || '';
-  $('#remember-key').checked = Boolean(remembered);
+  const kept = name ? readSecret(name) : { value: '', remembered: false };
+  if (name && keyProblem(state.provider, kept.value)?.wrong) keepSecret(name, '', false);
+  $('#api-key').value = kept.value;
+  $('#remember-key').checked = kept.remembered;
   showProvider();
+}
+
+// Whether a model key is kept on this browser: one the page would send (keyProblem), so a refused key
+// kept from before (dropped at load) doesn't count.
+const modelKeyRemembered = () => Object.entries(PROVIDERS).some(([id, p]) => {
+  if (!p.storage) return false;
+  const kept = readSecret(p.storage);
+  return kept.remembered && !keyProblem(id, kept.value)?.wrong;
+});
+
+// Before it was kept like the model keys, the NCBI key was always kept on this browser. Such a key
+// is read once: it stays there if a model key is remembered too, and otherwise moves to this tab.
+// A model key kept as the NCBI key, from before ncbiKey refused one, is dropped the way loadKey drops
+// a wrong key: it stays in the box, where the page says why.
+const NCBI_MIGRATED = 'esf-ncbi-key-kept-by-tab';
+function loadNcbiKey() {
+  const { value, remembered } = readSecret(NCBI_KEY);
+  $('#ncbi-key').value = value;
+  const usable = ncbiKey();
+  if (value && !usable) keepSecret(NCBI_KEY, '', false);
+  if (readSetting(NCBI_MIGRATED)) return;
+  if (usable && remembered && !modelKeyRemembered()) keepSecret(NCBI_KEY, usable, false);
+  writeSetting(NCBI_MIGRATED, 'yes');
 }
 
 const apiKey = () => $('#api-key').value.trim();
@@ -195,13 +263,26 @@ const apiKey = () => $('#api-key').value.trim();
 function saveKey() {
   const key = apiKey();
   const { storage: name } = provider();
-  try {
-    storage('local')?.removeItem(name);
-    storage('session')?.removeItem(name);
-    if (key && !keyProblem(state.provider, key)?.wrong) storage($('#remember-key').checked ? 'local' : 'session')?.setItem(name, key);
-  } catch { /* storage unavailable */ }
+  if (name) keepSecret(name, key && !keyProblem(state.provider, key)?.wrong ? key : '', $('#remember-key').checked);
   showKeyStatus();
   showProvider();
+}
+
+// The NCBI key follows Remember too; a model key pasted in its box is not kept (ncbiKey).
+const keepNcbiKey = (remember) => keepSecret(NCBI_KEY, ncbiKey(), remember);
+
+// An edit leaves a kept NCBI key where it is. Remember shows the chosen provider's key, so switching
+// provider changes it, and that alone must not move this key; a first NCBI key follows it. It stays on
+// this browser only along with a remembered model key: once none is, an edit moves it to this tab.
+function saveNcbiKey() {
+  const kept = readSecret(NCBI_KEY);
+  keepNcbiKey(kept.value ? kept.remembered && modelKeyRemembered() : $('#remember-key').checked);
+}
+
+// Ticking or clearing Remember moves the model key and the NCBI key together.
+function rememberChanged() {
+  saveKey();
+  keepNcbiKey($('#remember-key').checked);
 }
 
 // A key pasted under the other provider (keyProblem tells the person to choose it) moves with them.
@@ -239,33 +320,54 @@ function namesChanged() {
   renderActivity();
 }
 
-// Everything on the page that names the provider or its models.
+// The Agents button is flagged until the agents can run here: a key for the API chosen, and never
+// the subscription.
+function showReady() {
+  const ready = keyReady();
+  $('#agents-toggle').dataset.missing = String(!ready);
+  $('#agents-flag').hidden = ready;
+}
+
+// Everything on the page that names the provider or its models. The subscription shows how to run
+// the local edition where the key box would be.
 function showProvider() {
   const chosen = provider();
   const n = names();
+  const local = Boolean(chosen.localOnly);
   $('#agents-label').textContent = chosen.label;
-  $('#agents-toggle').dataset.missing = String(!keyReady());
-  $('#api-key-label').textContent = chosen.keyName;
-  $('#api-key').placeholder = chosen.placeholder;
+  showReady();
+  $('#key-box').hidden = local;
+  $('#local-box').hidden = !local;
+  $('#agents-notice').hidden = local; // what is sent where: nothing is, on the subscription here
+  if (!local) {
+    $('#api-key-label').textContent = chosen.keyName;
+    $('#api-key').placeholder = chosen.placeholder;
+    $('#limit-note').textContent = chosen.limit;
+  }
   $('#provider-note').hidden = state.provider !== 'openai';
   for (const el of document.querySelectorAll('[data-name]')) {
-    el.textContent = el.dataset.name === 'vendor' ? chosen.vendor : n[el.dataset.name] || el.textContent;
+    const role = el.dataset.name;
+    el.textContent = role === 'vendor' ? chosen.vendor : local && role !== 'code' ? roleWord(el, role) : n[role] || el.textContent;
   }
   showDoers();
   const line = [`${n.manager} plans and reviews`, n.fetcher && `${n.fetcher} fetches`, `${n.worker} screens and reads`].filter(Boolean);
-  $('#models').textContent = line.join(' · ');
-  $('#agents-summary').replaceChildren(h('strong', {}, `${chosen.label}: `), `${line.join(', ')}.`,
-    keyReady() ? '' : ` No ${chosen.keyName} yet.`);
+  // The subscription's models run in the local edition, not here: the header names none.
+  $('#models').textContent = local ? 'Agents run in the local edition only' : line.join(' · ');
+  $('#agents-summary').replaceChildren(h('strong', {}, `${chosen.label}: `), local
+    ? 'runs in the local edition only, on your own computer. To search here, choose the Claude API or the OpenAI API.'
+    : `${line.join(', ')}.${keyReady() ? '' : ` No ${chosen.keyName} yet.`}`);
   showAgentsPage();
 }
 
-// The Agents page: the three ways to run the agents, the key, and the model of each role.
+// The Agents page: the three ways to run the agents, the key, and the model of each role. The
+// subscription's models are chosen in the local edition, from the plan's own list, so here its roles
+// are listed by what they do, without a model.
 function showAgentsPage() {
   for (const card of document.querySelectorAll('.provider-card')) {
     const name = card.dataset.provider;
     card.querySelector('.pc-title').textContent = PROVIDER_INFO[name].label;
     card.querySelector('.pc-sub').textContent = PROVIDER_INFO[name].billing;
-    if (PROVIDERS[name]) {
+    if (PROVIDERS[name] && !PROVIDERS[name].localOnly) {
       const n = roleNames(chosenModels(name));
       card.querySelector('.pc-models').textContent = [n.manager, n.fetcher, n.worker].filter(Boolean).join(' · ');
     }
@@ -273,16 +375,33 @@ function showAgentsPage() {
   }
   const models = chosenModels();
   const n = names();
+  const local = Boolean(provider().localOnly);
   $('#roles').replaceChildren(...[...provider().roles, 'code'].map((key) => [key, n[key], ROLE_TITLES[key], ROLE_INFO[key][1]]).map(([key, name, role, does]) => h('li', { 'data-agent': key },
-    h('strong', {}, `${name} · ${role}`), does,
-    key !== 'code' && h('select', {
+    h('strong', {}, local ? ROLE_INFO[key][0] : `${name} · ${role}`), does,
+    key !== 'code' && !local && h('select', {
       id: `model-${key}`, 'aria-label': `Model for the ${role}`, onchange: (event) => chooseModel(key, event.target.value),
     }, MODEL_CHOICES[state.provider].map((model) => h('option', { value: model, selected: model === models[key] || null }, modelLabel(model)))))));
+  $('#roles-note').hidden = !local;
 }
 
-// The lines about the open search's past work name the model that did it (didBy).
+// The lines about the open search's past work name the model that did it (didBy); before any has,
+// the chosen manager, or its role on the subscription.
 function showDoers() {
-  for (const el of document.querySelectorAll('[data-did]')) el.textContent = didBy(el.dataset.did);
+  for (const el of document.querySelectorAll('[data-did]')) {
+    el.textContent = didBy(el.dataset.did) || (provider().localOnly ? roleWord(el, 'manager') : names().manager);
+  }
+}
+
+// A step's commands to the clipboard; where the browser doesn't allow that, they are selected to copy by hand.
+async function copyCommands(button) {
+  const code = button.closest('.cmd').querySelector('code');
+  try {
+    await navigator.clipboard.writeText(code.textContent);
+    button.textContent = 'Copied';
+    setTimeout(() => { button.textContent = 'Copy'; }, 2000);
+  } catch {
+    getSelection().selectAllChildren(code);
+  }
 }
 
 function setAgentsOpen(open) {
@@ -299,26 +418,49 @@ function setAgentsOpen(open) {
   }
 }
 
-function forgetKey() {
+// Forget clears every secret the page keeps, in this tab and on this browser: both model keys and the
+// NCBI key. The contact email is not a secret, so it stays.
+function forgetKeys() {
+  for (const name of SECRETS()) keepSecret(name, '', false);
   $('#api-key').value = '';
   $('#remember-key').checked = false;
+  $('#ncbi-key').value = '';
+  showNcbiStatus();
   saveKey();
+}
+
+// The key box's Forget: back to the emptied box, to paste another.
+function forgetKey() {
+  forgetKeys();
   $('#api-key').focus();
 }
 
+// The subscription hides the key box and its Forget, so its own box has the same button. Nothing else
+// in that box changes, so it says what was done.
+function forgetSavedKeys() {
+  forgetKeys();
+  $('#local-status').textContent = 'No API key is kept on this page now.';
+}
+
 function showKeyStatus() {
-  $('.keybox').dataset.missing = 'false';
-  $('#agents-toggle').dataset.missing = String(!keyReady());
+  $('#key-box').dataset.missing = 'false';
+  $('#local-box').dataset.missing = 'false';
+  $('#local-status').textContent = '';
+  showReady();
   const status = $('#key-status');
   const chosen = provider();
+  if (chosen.localOnly) {
+    status.textContent = ''; // its box is hidden; switching back shows the key's own status again
+    return;
+  }
   const problem = keyProblem(state.provider, apiKey());
   if (problem) {
-    $('.keybox').dataset.missing = 'true';
+    $('#key-box').dataset.missing = 'true';
     status.textContent = problem.text;
   } else if (apiKey()) {
     status.textContent = $('#remember-key').checked
       ? `Remembered on this browser. It is sent only to ${chosen.vendor}, straight from this page.`
-      : `Kept for this tab only. It is sent only to ${chosen.vendor}, straight from this page.`;
+      : `Kept for this tab; reopening a closed tab can bring it back. It is sent only to ${chosen.vendor}, straight from this page.`;
   } else {
     status.replaceChildren('Needed to read the problem, search, and extract. Create one in the ',
       h('a', { href: chosen.console[0], target: '_blank', rel: 'noopener' }, chosen.console[1]), '.');
@@ -335,12 +477,12 @@ async function checkKey() {
   try {
     const results = await client().checkAccess();
     const failed = results.filter((r) => !r.ok);
-    $('.keybox').dataset.missing = String(failed.length > 0);
+    $('#key-box').dataset.missing = String(failed.length > 0);
     status.textContent = failed.length
       ? failed.map((r) => `${r.model}: ${r.error}`).join(' ')
       : `The key works, and it may use ${results.map((r) => r.name).join(', ')}.`;
   } catch (error) {
-    $('.keybox').dataset.missing = 'true';
+    $('#key-box').dataset.missing = 'true';
     status.textContent = `Could not reach ${chosen.vendor}: ${error?.message || error}`;
   } finally {
     button.disabled = false;
@@ -348,11 +490,19 @@ async function checkKey() {
 }
 
 // The jobs need a key; without one, the page opens the Agents page and says so. A key that belongs to
-// the other vendor (or an NCBI key) is not sent anywhere.
+// the other vendor (or an NCBI key) is not sent anywhere. The subscription stops every job the same
+// way, on the box that says how to run the local edition.
 function haveKey() {
   if (keyReady()) return true;
   setAgentsOpen(true);
-  $('.keybox').dataset.missing = 'true';
+  if (provider().localOnly) {
+    $('#local-box').dataset.missing = 'true';
+    $('#local-status').textContent = "This page can't run the agents on your ChatGPT plan, so nothing was started. "
+      + 'Run the local edition as above, or choose the Claude API or the OpenAI API.';
+    $('#local-title').focus();
+    return false;
+  }
+  $('#key-box').dataset.missing = 'true';
   $('#key-status').textContent = apiKey() ? keyProblem(state.provider, apiKey()).text : `Enter your ${provider().keyName} first.`;
   $('#api-key').focus();
   return false;
@@ -370,6 +520,13 @@ function showNcbiStatus() {
   showError($('#ncbi-status'), other ? `This is an ${other.keyName}, not an NCBI API key: it is not sent to NCBI or kept. Paste it on the Agents page.` : '');
 }
 
+// Where a fetch through Claude went, for the activity log: the host and path only. The query may carry
+// the contact email (Unpaywall's), and the log is shown and exported.
+function fetchedFrom(url) {
+  const { host, pathname } = new URL(url);
+  return `${host}${pathname}`;
+}
+
 // A pipeline wired to the settings as they are when a job starts.
 // The literature sources alone, for work that needs no model (an older record's authors).
 const literature = () => new Sources({ email: $('#contact-email').value.trim(), ncbiApiKey: ncbiKey() });
@@ -382,7 +539,7 @@ function pipeline(projectId) {
     ncbiApiKey: ncbiKey(),
     // Only Claude can download what the browser may not; without it such a PDF waits for an upload.
     proxy: llm.canFetch ? (url) => activity.track(
-      { agent: 'fetcher', step: 'fetch', text: `Fetching ${short(url.replace(/^https?:\/\//, ''), 70)} for the browser` },
+      { agent: 'fetcher', step: 'fetch', text: `Fetching ${short(fetchedFrom(url), 70)} for the browser` },
       (step) => llm.fetchUrl(url, { sink: step.meter((callStep, model, usage) => store.addUsage(projectId, callStep, model, usage)) }),
       (doc) => (doc.kind === 'pdf' ? `PDF, ${Math.round((doc.base64.length * 3) / 4 / 1024)} KB` : `text, ${Math.round(doc.text.length / 1024)} KB`),
     ) : null,
@@ -1225,12 +1382,13 @@ async function start() {
   $('#continue').addEventListener('click', continueSearch);
   $('#source-close').addEventListener('click', () => $('#source-dialog').close());
   $('#api-key').addEventListener('input', saveKey);
-  $('#remember-key').addEventListener('change', saveKey);
+  $('#remember-key').addEventListener('change', rememberChanged);
   $('#forget-key').addEventListener('click', forgetKey);
+  $('#forget-saved').addEventListener('click', forgetSavedKeys);
   $('#check-key').addEventListener('click', checkKey);
   $('#contact-email').addEventListener('change', (e) => writeSetting(EMAIL, e.target.value.trim()));
   $('#ncbi-key').addEventListener('input', showNcbiStatus);
-  $('#ncbi-key').addEventListener('change', () => writeSetting(NCBI_KEY, ncbiKey()));
+  $('#ncbi-key').addEventListener('change', saveNcbiKey);
   $('#upload').addEventListener('change', uploaded);
   $('#export-included').addEventListener('click', () => exportCsv(true));
   $('#export-all').addEventListener('click', () => exportCsv(false));
@@ -1252,6 +1410,7 @@ async function start() {
   for (const input of document.querySelectorAll('input[name="provider"]')) {
     input.addEventListener('change', () => chooseProvider(input.value));
   }
+  for (const button of document.querySelectorAll('#local-box .copy')) button.addEventListener('click', () => copyCommands(button));
   $('#agents-toggle').addEventListener('click', () => setAgentsOpen(!state.agentsOpen));
   $('#open-agents').addEventListener('click', () => setAgentsOpen(true));
   $('#agents-back').addEventListener('click', () => setAgentsOpen(false));
@@ -1270,6 +1429,7 @@ async function start() {
   window.addEventListener('beforeunload', (event) => {
     if (jobs.size) event.preventDefault();
   });
+  $('#remember-note').textContent = `Stored for ${location.origin}; any page served from that address can read it.`;
   loadSettings();
   showKeyStatus();
   // The Agents page comes first until there is a key, then Setup; after that, a new visit starts at Describe.

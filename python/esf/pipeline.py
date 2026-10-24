@@ -41,11 +41,13 @@ NOT_STUDIES = {
 
 
 # Errors after which every later model call fails the same way: a refused key or sign-in, a model the
-# account may not use, a plan's share used up. The run stops and says why, instead of sending a
-# request for every remaining record and paper.
+# account may not use, a plan's share used up, a kind of request the plan doesn't take. The run stops
+# and says why, instead of sending a request for every remaining record and paper. (A PDF the plan
+# refuses never gets here: OpenAILLM sends its text layer instead.)
 STOPPING_CODES = frozenset({
     "signed_out", "reauth_required", "registration_rejected", "invalid_api_key", "insufficient_quota", "model_not_found",
     "subscription_sharing_usage_limit_exceeded", "subscription_sharing_user_not_eligible", "subscription_sharing_invalid_user",
+    "subscription_sharing_unsupported_capability", "subscription_sharing_route_not_supported",
     "chatpass_v2_scope_not_authorized", "chatpass_v2_invalid_authorization_context",
 })
 
@@ -59,7 +61,10 @@ def stops_the_run(exc: BaseException) -> bool:
         kind = error.get("type") if isinstance(error, dict) else None
         return exc.status_code == 402 or kind == "billing_error" or "credit balance" in str(exc).lower()
     if isinstance(exc, ChatGPTError):
-        return not exc.retryable  # the sign-in can't be used: every later call would fail the same way
+        # The sign-in can't be used: every later call would fail the same way. Nor can it when ChatGPT
+        # won't allow its renewal for longer than a job waits (JOB_REFRESH_WAIT): retryable as that is,
+        # every record until then would fail.
+        return exc.code == "refresh_not_ready" or not exc.retryable
     if isinstance(exc, OpenAIError):
         code = exc.code.replace("subscription_sharing_v2_", "subscription_sharing_")
         return code in STOPPING_CODES or exc.status in (401, 403)

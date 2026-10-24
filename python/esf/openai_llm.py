@@ -30,6 +30,9 @@ API = "https://api.openai.com/v1"
 TOOL_NAMESPACE = "literature"
 # Reasoning efforts from least to most; a model's catalog entry may list the ones it takes.
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# On a ChatGPT plan, the most effort asked of a model whose catalog entry doesn't say what it takes:
+# reasoning models commonly take up to high, and not all take more.
+UNKNOWN_LEVELS_EFFORT = "high"
 MAX_SERVER_MESSAGE = 300
 
 T = TypeVar("T", bound=BaseModel)
@@ -139,6 +142,21 @@ def effort_for(requested: str, levels: list[str] | None) -> str:
     rank = EFFORTS.index
     lower = [level for level in known if rank(level) <= rank(requested)]
     return max(lower, key=rank) if lower else min(known, key=rank)
+
+
+def at_most(effort: str, cap: str) -> str:
+    """The effort, or cap when the effort is more than that."""
+    rank = EFFORTS.index
+    return cap if effort in EFFORTS and rank(effort) > rank(cap) else effort
+
+
+def replayed(item: dict) -> dict:
+    """An output item as input to the next turn. Nothing is stored (store is false), so a message's or
+    function call's server id and status refer to nothing and are left out; a reasoning item goes back
+    as it came, its encrypted_content carrying the reasoning."""
+    if item.get("type") in ("message", "function_call"):
+        return {key: value for key, value in item.items() if key not in ("id", "status")}
+    return item
 
 
 def usage_of(usage: dict | None) -> SimpleNamespace:
@@ -344,6 +362,8 @@ class OpenAILLM:
         self.responses = Responses(token, client, on_error=on_error)
         self.reasoning_levels = reasoning_levels or (lambda model: None)
         self.namespaced_tools = namespaced_tools
+        # Only plan usage needs its tools in a namespace, so the same flag marks its other limits.
+        self.plan_usage = namespaced_tools
         # Plan usage may not take PDF files; after the first refusal, PDFs go as their text layer.
         self.files = True
 
@@ -358,7 +378,10 @@ class OpenAILLM:
         body = {"model": model, "instructions": system, "input": input_items, "store": False, "stream": True}
         levels = self.reasoning_levels(model)
         if levels != []:  # a catalog entry that lists no levels: a model that takes no reasoning setting
-            body["reasoning"] = {"effort": effort_for(effort, levels)}
+            effort = effort_for(effort, levels)
+            if levels is None and self.plan_usage:
+                effort = at_most(effort, UNKNOWN_LEVELS_EFFORT)
+            body["reasoning"] = {"effort": effort}
         return body
 
     def _parse(
@@ -387,6 +410,7 @@ class OpenAILLM:
                 response = self.responses.create(body)
                 break
             except OpenAIError as exc:
+                # Caught here, before the run sees it: a capability the plan refuses otherwise stops the run.
                 if files and exc.code.endswith("unsupported_capability") and _has_pdf(content):
                     self.files = False
                     continue
@@ -419,13 +443,14 @@ class OpenAILLM:
         for _ in range(self.settings.search_max_iterations):
             body = self._body(model, prompts.SEARCH, items, "high")
             body["tools"] = definitions
-            # Not stored, so the reasoning comes back encrypted to send with the next turn.
-            body["include"] = ["reasoning.encrypted_content"]
+            if "reasoning" in body:
+                # Not stored, so the reasoning comes back encrypted to send with the next turn.
+                body["include"] = ["reasoning.encrypted_content"]
             response = self.responses.create(body)
             self._record(sink, "search", model, response)
             output = response.get("output") or []
             output_text(response)  # a refusal or an early stop raises
-            items.extend(output)
+            items.extend(replayed(item) for item in output)
             calls = [item for item in output if item.get("type") == "function_call"]
             if not calls:
                 break

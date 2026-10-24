@@ -10,7 +10,23 @@ export class SourceError extends Error {}
 
 const MAX_PDF_BYTES = 20 * 1024 * 1024; // base64 adds a third; a Claude API request may be 32 MB
 const PROXY_URL_LIMIT = 250; // the longest URL the web fetch tool accepts
+// The literature APIs accept requests from web pages, so a failed request to one is most likely a
+// network blip: it is tried once more, after this pause, before the host counts as refusing.
+const LITERATURE_HOSTS = new Set(['eutils.ncbi.nlm.nih.gov', 'www.ebi.ac.uk', 'clinicaltrials.gov', 'api.unpaywall.org']);
+const BLIP_PAUSE_MS = 1000;
+// NCBI doesn't need these to answer, and the key must never reach the model.
+const NCBI_PRIVATE = ['api_key', 'email', 'tool'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The address as it goes through the model (Claude's web fetch): an NCBI one without the NCBI key,
+// the contact email and the tool name. Unpaywall's email stays, as Unpaywall requires it.
+export function proxyUrl(url) {
+  const parsed = new URL(url);
+  if (parsed.host !== 'eutils.ncbi.nlm.nih.gov') return url;
+  for (const name of NCBI_PRIVATE) parsed.searchParams.delete(name);
+  return parsed.href;
+}
+
 const clean = (text) => String(text ?? '').split(/\s+/).filter(Boolean).join(' ');
 // Python's str.capitalize: the first letter upper case, the rest lower.
 const capitalize = (s) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : '');
@@ -45,9 +61,10 @@ export class Http {
 
   async viaProxy(url, as) {
     if (!this.proxy) throw new SourceError(`${new URL(url).host} doesn't accept requests from web pages.`);
-    if (url.length > PROXY_URL_LIMIT) throw new SourceError(`${new URL(url).host} doesn't accept requests from web pages, and the address is too long to fetch through Claude.`);
+    const target = proxyUrl(url);
+    if (target.length > PROXY_URL_LIMIT) throw new SourceError(`${new URL(url).host} doesn't accept requests from web pages, and the address is too long to fetch through Claude.`);
     this.proxied += 1;
-    const doc = await this.proxy(url);
+    const doc = await this.proxy(target);
     if (as === 'pdf') {
       if (doc.kind !== 'pdf') throw new SourceError('Claude fetched the address, but it was not a PDF.');
       return base64ToBytes(doc.base64);
@@ -63,6 +80,17 @@ export class Http {
     return doc.text;
   }
 
+  // A request straight from the page; one to a literature API that fails is tried once more first.
+  async direct(url) {
+    try {
+      return await this.fetch(url);
+    } catch (error) {
+      if (!LITERATURE_HOSTS.has(new URL(url).host)) throw error;
+      await sleep(BLIP_PAUSE_MS);
+      return this.fetch(url);
+    }
+  }
+
   // as: 'json' | 'text' | 'pdf'; returns null for a 404.
   async get(url, as = 'json') {
     if (this.isBlocked(url)) return this.viaProxy(url, as);
@@ -70,10 +98,11 @@ export class Http {
     for (let attempt = 0; ; attempt++) {
       let response;
       try {
-        response = await this.fetch(url);
+        response = await this.direct(url);
       } catch {
-        // A TypeError here is how browsers report a refused cross-site request (or no network). With a
-        // fetcher, the host's later requests go through it; without one (OpenAI), only this request fails.
+        // A TypeError here is how browsers report a refused cross-site request (or no network; a literature
+        // API has had its second try). With a fetcher, the host's later requests go through it; without
+        // one (OpenAI), only this request fails.
         if (!this.proxy) throw new SourceError(`${new URL(url).host} doesn't accept requests from web pages.`);
         this.blocked.add(new URL(url).host);
         return this.viaProxy(url, as);
@@ -145,17 +174,22 @@ export class PubMed {
     return [Number(result.count || 0), result.idlist || []];
   }
 
-  chunkSize() {
-    // Through Claude's web fetch an address may be at most 250 characters long.
+  // How many PMIDs one request to `endpoint` may name. Through Claude's web fetch an address may be at
+  // most 250 characters long, counted as it goes there (proxyUrl, without the key and email). A PMID
+  // has up to 8 digits, and the comma between two is sent as %2C: n of them take 11n - 3 characters.
+  // It is asked again for each chunk: an earlier request may have found that the host refuses web
+  // pages, and then the rest go through Claude.
+  chunkSize(endpoint, params) {
     if (!this.http.isBlocked(PubMed.BASE)) return 200;
-    const base = this.url('efetch.fcgi', { db: 'pubmed', retmode: 'xml', id: '' }).length;
-    return Math.max(1, Math.floor((PROXY_URL_LIMIT - base) / 9));
+    const base = proxyUrl(this.url(endpoint, { ...params, id: '' })).length;
+    return Math.max(1, Math.floor((PROXY_URL_LIMIT - base + 3) / 11));
   }
 
   async summaries(pmids) {
     const records = [];
-    for (let i = 0; i < pmids.length; i += this.chunkSize()) {
-      const chunk = pmids.slice(i, i + this.chunkSize());
+    for (let i = 0; i < pmids.length;) {
+      const chunk = pmids.slice(i, i + this.chunkSize('esummary.fcgi', { db: 'pubmed', retmode: 'json' }));
+      i += chunk.length;
       const payload = await this.call('esummary.fcgi', { db: 'pubmed', id: chunk.join(','), retmode: 'json' }, 'json');
       const result = payload?.result || {};
       for (const uid of result.uids || []) {
@@ -173,8 +207,9 @@ export class PubMed {
   // Full records, abstracts included.
   async fetch(pmids) {
     const records = [];
-    for (let i = 0; i < pmids.length; i += this.chunkSize()) {
-      const chunk = pmids.slice(i, i + this.chunkSize());
+    for (let i = 0; i < pmids.length;) {
+      const chunk = pmids.slice(i, i + this.chunkSize('efetch.fcgi', { db: 'pubmed', retmode: 'xml' }));
+      i += chunk.length;
       const xml = await this.call('efetch.fcgi', { db: 'pubmed', id: chunk.join(','), retmode: 'xml' }, 'text');
       if (xml) records.push(...parsePubmedXml(xml));
     }

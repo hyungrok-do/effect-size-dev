@@ -42,8 +42,15 @@ export function exportRows(papers, decisions, includedOnly) {
   return rows;
 }
 
+// Text a spreadsheet would take for a formula: it starts with =, +, -, @, a tab or a carriage return.
+// Such a cell gets an apostrophe in front, so opening an export runs nothing that a paper's title or
+// a quote put there. A number written as text (-2.2, +1e3) is still a number and is left alone.
+const FORMULA = /^[=+\-@\t\r]/;
+const NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/;
+
 const cell = (v) => {
-  const s = v === true ? 'True' : v === false ? 'False' : String(v ?? '');
+  let s = v === true ? 'True' : v === false ? 'False' : String(v ?? '');
+  if (typeof v === 'string' && FORMULA.test(s) && !NUMBER.test(s)) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 };
 

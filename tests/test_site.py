@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import asdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -94,6 +94,10 @@ OLD_SPEC = {
     "stated_values": [], "inclusion_criteria": ["RCTs"], "exclusion_criteria": [], "search_terms": ["mindfulness"], "open_questions": [],
 }
 PDF_URL = "https://example.org/rct2.pdf"
+NCBI_KEY = "0123456789abcdef0123456789abcdef1234"
+# Every refusal by the page's Content-Security-Policy, collected in the page as it happens.
+CSP_WATCH = """window.cspViolations = [];
+document.addEventListener('securitypolicyviolation', (e) => window.cspViolations.push({ directive: e.violatedDirective, blocked: e.blockedURI }));"""
 CORS = {"access-control-allow-origin": "*"}
 PREFLIGHT = {**CORS, "access-control-allow-headers": "*", "access-control-allow-methods": "GET, POST, OPTIONS"}
 OPUS, SONNET, HAIKU = "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"
@@ -245,17 +249,19 @@ class Network:
 
     def fetch(self, body):
         url = re.search(r"Fetch (\S+) with", body["messages"][0]["content"]).group(1)
-        if url == PDF_URL:
-            result = {"type": "web_fetch_result", "url": url, "retrieved_at": "2026-10-21T00:00:00Z", "content": {
-                "type": "document", "source": {"type": "base64", "media_type": "application/pdf",
-                                                "data": base64.b64encode(make_pdf(PDF_LINE)).decode()}}}
-        else:
-            result = {"type": "web_fetch_tool_result_error", "error_code": "url_not_accessible"}
         return message(SONNET, [
             {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_fetch", "input": {"url": url}},
-            {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_1", "content": result},
+            {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_1", "content": self.fetched(url)},
             {"type": "text", "text": "done"},
         ], "end_turn", server_tool_use={"web_fetch_requests": 1})
+
+    def fetched(self, url):
+        """What Claude's web fetch got from `url`: the refused PDF, and nothing else."""
+        if url == PDF_URL:
+            return {"type": "web_fetch_result", "url": url, "retrieved_at": "2026-10-21T00:00:00Z", "content": {
+                "type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                "data": base64.b64encode(make_pdf(PDF_LINE)).decode()}}}
+        return {"type": "web_fetch_tool_result_error", "error_code": "url_not_accessible"}
 
 
 def open_paper(page, title):
@@ -482,9 +488,13 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     network = Network(count_delay=0.6)
     context = browser.new_context(viewport={"width": 1280, "height": 900}, accept_downloads=True)
     context.route("**/*", network)
+    context.add_init_script(CSP_WATCH)
     page = context.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
+    # The whole run, PDFs read with pdf.js and every export, stays inside the page's Content-Security-Policy.
+    refused_by_csp = []
+    page.on("console", lambda m: refused_by_csp.append(m.text) if "Content Security Policy" in m.text else None)
     # Expected failed loads: the refused PDF, and 404s from Europe PMC and Unpaywall, which is how they say
     # they have no full text or PDF for a paper. Any other error is a bug.
     def expected(m):
@@ -500,8 +510,8 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert page.get_attribute("#agents-toggle", "data-missing") == "true"
     assert page.locator(".provider-card .pc-title").all_inner_texts() == ["Claude API", "OpenAI API", "OpenAI subscription"]
     assert page.is_checked("input[name='provider'][value='anthropic']")
-    # The subscription runs only in the local edition; here it says so and can't be chosen.
-    assert page.is_disabled("input[name='provider'][value='chatgpt']")
+    # The subscription runs only in the local edition; its card says so (choosing it says how to run that).
+    assert page.is_enabled("input[name='provider'][value='chatgpt']")
     assert "local edition only" in page.inner_text(".provider-card[data-provider='chatgpt']")
     page.click("#agents-back")
     assert page.is_hidden("#agents-page") and page.get_attribute("#tab-setup", "aria-selected") == "true"
@@ -734,7 +744,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.wait_for_selector(".result[data-decision='include']")
     assert page.locator(".result").first.locator("details.quotes").get_attribute("open") is not None
     # Every result of this paper is decided: it counts as reviewed, and Next is the button to press.
-    page.wait_for_function("document.querySelector('#review-progress-text').textContent === 'Reviewed 1 of 7 papers'")
+    page.wait_for_function("() => document.querySelector('#review-progress-text').textContent === 'Reviewed 1 of 7 papers'")
     assert page.get_attribute("#queue button[aria-current='true']", "data-state") == "included"
     assert "ready" in page.get_attribute("#review-next", "class") and page.is_visible("#review-next-open")
     page.click(".exports-box summary")
@@ -742,6 +752,14 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
         page.click("#export-included")
     rows = list(csv.DictReader(io.StringIO(open(download.value.path(), encoding="utf-8").read())))
     assert len(rows) == 6 and {r["id"] for r in rows} == {"11111111"} and rows[0]["quote_check"] == "exact"
+    with page.expect_download() as download:
+        page.click("#export-all")
+    rows = list(csv.DictReader(io.StringIO(open(download.value.path(), encoding="utf-8").read())))
+    assert len({r["id"] for r in rows}) == 8 and all(r["value"] for r in rows)
+    with page.expect_download() as download:
+        page.click("#export-json")
+    exported = json.loads(open(download.value.path(), encoding="utf-8").read())
+    assert exported["project"]["id"] == page.url.split("#")[1] and len(exported["papers"]) == 9 and exported["activity"]
 
     # Everything is in this browser's storage: a reload brings the search and the decision back.
     # A record stored before authors were kept gets them from PubMed when its table opens.
@@ -887,7 +905,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert "before it finished" in page.inner_text("#project-list")
     page.click("#continue")
     page.wait_for_selector("#tab-review[aria-selected='true']", timeout=30000)
-    page.wait_for_function("document.querySelector('#tabs button').textContent === 'Extracted (7)'")
+    page.wait_for_function("() => document.querySelector('#tabs button').textContent === 'Extracted (7)'")
     assert "Continuing the search" in page.inner_text("#timeline")
 
     phone = context.new_page()
@@ -906,25 +924,41 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
         phone.screenshot(path=os.path.join(os.environ["ESF_SCREENSHOTS"], "site-phone-activity.png"))
     phone.keyboard.press("Escape")
     assert not phone.is_visible("#activity")
+    assert page.evaluate("window.cspViolations") == [] and phone.evaluate("window.cspViolations") == []
     context.close()
-    assert errors == []
+    assert errors == [] and refused_by_csp == []
 
 
 def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
+    network = Network()
     context = browser.new_context()
-    context.route("**/*", Network())
+    context.route("**/*", network)
     page = context.new_page()
     page.goto(site_url)
     assert page.is_visible("#agents-page")
 
     # An NCBI key pasted into the Anthropic box is caught before anything is sent.
-    page.fill("#api-key", "0123456789abcdef0123456789abcdef1234")
+    page.fill("#api-key", NCBI_KEY)
     assert "This looks like an NCBI API key, not an Anthropic API key" in page.inner_text("#key-status")
     page.click("#agents-done")
     page.click("#tab-problem")
     page.fill("#paragraph", "A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.")
     page.click("#read")  # not sent: the Agents page opens again and says why
     assert page.is_visible("#agents-page") and "It is not sent to Anthropic" in page.inner_text("#key-status")
+    # An admin key can manage the whole account: it is refused under either API, never kept, never sent.
+    admin = "This is an admin key, which can manage the whole account; use an ordinary API key. It is not sent."
+    problems = page.evaluate("""async () => {
+        const { keyProblem } = await import('/lib/providers.js');
+        const keys = ['sk-ant-admin01-abcdefghijklmnopqrstuvwxyz', 'sk-admin-abcdefghijklmnopqrstuvwxyz0123'];
+        return ['anthropic', 'openai'].flatMap((provider) => keys.map((key) => keyProblem(provider, key)));
+    }""")
+    assert problems == [{"wrong": True, "text": admin}] * 4
+    page.fill("#api-key", "sk-ant-admin01-abcdefghijklmnopqrstuvwxyz")
+    assert page.inner_text("#key-status") == admin and page.get_attribute("#agents-toggle", "data-missing") == "true"
+    assert page.evaluate("[localStorage.getItem('esf-anthropic-api-key'), sessionStorage.getItem('esf-anthropic-api-key')]") == [None, None]
+    page.click("#agents-done")
+    page.click("#read")
+    assert page.is_visible("#agents-page") and page.inner_text("#key-status") == admin and not network.claude
     # A key of an unfamiliar shape only gets a warning.
     page.fill("#api-key", "a-new-kind-of-key")
     assert "doesn't look like an Anthropic API key: those start with sk-ant-" in page.inner_text("#key-status")
@@ -933,7 +967,7 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     # A refused key: Check key and a failed step both quote Anthropic's own error.
     page.fill("#api-key", "sk-ant-api03-not-a-real-key")
     page.click("#check-key")
-    page.wait_for_function("document.querySelector('#key-status').textContent.includes('did not accept')")
+    page.wait_for_function("() => document.querySelector('#key-status').textContent.includes('did not accept')")
     status = page.inner_text("#key-status")
     assert "claude-opus-5-5: Anthropic did not accept the API key (401: invalid x-api-key (request req_test))" in status
     page.click("#agents-done")
@@ -947,7 +981,7 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     page.click("#agents-toggle")
     page.fill("#api-key", KEY)
     page.click("#check-key")
-    page.wait_for_function("document.querySelector('#key-status').textContent.startsWith('The key works')")
+    page.wait_for_function("() => document.querySelector('#key-status').textContent.startsWith('The key works')")
     assert page.inner_text("#key-status") == "The key works, and it may use Claude Opus 5.5, Claude Sonnet 5.5, Claude Haiku 5.5."
     context.close()
 
@@ -991,11 +1025,11 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     assert "This is an Anthropic API key, not an OpenAI API key: choose Claude API to use it" in page.inner_text("#key-status")
     page.fill("#api-key", "sk-proj-not-the-right-key-000")
     page.click("#check-key")
-    page.wait_for_function("document.querySelector('#key-status').textContent.includes('did not accept')")
+    page.wait_for_function("() => document.querySelector('#key-status').textContent.includes('did not accept')")
     assert "gpt-6.1-sol: OpenAI did not accept the API key" in page.inner_text("#key-status")
     page.fill("#api-key", OPENAI_KEY)
     page.click("#check-key")
-    page.wait_for_function("document.querySelector('#key-status').textContent.startsWith('The key works')")
+    page.wait_for_function("() => document.querySelector('#key-status').textContent.startsWith('The key works')")
     assert page.inner_text("#key-status") == "The key works, and it may use GPT-6.1 Sol, GPT-6 Luna."
     assert page.locator("#roles li strong").all_inner_texts() == ["GPT-6.1 Sol · manager", "GPT-6 Luna · workers", "Code · search and checks"]
     assert page.inner_text("#models") == "GPT-6.1 Sol plans and reviews · GPT-6 Luna screens and reads"
@@ -1163,12 +1197,13 @@ def test_a_search_saved_before_openai_keeps_its_credits(browser, site_url):
         return [modelLabel('gpt-6.1-sol-2026-08-12'), modelLabel('claude-haiku-5-5')];
     }""")
     assert labels == ["GPT-6.1 Sol", "Haiku 5.5"]
+    # (A literature API gets a second try within a request, so the first request fails both.)
     retried = page.evaluate("""async () => {
         const { Http } = await import('/lib/sources.js');
         let calls = 0;
         const http = new Http({ fetchImpl: async () => {
             calls += 1;
-            if (calls === 1) throw new TypeError('Failed to fetch');
+            if (calls <= 2) throw new TypeError('Failed to fetch');
             return new Response('{"ok": true}', { headers: { 'content-type': 'application/json' } });
         } });
         let first;
@@ -1223,3 +1258,526 @@ def test_a_run_stops_when_the_openai_account_runs_out_of_credit(browser, site_ur
     assert len(screened) <= 2 + 6  # the refused calls already under way, then no more
     assert "unsure" not in project["statuses"] and "candidate" in project["statuses"]
     context.close()
+
+
+STORE_SEARCH = """async ([papers, spec, fields]) => {
+    const { Store } = await import('/lib/store.js');
+    const store = new Store();
+    const id = await store.createProject('A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.');
+    await store.updateProject(id, { status: 'done', spec, progress: { stage: 'done', done: 0, total: 0 },
+      search_plan: { levels: [{ level: 'primary', query: 'q', why: '' }], clinicaltrials_queries: [], extra_ids: [] }, ...fields });
+    for (const { id: _, ...paper } of papers) await store.addPaper(id, paper);
+    return id;
+}"""
+
+
+def stored_search(page, papers, **fields):
+    """A search kept in the page's storage as a finished run leaves it, with `fields` changed; its id."""
+    return page.evaluate(STORE_SEARCH, [papers, SPEC.model_dump(), fields])
+
+
+def test_the_openai_subscription_says_how_to_run_the_local_edition(browser, site_url):
+    """A ChatGPT plan can run the agents only in the local edition. Chosen here, the subscription shows
+    how to run that edition where the key box was, and every job comes back to it: no model is called."""
+    network = Network()
+    context = browser.new_context(viewport={"width": 1280, "height": 900}, permissions=["clipboard-read", "clipboard-write"])
+    context.route("**/*", network)
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(site_url)
+    paper = _paper(1, [("PHQ-9", "12 weeks", [("App", "mean", 8.1)])], ext_id="1001", extracted_by="worker")
+    project_id = stored_search(page, [paper], status="interrupted")
+    page.fill("#api-key", KEY)
+    page.check("input[name='provider'][value='chatgpt']")
+    assert page.is_hidden("#key-box") and page.is_visible("#local-box")
+    box = " ".join(page.inner_text("#local-box").split())
+    for said in ("Your ChatGPT plan can run the agents in the local edition, which runs on your own computer.",
+                 "OpenAI allows plan use only for apps on your own computer: its sign-in returns to http://127.0.0.1, "
+                 "which a page served from the web cannot receive.",
+                 # esf serve opens the local edition itself, with its access key in the address: no bare link to it here.
+                 "esf serve opens the local edition in your browser. If it doesn't, open the address it prints; "
+                 "it carries the server's access key. There, choose OpenAI subscription and click Sign in with ChatGPT.",
+                 "To search here instead, choose the Claude API or the OpenAI API above. Searches stay in this browser either way."):
+        assert said in box, said
+    assert page.locator("#local-box a").count() == 0 and "127.0.0.1:8000" not in box
+    # [dev] only adds the test tools, so the steps install without it. They call the environment's own
+    # programs, with no activation, which Windows PowerShell's default policy refuses.
+    steps = ["git clone https://github.com/hyungrok-do/effect-size-dev.git\ncd effect-size-dev",
+             "python3 -m venv .venv\n.venv/bin/python -m pip install -e .",
+             "py -m venv .venv\n.venv\\Scripts\\python -m pip install -e .",
+             ".venv/bin/esf serve", ".venv\\Scripts\\esf serve"]
+    assert page.locator("#local-box pre").all_inner_texts() == steps
+    for n in (1, 2, 4):
+        page.locator("#local-box .copy").nth(n).click()
+        page.wait_for_function(f"() => document.querySelectorAll('#local-box .copy')[{n}].textContent === 'Copied'")
+        assert page.evaluate("navigator.clipboard.readText()") == steps[n]
+    # No model runs here on the plan: the header says so, and the roles are listed by what they do, without
+    # a model or a choice of one (those come from the plan's own list).
+    assert page.inner_text("#models") == "Agents run in the local edition only"
+    # Nor do the lines about what a role will do name a model: they name the role.
+    assert "and the manager summarizes what the papers you kept report" in page.inner_text(".lede")
+    assert page.inner_text("#summary .summary").startswith("The manager describes what the papers you kept report")
+    assert page.locator("#roles li strong").all_inner_texts() == ["Manager", "Workers", "Code"]
+    roles = page.locator("#roles li").all_inner_texts()
+    assert [role.split("\n", 1)[1] for role in roles] == [
+        "Reads the problem, plans the search, reviews flagged extractions, checks overlap, writes the summary",
+        "Screen every record and extract every paper", "Runs the searches, gets the text, checks every quote"]
+    assert page.locator("#roles select").count() == 0 and "plan's own list" in page.inner_text("#roles-note")
+    assert page.is_hidden("#agents-notice")  # it says what is sent where; nothing is, here
+    # The commands fit a phone's width: a long line scrolls in its own box, not the page.
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") == 0
+    page.set_viewport_size({"width": 1280, "height": 900})
+    # The Agents button names it, flagged as not ready; the Claude key is left as it was.
+    assert page.inner_text("#agents-label") == "OpenAI subscription" and page.get_attribute("#agents-toggle", "data-missing") == "true"
+    assert page.evaluate("document.querySelector('#agents-flag').hidden") is False
+    assert page.evaluate("[localStorage.getItem('esf-provider'), sessionStorage.getItem('esf-anthropic-api-key')]") == ["chatgpt", KEY]
+    # The choice is kept, like the others.
+    page.reload()
+    assert page.is_checked("input[name='provider'][value='chatgpt']") and page.is_visible("#local-box")
+    page.click("#agents-done")
+    page.click("#tab-setup")
+    assert page.inner_text("#agents-summary") == ("OpenAI subscription: runs in the local edition only, on your own computer. "
+                                                  "To search here, choose the Claude API or the OpenAI API.")
+
+    # Every job (reading a problem, Continue, Search again, extracting, the summary) opens that box instead.
+    def stopped():
+        assert page.is_visible("#agents-page") and page.get_attribute("#local-box", "data-missing") == "true"
+        assert "so nothing was started" in page.inner_text("#local-status")
+        assert page.evaluate("document.activeElement.id") == "local-title"
+        page.click("#agents-done")
+
+    page.click("#tab-problem")
+    page.fill("#paragraph", "A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.")
+    page.click("#read")
+    stopped()
+    page.goto(f"{site_url}#{project_id}")
+    page.reload()
+    page.wait_for_selector("#continue:not([hidden])")
+    page.click("#continue")
+    stopped()
+    page.click("#tab-spec")
+    page.click("#run")
+    stopped()
+    page.click("#tab-review")
+    card = open_paper(page, "Trial 1")
+    card.locator(".paper-details summary").click()
+    card.locator("button", has_text="Re-extract from your PDF").click()
+    stopped()
+    page.click("#tab-summary")
+    page.click("#summarize")
+    stopped()
+    assert not network.claude and not network.openai_calls
+    assert page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().projects()).map((p) => p.status);
+    }""") == ["interrupted"]
+    # Back on the Claude API, its key is there again.
+    page.click("#agents-toggle")
+    page.check("input[name='provider'][value='anthropic']")
+    assert page.input_value("#api-key") == KEY and page.is_visible("#key-box") and page.is_hidden("#local-box")
+    assert page.get_attribute("#agents-toggle", "data-missing") == "false" and page.locator("#roles select").count() == 3
+    assert page.inner_text("#models").startswith("Opus 5.5 plans and reviews")
+    assert page.locator("#roles li strong").all_inner_texts()[0] == "Opus 5.5 · manager"
+    assert not errors, errors
+    context.close()
+
+
+def test_the_page_runs_under_a_content_security_policy(browser, site_url):
+    context = browser.new_context()
+    context.route("**/*", Network())
+    context.add_init_script(CSP_WATCH)
+    page = context.new_page()
+    page.goto(site_url)
+    first = page.evaluate("[document.head.firstElementChild.httpEquiv, document.head.firstElementChild.content]")
+    assert first == ["Content-Security-Policy", "default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; "
+                     "img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'none'; object-src 'none'"]
+    page.wait_for_selector("#agents-page:not([hidden])")
+    assert page.evaluate("window.cspViolations") == []  # the page, its styles and its icon load within it
+    # A script slipped into the page does not run.
+    page.evaluate("() => { const s = document.createElement('script'); s.textContent = 'window.injected = true'; document.head.append(s); }")
+    page.wait_for_function("() => window.cspViolations.length > 0")
+    assert page.evaluate("window.injected") is None and page.evaluate("window.cspViolations")[0]["directive"].startswith("script-src")
+    context.close()
+
+
+def test_requests_through_claude_leave_out_the_ncbi_key_and_email(browser, site_url):
+    """An NCBI address goes through Claude's web fetch without the NCBI key, the email and the tool name;
+    Unpaywall's keeps its email, which Unpaywall requires. PubMed sizes its chunks on the address sent."""
+    page = browser.new_page()
+    page.goto(site_url + "vendor/LICENSES.txt")
+    email = "someone.with.a.long.address@university.example.edu"
+    pmids = [str(30000000 + i) for i in range(40)]
+    result = page.evaluate("""async ([email, key, pmids]) => {
+        const { Sources } = await import('/lib/sources.js');
+        const asked = [];
+        const replies = {
+            'esearch.fcgi': '{"esearchresult": {"count": "40", "idlist": []}}', 'esummary.fcgi': '{"result": {"uids": []}}',
+            'efetch.fcgi': '<PubmedArticleSet></PubmedArticleSet>',
+        };
+        const sources = new Sources({
+            email, ncbiApiKey: key, fetchImpl: () => Promise.reject(new TypeError('Failed to fetch')),
+            proxy: async (url) => {
+                asked.push(url);
+                const reply = replies[new URL(url).pathname.split('/').pop()];
+                return { kind: 'text', text: reply || '{"best_oa_location": {"url_for_pdf": "https://example.org/a.pdf"}}' };
+            },
+        });
+        const searched = await sources.pubmed.search('mindfulness[tiab]', 5);
+        await sources.pubmed.fetch(pmids);
+        await sources.pubmed.summaries(pmids);
+        return { asked, searched, pdf: await sources.unpaywall.pdfUrl('10.1000/rct2') };
+    }""", [email, NCBI_KEY, pmids])
+    assert result["searched"] == [40, []] and result["pdf"] == "https://example.org/a.pdf"
+    ncbi = [u for u in result["asked"] if urlparse(u).hostname == "eutils.ncbi.nlm.nih.gov"]
+    assert ncbi and all(not {"api_key", "email", "tool"} & set(parse_qs(urlparse(u).query)) for u in ncbi)
+    assert not any(NCBI_KEY in u or "university.example.edu" in u for u in ncbi)
+    for endpoint in ("efetch.fcgi", "esummary.fcgi"):
+        chunks = [u for u in ncbi if urlparse(u).path.endswith(endpoint)]
+        assert [i for u in chunks for i in parse_qs(urlparse(u).query)["id"][0].split(",")] == pmids, endpoint
+        # Each address fits the web fetch's 250 characters, and the first has no room for another PMID.
+        assert all(len(u) <= 250 for u in chunks) and len(chunks[0]) + len("%2C30000000") > 250, [len(u) for u in chunks]
+    unpaywall = [u for u in result["asked"] if urlparse(u).hostname == "api.unpaywall.org"]
+    assert [parse_qs(urlparse(u).query)["email"] for u in unpaywall] == [[email]]
+    page.close()
+
+
+def test_a_failed_request_to_a_literature_api_is_tried_again_directly(browser, site_url):
+    """One network blip doesn't send a literature API's requests through the model: the request is
+    tried again after a short pause. Another host is still fetched through Claude at its first refusal."""
+    page = browser.new_page()
+    page.goto(site_url + "vendor/LICENSES.txt")
+    result = page.evaluate("""async () => {
+        const { Http } = await import('/lib/sources.js');
+        let calls = 0;
+        const proxied = [];
+        const proxy = async (url) => { proxied.push(url); return { kind: 'text', text: '{"proxied": true}' }; };
+        const http = new Http({ proxy, fetchImpl: async () => {
+            calls += 1;
+            if (calls === 1) throw new TypeError('Failed to fetch');
+            return new Response('{"ok": true}', { headers: { 'content-type': 'application/json' } });
+        } });
+        const started = performance.now();
+        const got = await http.get('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=x');
+        const waited = performance.now() - started;
+        let elsewhere = 0;
+        const other = new Http({ proxy, fetchImpl: async () => { elsewhere += 1; throw new TypeError('Failed to fetch'); } });
+        const fromElsewhere = await other.get('https://example.org/data.json');
+        return { got, waited, calls, proxied, blocked: http.isBlocked('https://eutils.ncbi.nlm.nih.gov/'), elsewhere, fromElsewhere };
+    }""")
+    assert result["got"] == {"ok": True} and result["calls"] == 2 and result["blocked"] is False
+    assert result["waited"] >= 900, result["waited"]
+    assert result["elsewhere"] == 1 and result["fromElsewhere"] == {"proxied": True} and result["proxied"] == ["https://example.org/data.json"]
+    page.close()
+
+
+class UnpaywallThroughClaude(Network):
+    """Unpaywall refuses web pages here too, so its reply comes through Claude's web fetch."""
+
+    def fetched(self, url):
+        if not url.startswith("https://api.unpaywall.org/"):
+            return super().fetched(url)
+        reply = self.literature(httpx.Request("GET", url))
+        return {"type": "web_fetch_result", "url": url, "retrieved_at": "2026-10-21T00:00:00Z", "content": {
+            "type": "document", "source": {"type": "text", "media_type": "text/plain", "data": reply.text}}}
+
+
+def test_the_activity_log_shows_where_a_fetch_went_without_its_query(browser, site_url):
+    """Unpaywall's address carries the contact email: Claude is sent it (Unpaywall requires it), but the
+    activity log, which is shown and exported, names the host and path only."""
+    network = UnpaywallThroughClaude(refuse_web_pages=("example.org", "api.unpaywall.org"))
+    context = browser.new_context(viewport={"width": 1280, "height": 900}, accept_downloads=True)
+    context.route("**/*", network)
+    page = context.new_page()
+    page.goto(site_url)
+    paper = _paper(1, [], status="no_fulltext", ext_id="22222222", pmid="22222222", doi="10.1000/rct2", extraction=None,
+                   verification=None, title="Brief mindfulness training versus waitlist: a randomised trial.", abstract="Mindfulness versus waitlist.")
+    project_id = stored_search(page, [paper])
+    page.evaluate("""(key) => {
+        sessionStorage.setItem('esf-anthropic-api-key', key);
+        localStorage.setItem('esf-contact-email', 'test@example.com');
+    }""", KEY)
+    page.goto(f"{site_url}#{project_id}")
+    page.reload()
+    page.wait_for_selector("#review:not([hidden])")
+    page.click("#tabs button:has-text('Needs attention')")
+    open_paper(page, "Brief mindfulness").locator("button", has_text="Try extracting again").click()
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().papers(location.hash.slice(1)))[0].status;
+    }""") != "extracted":
+        time.sleep(0.2)
+    fetched =[re.search(r"Fetch (\S+) with", body["messages"][0]["content"]).group(1) for _, body in network.claude
+               if any(t.get("type") == "web_fetch_20250910" for t in body.get("tools") or [])]
+    assert fetched == ["https://api.unpaywall.org/v2/10.1000/rct2?email=test%40example.com", PDF_URL]
+    events = page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().events(location.hash.slice(1))).reverse();
+    }""")
+    assert [e["text"] for e in events if e["agent"] == "fetcher"] == [
+        "Fetching api.unpaywall.org/v2/10.1000/rct2 for the browser", "Fetching example.org/rct2.pdf for the browser"]
+    assert not any("?" in e["text"] or "example.com" in e["text"] for e in events)
+    page.wait_for_selector("#log-tools:not([hidden])")
+    with page.expect_download() as download:
+        page.click("#export-log-csv")
+    log = open(download.value.path(), encoding="utf-8").read()
+    assert "Fetching api.unpaywall.org/v2/10.1000/rct2 for the browser" in log
+    assert "test%40example.com" not in log and "test@example.com" not in log
+    context.close()
+
+
+# Each secret (and the contact email) as kept: [on this browser, for this tab].
+KEPT = """() => Object.fromEntries(['esf-anthropic-api-key', 'esf-openai-api-key', 'esf-ncbi-api-key', 'esf-contact-email']
+    .map((name) => [name.replace(/^esf-/, ''), [localStorage.getItem(name), sessionStorage.getItem(name)]]))"""
+NCBI_HINT = ("Optional; lets PubMed searches run faster. Kept for this tab, where reopening a closed tab can bring it back, "
+             "or on this browser along with a remembered API key.")
+
+
+def test_secrets_are_kept_for_the_tab_unless_remembered_and_forget_clears_them(browser, site_url):
+    context = browser.new_context()
+    context.route("**/*", Network())
+    page = context.new_page()
+    page.goto(site_url)
+    kept = KEPT
+    # Beside Remember: who else can read what it keeps. Beside the key: keep its spending in bounds.
+    assert page.inner_text("#remember-note") == f"Stored for {site_url.rstrip('/')}; any page served from that address can read it."
+    assert page.inner_text("#limit-note") == "Safest is a key from an Anthropic workspace with a monthly spend limit."
+    page.fill("#api-key", KEY)
+    # A tab's storage outlives closing it when the tab is reopened or restored, so the page doesn't promise otherwise.
+    assert page.inner_text("#key-status") == ("Kept for this tab; reopening a closed tab can bring it back. "
+                                              "It is sent only to Anthropic, straight from this page.")
+    page.click("#agents-done")
+    page.click("#tab-setup")
+    assert page.inner_text("label[for='ncbi-key'] .hint") == NCBI_HINT
+    page.fill("#contact-email", "test@example.com")
+    page.dispatch_event("#contact-email", "change")
+    page.fill("#ncbi-key", NCBI_KEY)
+    page.dispatch_event("#ncbi-key", "change")
+    stored = page.evaluate(kept)
+    assert stored["anthropic-api-key"] == [None, KEY] and stored["ncbi-api-key"] == [None, NCBI_KEY]
+    # Remember keeps the model key and the NCBI key on this browser; clearing it brings both back to the tab.
+    page.click("#open-agents")
+    page.check("#remember-key")
+    assert page.inner_text("#key-status").startswith("Remembered on this browser.")
+    stored = page.evaluate(kept)
+    assert stored["anthropic-api-key"] == [KEY, None] and stored["ncbi-api-key"] == [NCBI_KEY, None]
+    page.check("input[name='provider'][value='openai']")
+    assert page.inner_text("#limit-note") == "Safest is a key from an OpenAI project with a budget of its own."
+    page.fill("#api-key", OPENAI_KEY)
+    page.check("#remember-key")
+    page.uncheck("#remember-key")
+    stored = page.evaluate(kept)
+    assert stored["openai-api-key"] == [None, OPENAI_KEY] and stored["ncbi-api-key"] == [None, NCBI_KEY]
+    assert stored["anthropic-api-key"] == [KEY, None]
+    # Forget clears every secret, in this tab and on this browser; the contact email is not one and stays.
+    page.click("#forget-key")
+    assert page.evaluate(kept) == {"anthropic-api-key": [None, None], "openai-api-key": [None, None], "ncbi-api-key": [None, None],
+                                   "contact-email": ["test@example.com", None]}
+    assert (page.input_value("#api-key"), page.input_value("#ncbi-key"), page.input_value("#contact-email")) == ("", "", "test@example.com")
+    page.check("input[name='provider'][value='anthropic']")
+    assert page.input_value("#api-key") == ""
+    # An NCBI key kept on this browser before it followed Remember is read once, then kept for the tab...
+    page.evaluate("(key) => { localStorage.setItem('esf-ncbi-api-key', key); localStorage.removeItem('esf-ncbi-key-kept-by-tab'); }", NCBI_KEY)
+    page.reload()
+    assert page.input_value("#ncbi-key") == NCBI_KEY and page.evaluate(kept)["ncbi-api-key"] == [None, NCBI_KEY]
+    # ...unless a model key is remembered there too; after that one read, nothing moves on its own.
+    page.evaluate("""([key, ncbi]) => {
+        localStorage.setItem('esf-anthropic-api-key', key);
+        localStorage.setItem('esf-ncbi-api-key', ncbi);
+        sessionStorage.removeItem('esf-ncbi-api-key');
+        localStorage.removeItem('esf-ncbi-key-kept-by-tab');
+    }""", [KEY, NCBI_KEY])
+    page.reload()
+    assert page.input_value("#ncbi-key") == NCBI_KEY and page.evaluate(kept)["ncbi-api-key"] == [NCBI_KEY, None]
+    assert page.is_checked("#remember-key")
+    page.evaluate("localStorage.removeItem('esf-anthropic-api-key')")
+    page.reload()
+    assert page.evaluate(kept)["ncbi-api-key"] == [NCBI_KEY, None]
+    context.close()
+
+
+def test_secrets_that_fail_their_checks_are_dropped_when_the_page_loads(browser, site_url):
+    """Kept by an older page, before it refused them: a remembered admin key, a model key in the NCBI key's
+    place, and a Claude key under OpenAI. Each is dropped from both storages once loaded, and stays in its
+    box, where the page says what is wrong with it."""
+    network = Network()
+    context = browser.new_context()
+    context.route("**/*", network)
+    page = context.new_page()
+    page.goto(site_url)
+    admin = "sk-ant-admin01-abcdefghijklmnopqrstuvwxyz"
+    page.evaluate("""([admin, key]) => {
+        for (const store of [localStorage, sessionStorage]) {
+          store.setItem('esf-anthropic-api-key', admin);
+          store.setItem('esf-ncbi-api-key', key);
+        }
+        sessionStorage.setItem('esf-openai-api-key', key);
+        localStorage.removeItem('esf-ncbi-key-kept-by-tab'); // the NCBI key's one-time move doesn't keep it either
+    }""", [admin, KEY])
+    page.reload()
+    stored = page.evaluate(KEPT)
+    assert stored["anthropic-api-key"] == [None, None] and stored["ncbi-api-key"] == [None, None]
+    assert page.input_value("#api-key") == admin
+    assert page.inner_text("#key-status") == "This is an admin key, which can manage the whole account; use an ordinary API key. It is not sent."
+    assert page.get_attribute("#agents-toggle", "data-missing") == "true"
+    page.click("#agents-done")
+    page.click("#tab-setup")
+    assert page.input_value("#ncbi-key") == KEY
+    assert page.inner_text("#ncbi-status") == ("This is an Anthropic API key, not an NCBI API key: it is not sent to NCBI or kept. "
+                                               "Paste it on the Agents page.")
+    # Nothing is left to load the next time.
+    page.reload()
+    assert page.input_value("#api-key") == "" and page.input_value("#ncbi-key") == "" and page.is_hidden("#ncbi-status")
+    # The other vendor's key is dropped once its provider is chosen; following the advice carries it over.
+    page.check("input[name='provider'][value='openai']")
+    assert page.input_value("#api-key") == KEY and "choose Claude API to use it" in page.inner_text("#key-status")
+    assert page.evaluate(KEPT)["openai-api-key"] == [None, None]
+    page.check("input[name='provider'][value='anthropic']")
+    assert page.input_value("#api-key") == KEY and page.evaluate(KEPT)["anthropic-api-key"] == [None, KEY]
+    assert not network.claude and not network.openai_calls
+    context.close()
+
+
+def test_editing_the_ncbi_key_leaves_it_where_it_is_kept(browser, site_url):
+    """Remember shows the chosen provider's key, so switching provider changes it. Only ticking or clearing
+    Remember moves the NCBI key; an edit leaves it where it is."""
+    context = browser.new_context()
+    context.route("**/*", Network())
+    page = context.new_page()
+    page.goto(site_url)
+
+    def edit_ncbi_key(value):
+        page.click("#agents-done")
+        page.click("#tab-setup")
+        page.fill("#ncbi-key", value)
+        page.dispatch_event("#ncbi-key", "change")
+        page.click("#open-agents")
+        return page.evaluate(KEPT)["ncbi-api-key"]
+
+    page.fill("#api-key", KEY)
+    page.check("#remember-key")
+    assert edit_ncbi_key(NCBI_KEY) == [NCBI_KEY, None]
+    # OpenAI with no key yet: Remember is clear, and the edited NCBI key stays on this browser.
+    page.check("input[name='provider'][value='openai']")
+    assert not page.is_checked("#remember-key")
+    edited = NCBI_KEY[::-1]
+    assert edit_ncbi_key(edited) == [edited, None]
+    # Ticking Remember and clearing it again brings it to this tab with the OpenAI key; there it stays when
+    # edited under the Claude API, whose key is remembered.
+    page.fill("#api-key", OPENAI_KEY)
+    page.check("#remember-key")
+    page.uncheck("#remember-key")
+    assert page.evaluate(KEPT)["ncbi-api-key"] == [None, edited]
+    page.check("input[name='provider'][value='anthropic']")
+    assert page.is_checked("#remember-key")
+    assert edit_ncbi_key(NCBI_KEY) == [None, NCBI_KEY]
+    # With none kept, a new NCBI key follows Remember as shown.
+    assert edit_ncbi_key("") == [None, None]
+    assert edit_ncbi_key(NCBI_KEY) == [NCBI_KEY, None]
+    # It stays on this browser only along with a remembered model key: once none is, an edit brings it to the tab.
+    page.fill("#api-key", "")
+    assert page.evaluate(KEPT)["anthropic-api-key"] == [None, None]
+    page.reload()
+    assert edit_ncbi_key(edited) == [None, edited]
+    context.close()
+
+
+def test_an_ncbi_key_from_an_older_page_moves_to_the_tab_unless_a_usable_key_is_remembered(browser, site_url):
+    """An older page kept the NCBI key on this browser whatever Remember said. It is read once: a remembered
+    admin key, which the page drops, doesn't count as a remembered key, and a model key kept in the NCBI
+    key's place is not kept anywhere."""
+    context = browser.new_context()
+    context.route("**/*", Network())
+    page = context.new_page()
+    page.goto(site_url)
+    admin = "sk-ant-admin01-abcdefghijklmnopqrstuvwxyz"
+
+    def older_page(**kept):
+        page.evaluate("""(kept) => {
+            localStorage.clear();
+            sessionStorage.clear();
+            for (const [name, value] of Object.entries(kept)) localStorage.setItem(name, value);
+        }""", {f"esf-{name.replace('_', '-')}": value for name, value in kept.items()})
+        page.reload()
+        return page.evaluate(KEPT)
+
+    stored = older_page(anthropic_api_key=admin, ncbi_api_key=NCBI_KEY)
+    assert stored["anthropic-api-key"] == [None, None] and stored["ncbi-api-key"] == [None, NCBI_KEY]
+    stored = older_page(anthropic_api_key=KEY, ncbi_api_key=NCBI_KEY)
+    assert stored["anthropic-api-key"] == [KEY, None] and stored["ncbi-api-key"] == [NCBI_KEY, None]
+    stored = older_page(ncbi_api_key=KEY)
+    assert stored["ncbi-api-key"] == [None, None] and stored["anthropic-api-key"] == [None, None]
+    page.click("#agents-done")
+    page.click("#tab-setup")
+    assert page.input_value("#ncbi-key") == KEY and page.is_visible("#ncbi-status")
+    context.close()
+
+
+def test_saved_keys_can_be_forgotten_with_the_subscription_chosen(browser, site_url):
+    """The subscription hides the key box, and Forget with it: its own box forgets the same keys. The hint
+    beside the NCBI key points to no box the subscription hides."""
+    context = browser.new_context()
+    context.route("**/*", Network())
+    page = context.new_page()
+    page.goto(site_url)
+    page.fill("#api-key", KEY)
+    page.check("#remember-key")
+    page.check("input[name='provider'][value='openai']")
+    page.fill("#api-key", OPENAI_KEY)
+    page.click("#agents-done")
+    page.click("#tab-setup")
+    page.fill("#contact-email", "test@example.com")
+    page.dispatch_event("#contact-email", "change")
+    page.fill("#ncbi-key", NCBI_KEY)
+    page.dispatch_event("#ncbi-key", "change")
+    assert page.evaluate(KEPT) == {"anthropic-api-key": [KEY, None], "openai-api-key": [None, OPENAI_KEY],
+                                   "ncbi-api-key": [None, NCBI_KEY], "contact-email": ["test@example.com", None]}
+    page.click("#open-agents")
+    page.check("input[name='provider'][value='chatgpt']")
+    assert page.is_hidden("#key-box") and page.is_hidden("#forget-key") and page.is_visible("#forget-saved")
+    assert " ".join(page.inner_text("#local-box").split()).endswith(
+        "Forget saved keys Removes any Anthropic, OpenAI or NCBI API key this page keeps, in this tab and on this browser.")
+    page.click("#forget-saved")
+    assert page.evaluate(KEPT) == {"anthropic-api-key": [None, None], "openai-api-key": [None, None],
+                                   "ncbi-api-key": [None, None], "contact-email": ["test@example.com", None]}
+    assert page.inner_text("#local-status") == "No API key is kept on this page now."
+    assert page.get_attribute("#local-box", "data-missing") == "false" and page.evaluate("document.activeElement.id") == "forget-saved"
+    page.click("#agents-done")
+    page.click("#tab-setup")
+    assert page.input_value("#ncbi-key") == "" and page.inner_text("label[for='ncbi-key'] .hint") == NCBI_HINT
+    page.reload()
+    for name in ("anthropic", "openai"):
+        page.check(f"input[name='provider'][value='{name}']")
+        assert page.input_value("#api-key") == "" and not page.is_checked("#remember-key")
+    context.close()
+
+
+def test_csv_exports_keep_spreadsheets_from_running_formulas(browser, site_url):
+    """Text that a spreadsheet would read as a formula gets an apostrophe in front; numbers stay numbers."""
+    page = browser.new_page()
+    page.goto(site_url + "vendor/LICENSES.txt")
+    cells = ['=HYPERLINK("https://example.org")', "+1+1", "-2+3", "@SUM(A1)", "\tleads", "\rleads", "-", "-2.2", "+3", "1e5",
+             "-.5", "+1.5E-3", "plain", "a=b"]
+    out = page.evaluate("""async (cells) => {
+        const { csvOf, exportRows, LOG_COLUMNS, logRows, toCsv } = await import('/lib/export.js');
+        const paper = { id: 1, status: 'extracted', source: 'pubmed', ext_id: '1', title: '=cmd|"/c calc"!A1', verification: { values: [], flags: [] },
+          extraction: { results: [{ outcome_measure: '-PHQ-9', timepoint: '', analysis_population: '', adjusted: '', relevance: '', confidence: '',
+            concerns: [], values: [{ group: '@App', statistic: 'mean_difference', value: -2.2, describes: '', quote: '-2.2 (95% CI -3.4 to -1.0)', location: '' }] }] } };
+        return {
+          cells: csvOf(['v'], [...cells, -3, true].map((v) => ({ v }))),
+          results: toCsv(exportRows([paper], {}, false)),
+          log: csvOf(LOG_COLUMNS, logRows([{ at: '2026-10-24T00:00:00Z', agent: 'manager', step: 'search', phase: 'done', text: '=1+1', detail: '-2.2' }], [])),
+        };
+    }""", cells)
+    rows = list(csv.reader(io.StringIO(out["cells"], newline="")))
+    assert [r[0] for r in rows[1:]] == [
+        '\'=HYPERLINK("https://example.org")', "'+1+1", "'-2+3", "'@SUM(A1)", "'\tleads", "'\rleads", "'-", "-2.2", "+3", "1e5",
+        "-.5", "+1.5E-3", "plain", "a=b", "-3", "True"]
+    result = next(csv.DictReader(io.StringIO(out["results"], newline="")))
+    assert (result["title"], result["outcome_measure"], result["group"], result["value"], result["quote"]) == (
+        "'=cmd|\"/c calc\"!A1", "'-PHQ-9", "'@App", "-2.2", "'-2.2 (95% CI -3.4 to -1.0)")
+    step = next(csv.DictReader(io.StringIO(out["log"], newline="")))
+    assert (step["text"], step["detail"]) == ("'=1+1", "-2.2")
+    page.close()

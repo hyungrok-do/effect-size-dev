@@ -219,6 +219,13 @@
   button:disabled { opacity: .55; cursor: default; }
 
   .notice { padding: 10px 14px; border-radius: 10px; background: var(--accent-soft); color: var(--ink-2); font-size: 14px; margin: 14px 0 0; }
+  /* Shown instead of the whole page when the server wants its access key. */
+  .access-notice {
+    width: min(1192px, calc(100% - 48px)); margin: 32px auto; padding: 18px 22px;
+    background: var(--error-soft); border: 1px solid var(--error); border-radius: 12px;
+  }
+  .access-notice h2 { font-size: 20px; }
+  .access-notice p { margin: 8px 0 0; max-width: 75ch; color: var(--ink-2); }
   .error { border: 1px solid var(--error); background: var(--error-soft); border-radius: 10px; padding: 10px 14px; overflow-wrap: anywhere; margin: 12px 0 0; }
   .stated, .questions { margin: 6px 0 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; }
 
@@ -282,6 +289,7 @@
     .top { padding: 12px 16px; }
     .top-side { justify-content: flex-start; }
     #agents-page { width: calc(100% - 32px); margin: 16px auto 32px; }
+    .access-notice { width: calc(100% - 32px); margin: 16px auto; padding: 16px; }
     .intro { padding: 20px 16px 0; }
     .intro h2 { font-size: 20px; }
     .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 16px; }
@@ -303,6 +311,11 @@
     <button id="agents-toggle" type="button" class="secondary small agents-toggle" aria-controls="agents-page" aria-expanded="false">Agents: Claude API</button>
   </div>
 </header>
+
+<section id="access-notice" class="access-notice" role="alert" aria-labelledby="access-title" hidden>
+  <h2 id="access-title">This page needs the server's access key</h2>
+  <p>Open the address that <code>esf serve</code> printed in the terminal; it carries this server's access key.</p>
+</section>
 
 <section id="intro" class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published effect sizes a study plan needs</h2>
@@ -367,6 +380,7 @@
       <button id="forget-key" type="button" class="secondary small">Forget</button>
     </div>
     <p id="key-status" class="hint" aria-live="polite"></p>
+    <p id="remember-key-note" class="hint"></p>
   </div>
   <div class="keybox" id="openai-box" hidden>
     <label for="openai-key">OpenAI API key</label>
@@ -376,14 +390,17 @@
       <button id="forget-openai-key" type="button" class="secondary small">Forget</button>
     </div>
     <p id="openai-key-status" class="hint" aria-live="polite"></p>
+    <p id="remember-openai-key-note" class="hint"></p>
   </div>
   <div class="keybox" id="chatgpt-box" hidden>
     <label>ChatGPT plan</label>
     <div class="key-row">
       <button id="chatgpt-sign-in" type="button" class="primary small">Sign in with ChatGPT</button>
+      <button id="chatgpt-another" type="button" class="secondary small">Use another ChatGPT account</button>
       <button id="chatgpt-cancel" type="button" class="secondary small" hidden>Cancel</button>
       <button id="chatgpt-sign-out" type="button" class="secondary small" hidden>Sign out</button>
     </div>
+    <p id="chatgpt-another-hint" class="hint" hidden>To use another account, sign out of ChatGPT in this browser first, or switch accounts on ChatGPT's screen.</p>
     <p id="chatgpt-status" class="hint" aria-live="polite"></p>
   </div>
 
@@ -485,9 +502,9 @@
       <details class="exports-box">
         <summary>Export</summary>
         <div class="exports">
-          <a id="export-included" class="button small" href="#">CSV: included results</a>
-          <a id="export-all" class="button small" href="#">CSV: everything extracted</a>
-          <a id="export-json" class="button small" href="#">JSON</a>
+          <button id="export-included" type="button" class="secondary small">CSV: included results</button>
+          <button id="export-all" type="button" class="secondary small">CSV: everything extracted</button>
+          <button id="export-json" type="button" class="secondary small">JSON</button>
         </div>
       </details>
     </section>

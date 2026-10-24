@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlencode
 
 import httpx
@@ -17,8 +18,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
 from esf.chatgpt import (
-    APP_NAME, ISSUER, PENDING_SECONDS, REGISTRATION_ENTRY, RESOURCE, SCOPES, ChatGPTError, ChatGPTSession, redirect_uri,
+    ANOTHER_ACCOUNT, APP_NAME, EARLIER_ACCOUNT_UNCONFIRMED, EARLIER_SIGN_IN_UNCONFIRMED, ISSUER, JOB_REFRESH_WAIT, NO_CALLBACK,
+    PENDING_SECONDS, REFRESH_MARGIN, REFRESH_WAIT, REGISTRATION_ENTRY, RESOURCE, SCOPES, ChatGPTError, ChatGPTSession, redirect_uri,
 )
+
+WITHOUT_PLAN = "openid profile email offline_access resource.invoke"  # the scopes, less plan usage
 
 PORT = 8765
 HOST = f"127.0.0.1:{PORT}"
@@ -74,6 +78,7 @@ class FakeOpenAI:
         self.token_changes: dict = {}  # merged into the code exchange's reply; None removes a field
         self.id_token_options: dict = {}  # for the code exchange's id_token
         self.refresh_reply: tuple[int, dict] | None = None  # replaces a refresh's reply
+        self.refresh_changes: dict = {}  # merged into a refresh's reply
         self.refresh_id_token: dict | None = None  # when set, refreshes return an id_token with these options
         self.refresh_delay = 0.0
         self.refreshes = 0  # refresh requests, failed ones included
@@ -129,6 +134,7 @@ class FakeOpenAI:
             body = {"access_token": self.access, "token_type": "bearer", "expires_in": 3600, "refresh_token": self.refresh}
             if self.refresh_id_token is not None:
                 body["id_token"] = self.id_token(**self.refresh_id_token)
+            body.update(self.refresh_changes)
             return httpx.Response(200, json=body)
         return httpx.Response(400, json={"error": "unsupported_grant_type"})
 
@@ -156,11 +162,18 @@ class FakeOpenAI:
 
 
 class Clock:
+    """The session's clock, and its sleep, which moves the clock on instead of waiting."""
+
     def __init__(self):
         self.now = 1_800_000_000.0
+        self.slept: list[float] = []
 
     def __call__(self) -> float:
         return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
 
 
 def new_session(tmp_path, api=None, clock=None):
@@ -168,7 +181,8 @@ def new_session(tmp_path, api=None, clock=None):
     clock = clock or Clock()
     # The client follows redirects on purpose: the session must turn that off for its own requests.
     client = httpx.Client(transport=httpx.MockTransport(api), follow_redirects=True)
-    return ChatGPTSession(tmp_path / "settings" / "chatgpt.json", client=client, clock=clock), api, clock
+    session = ChatGPTSession(tmp_path / "settings" / "chatgpt.json", client=client, clock=clock, sleep=clock.sleep)
+    return session, api, clock
 
 
 def signed_in(tmp_path):
@@ -249,6 +263,7 @@ def test_sign_in_connects_and_keeps_no_token_on_disk(tmp_path):
     state = session.state()
     assert state["status"] == "connected" and state["error"] is None
     assert (state["name"], state["email"]) == ("Ada Lovelace", "ada@example.com")
+    assert state["account_changed"] is False and state["reconsent"] is False
     assert saved(tmp_path) == {"client_id": api.client_id, "subject": api.subject,
                                "host_id": api.authorizations[0]["ext_agent_host_id"]}
     path = tmp_path / "settings" / "chatgpt.json"
@@ -323,6 +338,38 @@ def test_a_sign_in_expires(tmp_path):
         session.finish(query, HOST)
     assert caught.value.code == "sign_in_expired" and session.state()["error"] == str(caught.value)
     assert api.token_forms == []
+
+
+def test_a_sign_in_that_never_comes_back_says_what_to_try(tmp_path):
+    # ChatGPT shows its own error page, and sends nobody back, for a client ID it won't take.
+    session, _, clock = new_session(tmp_path)
+    session.start(PORT)
+    clock.now += PENDING_SECONDS - 1
+    assert session.state()["pending"] is True and session.state()["error"] is None
+    clock.now += 2
+    state = session.state()
+    assert state["pending"] is False and state["error"] == NO_CALLBACK
+    assert "didn't come back" in NO_CALLBACK and f'"{ANOTHER_ACCOUNT}"' in NO_CALLBACK
+    session.start(PORT)  # trying again clears it
+    assert session.state()["pending"] is True and session.state()["error"] is None
+    clock.now += PENDING_SECONDS + 1
+    session.cancel()
+    assert session.state()["error"] is None
+
+
+def test_a_sign_in_that_never_comes_back_is_not_reported_while_signed_in(tmp_path):
+    # The sign-in held still serves, and the page offers no plain sign-in to clear the message with.
+    session, _, clock = signed_in(tmp_path)
+    session.start(PORT, new_registration=True)
+    clock.now += PENDING_SECONDS + 1
+    state = session.state()
+    assert (state["status"], state["pending"], state["error"]) == ("connected", False, None)
+    assert session.access_token() == "at-1"
+    # Once the sign-in has to be made again, it is.
+    session.handle_api_error("at-1", "invalid_token", 401)
+    session.start(PORT)
+    clock.now += PENDING_SECONDS + 1
+    assert session.state()["status"] == "reauth_required" and session.state()["error"] == NO_CALLBACK
 
 
 def test_a_new_sign_in_keeps_the_old_one_usable_until_it_succeeds(tmp_path):
@@ -438,7 +485,7 @@ def test_the_issued_client_id_is_checked(tmp_path, changes):
     session, api, _ = new_session(tmp_path)
     with pytest.raises(ChatGPTError) as caught:
         session.finish(api.authorize(session.start(PORT), **changes), HOST)
-    assert caught.value.code == "registration_incomplete"
+    assert caught.value.code == "registration_incomplete" and f'"{ANOTHER_ACCOUNT}"' in str(caught.value)
     assert saved(tmp_path)["client_id"] is None and "subject" not in saved(tmp_path) and api.token_forms == []
 
 
@@ -475,6 +522,36 @@ def test_without_plan_usage_the_sign_in_fails(tmp_path):
         session.access_token()
 
 
+def test_without_plan_usage_the_grant_is_given_back_and_the_next_sign_in_asks_again(tmp_path):
+    session, api, _ = new_session(tmp_path)
+    assert "prompt" not in dict(httpx.URL(session.start(PORT)).params)
+    api.scope = WITHOUT_PLAN
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(session.start(PORT)), HOST)
+    assert caught.value.code == "plan_not_granted" and "on the next screen, allow Effect Size Finder to use your plan" in str(caught.value)
+    assert api.revocations == [{"token": "rt-1", "token_type_hint": "refresh_token", "client_id": api.client_id}]
+    assert session.state()["reconsent"] is True
+    # The next sign-in shows ChatGPT's permission screen again, however many times it is started.
+    session.start(PORT)
+    url = session.start(PORT)
+    assert dict(httpx.URL(url).params)["prompt"] == "consent"
+    api.scope = SCOPES
+    session.finish(api.authorize(url), HOST)
+    assert session.state()["status"] == "connected" and session.state()["reconsent"] is False
+    assert "prompt" not in dict(httpx.URL(session.start(PORT)).params)
+    # The page can ask for the permission screen too.
+    assert dict(httpx.URL(session.start(PORT, reconsent=True)).params)["prompt"] == "consent"
+
+
+def test_a_reply_without_plan_usage_and_without_a_refresh_token_revokes_nothing(tmp_path):
+    session, api, _ = new_session(tmp_path)
+    api.scope, api.token_changes = WITHOUT_PLAN, {"refresh_token": None}
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(session.start(PORT)), HOST)
+    assert caught.value.code == "plan_not_granted" and api.revocations == []
+    assert session.state()["reconsent"] is True
+
+
 @pytest.mark.parametrize("changes", [
     {"refresh_token": None}, {"access_token": None}, {"token_type": "mac"}, {"expires_in": 0}, {"expires_in": "3600"},
     {"scope": None}, {"id_token": None}, {"id_token": ""},
@@ -495,6 +572,8 @@ def test_an_incomplete_token_reply_is_refused(tmp_path, changes):
     {"iss": "https://auth.example.com"},
     {"exp_in": -60},
     {"azp": "app_Other"},
+    {"iat": None},  # iat is required, though not checked against this computer's clock
+    {"iat": "soon"},
 ])
 def test_an_id_token_that_does_not_verify_is_refused(tmp_path, options):
     session, api, _ = new_session(tmp_path)
@@ -503,6 +582,18 @@ def test_an_id_token_that_does_not_verify_is_refused(tmp_path, options):
         session.finish(api.authorize(session.start(PORT)), HOST)
     assert caught.value.code == "invalid_id_token" and not caught.value.retryable
     assert session.state()["status"] == "disconnected"
+
+
+def test_an_id_token_issued_ahead_of_this_computers_clock_is_accepted(tmp_path):
+    # This computer's clock runs ten seconds behind OpenAI's, at sign-in and at the refresh after it.
+    session, api, clock = new_session(tmp_path)
+    api.id_token_options = {"iat": int(time.time()) + 10}
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    assert session.state()["status"] == "connected"
+    api.refresh_id_token = {"iat": int(time.time()) + 10, "email": "ada@new.example"}
+    clock.now += 3600
+    assert session.access_token() == "at-2"
+    assert session.state()["status"] == "connected" and session.state()["email"] == "ada@new.example"
 
 
 @pytest.mark.parametrize("outage", ["down", "empty", "offline"])
@@ -533,7 +624,8 @@ def test_access_token_needs_a_sign_in(tmp_path):
 
 def test_access_token_refreshes_only_near_expiry_and_keeps_the_rotated_token(tmp_path):
     session, api, clock = signed_in(tmp_path)
-    clock.now += 3600 - 121
+    assert REFRESH_MARGIN == 60  # as in the DevKit
+    clock.now += 3600 - REFRESH_MARGIN - 1
     assert session.access_token() == "at-1" and api.refreshes == 0
     clock.now += 2
     assert session.access_token() == "at-2" and api.refreshes == 1
@@ -559,6 +651,108 @@ def test_many_threads_cause_one_refresh(tmp_path):
     with ThreadPoolExecutor(8) as pool:
         tokens = list(pool.map(call, range(8)))
     assert tokens == ["at-2"] * 8 and api.refreshes == 1
+
+
+def iso(epoch: float, zone: str = "Z") -> str:
+    text = datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None).isoformat()
+    return text + zone
+
+
+@pytest.mark.parametrize("given", ["seconds", "iso", "iso-offset", "iso-no-zone"])
+def test_a_token_is_not_renewed_before_chatgpt_allows_it(tmp_path, given):
+    session, api, clock = new_session(tmp_path)
+    issued = clock.now
+    allowed = issued + 3590
+    api.token_changes = {"earliest_refresh_at": {"seconds": allowed, "iso": iso(allowed), "iso-offset": iso(allowed, "+00:00"),
+                                                 "iso-no-zone": iso(allowed, "")}[given]}
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    # Within the margin, but before ChatGPT allows a refresh: the token is used while it lasts.
+    clock.now = issued + 3600 - REFRESH_MARGIN + 1
+    assert session.access_token() == "at-1" and api.refreshes == 0
+    clock.now = allowed - 1
+    assert session.access_token() == "at-1" and api.refreshes == 0
+    clock.now = allowed
+    assert session.access_token() == "at-2" and api.refreshes == 1 and clock.slept == []
+
+
+def test_a_refreshed_token_keeps_its_own_earliest_refresh_time(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    clock.now += 3600
+    api.refresh_changes = {"earliest_refresh_at": int(clock.now) + 3575}
+    assert session.access_token() == "at-2"
+    clock.now += 3600 - 30  # at-2 has 30 s left, and may not be renewed for 5 s more
+    assert session.access_token() == "at-2" and api.refreshes == 1
+    clock.now += 5
+    assert session.access_token() == "at-3" and api.refreshes == 2
+
+
+def test_an_expired_token_waits_briefly_for_the_refresh_chatgpt_allows(tmp_path):
+    session, api, clock = new_session(tmp_path)
+    issued = clock.now
+    api.token_changes = {"earliest_refresh_at": issued + 3630}  # thirty seconds after the token expires
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    clock.now = issued + 3600
+    assert session.access_token() == "at-2"
+    assert clock.slept == [30.0] and clock.now == issued + 3630 and api.refreshes == 1
+
+
+def test_a_refresh_not_allowed_for_longer_is_a_retryable_error(tmp_path):
+    session, api, clock = new_session(tmp_path)
+    issued = clock.now
+    api.token_changes = {"earliest_refresh_at": issued + 3600 + REFRESH_WAIT + 40}
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    clock.now = issued + 3600
+    with pytest.raises(ChatGPTError) as caught:
+        session.access_token()
+    assert caught.value.code == "refresh_not_ready" and caught.value.retryable
+    assert api.refreshes == 0 and clock.slept == []
+    state = session.state()
+    assert state["status"] == "connected" and state["error"] == str(caught.value)
+    clock.now += 40  # now within the wait
+    assert session.access_token() == "at-2" and clock.slept == [REFRESH_WAIT]
+    assert session.state()["error"] is None
+
+
+@pytest.mark.parametrize("late", [REFRESH_WAIT + 40, JOB_REFRESH_WAIT, JOB_REFRESH_WAIT + 1])
+def test_a_job_waits_longer_for_the_refresh_than_a_page_request(tmp_path, late):
+    session, api, clock = new_session(tmp_path)
+    issued = clock.now
+    api.token_changes = {"earliest_refresh_at": issued + 3600 + late}
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    clock.now = issued + 3600
+    with pytest.raises(ChatGPTError) as caught:
+        session.access_token()  # a page's request
+    assert caught.value.code == "refresh_not_ready"
+    if late > JOB_REFRESH_WAIT:
+        with pytest.raises(ChatGPTError) as caught:
+            session.access_token(max_wait=JOB_REFRESH_WAIT)
+        assert caught.value.code == "refresh_not_ready" and caught.value.retryable
+        assert api.refreshes == 0 and clock.slept == [] and session.state()["error"] == str(caught.value)
+    else:
+        assert session.access_token(max_wait=JOB_REFRESH_WAIT) == "at-2" and clock.slept == [late]
+        assert session.state()["error"] is None
+
+
+def test_an_unreadable_earliest_refresh_time_allows_a_refresh(tmp_path):
+    session, api, clock = new_session(tmp_path)
+    api.token_changes = {"earliest_refresh_at": "soon"}
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    clock.now += 3600 - REFRESH_MARGIN + 1
+    assert session.access_token() == "at-2"
+
+
+def test_a_refresh_without_plan_usage_gives_back_its_grant(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    api.refresh_changes = {"scope": WITHOUT_PLAN}  # plan sharing was turned off since
+    clock.now += 3600
+    with pytest.raises(ChatGPTError) as caught:
+        session.access_token()
+    assert caught.value.code == "plan_not_granted"
+    state = session.state()
+    assert state["status"] == "reauth_required" and state["error"] == str(caught.value) and state["reconsent"] is True
+    assert api.revocations == [{"token": "rt-2", "token_type_hint": "refresh_token", "client_id": api.client_id}]
+    params = dict(httpx.URL(session.start(PORT)).params)
+    assert params["prompt"] == "consent" and params["login_hint"] == "ada@example.com"
 
 
 def test_a_refreshed_identity_for_the_same_account_is_accepted(tmp_path):
@@ -666,6 +860,42 @@ def test_a_kept_rotation_is_checked_as_of_when_it_arrived(tmp_path):
     with pytest.raises(ChatGPTError) as caught:
         session.access_token()
     assert caught.value.code == "invalid_id_token" and session.state()["status"] == "reauth_required"
+
+
+def test_a_kept_rotation_that_has_expired_waits_for_chatgpt_to_allow_its_refresh(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    api.refresh_id_token = {}
+    api.jwks_status = 503
+    clock.now += 3600
+    refreshed = clock.now
+    api.refresh_changes = {"earliest_refresh_at": refreshed + 3640}
+    with pytest.raises(ChatGPTError):
+        session.access_token()
+    clock.now = refreshed + 3610  # the rotated at-2 expired ten seconds ago, and may be renewed in thirty
+    api.jwks_status = 200
+    # Waited for outside the locks, as any refresh ChatGPT doesn't allow yet.
+    assert session.access_token() == "at-3" and clock.slept == [30.0] and api.refreshes == 2
+    assert api.token_forms[-1]["refresh_token"] == "rt-2"
+    assert session.state()["status"] == "connected" and session.state()["error"] is None
+
+
+def test_a_kept_rotation_whose_refresh_is_not_allowed_for_longer_is_a_retryable_error(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    api.refresh_id_token = {}
+    api.jwks_status = 503
+    clock.now += 3600
+    refreshed = clock.now
+    api.refresh_changes = {"earliest_refresh_at": refreshed + 3610 + REFRESH_WAIT + 40}
+    with pytest.raises(ChatGPTError):
+        session.access_token()
+    clock.now = refreshed + 3610
+    api.jwks_status = 200
+    with pytest.raises(ChatGPTError) as caught:
+        session.access_token()
+    assert caught.value.code == "refresh_not_ready" and caught.value.retryable and api.refreshes == 1
+    assert session.state()["status"] == "connected" and session.state()["error"] == str(caught.value)
+    # A job waits longer.
+    assert session.access_token(max_wait=JOB_REFRESH_WAIT) == "at-3" and clock.slept == [REFRESH_WAIT + 40]
 
 
 def test_a_refresh_without_a_new_refresh_token_is_refused(tmp_path):
@@ -786,7 +1016,7 @@ def test_returning_sign_in_cannot_replace_the_registered_account(tmp_path, retur
     api.access, api.refresh = "other-access", "other-refresh"
     with pytest.raises(ChatGPTError) as caught:
         session.finish(api.authorize(session.start(PORT)), HOST)
-    assert caught.value.code == "account_mismatch"
+    assert caught.value.code == "account_mismatch" and f'"{ANOTHER_ACCOUNT}"' in str(caught.value)
     assert saved(tmp_path) == original
     assert api.revocations[-1]["token"] == "other-refresh"
     if returning == "connected":
@@ -829,6 +1059,213 @@ def test_identity_binding_must_be_saved_before_tokens_are_installed(tmp_path, mo
     assert session.state()["status"] == "disconnected"
     assert "subject" not in saved(tmp_path)
     assert api.revocations[-1]["token"] == "rt-1"
+
+
+# -- another account ----------------------------------------------------------------
+
+
+def as_bob(api):
+    """ChatGPT's tab is now signed in to another account, which gets a registration of its own."""
+    api.client_id, api.subject = "app_Bob", "user-bob"
+    api.id_token_options = {"email": "bob@example.com", "name": "Bob Example"}
+
+
+def test_another_account_signs_in_on_a_registration_of_its_own(tmp_path):
+    # OpenAI binds each issued client ID to one account and workspace: sign in as Ada, sign out, and
+    # Bob's sign-in fails on Ada's registration, then works on a new one.
+    session, api, _ = signed_in(tmp_path)
+    host_id = saved(tmp_path)["host_id"]
+    session.sign_out()
+    params = dict(httpx.URL(session.start(PORT)).params)
+    assert params["client_id"] == api.client_id and "agent_name_hint" not in params
+    callback = urlencode({"code": "bobs-code", "state": params["state"], "client_id": "app_Bob"})
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(callback, HOST)
+    assert caught.value.code == "registration_incomplete" and f'"{ANOTHER_ACCOUNT}"' in str(caught.value)
+    assert session.state()["error"] == str(caught.value) and len(api.token_forms) == 1  # no code exchange for it
+
+    url = session.start(PORT, new_registration=True)
+    params = dict(httpx.URL(url).params)
+    assert params["client_id"] == REGISTRATION_ENTRY and params["agent_name_hint"] == APP_NAME
+    assert "login_hint" not in params and params["ext_agent_host_id"] == host_id
+    assert saved(tmp_path) == {"client_id": None, "host_id": host_id}  # forgotten on disk too
+    as_bob(api)
+    session.finish(api.authorize(url), HOST)
+    state = session.state()
+    assert state["status"] == "connected" and (state["name"], state["email"]) == ("Bob Example", "bob@example.com")
+    assert state["account_changed"] is False  # signed out in between: no account to compare with
+    assert saved(tmp_path) == {"client_id": "app_Bob", "subject": "user-bob", "host_id": host_id}
+    assert dict(httpx.URL(session.start(PORT)).params)["client_id"] == "app_Bob"
+
+
+def test_a_new_registration_is_saved_at_once(tmp_path):
+    session, api, _ = signed_in(tmp_path)
+    session.start(PORT, new_registration=True)
+    later, _, _ = new_session(tmp_path, api)
+    params = dict(httpx.URL(later.start(PORT)).params)
+    assert params["client_id"] == REGISTRATION_ENTRY and params["agent_name_hint"] == APP_NAME
+
+
+def test_a_new_registration_leaves_the_current_sign_in_usable_until_it_succeeds(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    earlier = session.start(PORT)  # a sign-in on Ada's registration, still waiting
+    session.start(PORT, new_registration=True)
+    # A sign-in started on the forgotten registration no longer counts.
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(earlier), HOST)
+    assert caught.value.code == "wrong_state" and session.state()["pending"] is True
+    # Ada's tokens carry the client ID they were issued to, and are renewed with it.
+    assert session.state()["status"] == "connected" and session.access_token() == "at-1"
+    clock.now += 3600
+    assert session.access_token() == "at-2" and api.token_forms[-1]["client_id"] == "app_Test123"
+    # Started again later, the sign-in still registers the app anew.
+    url = session.start(PORT)
+    assert dict(httpx.URL(url).params)["client_id"] == REGISTRATION_ENTRY
+    as_bob(api)
+    api.access, api.refresh = "bobs-access", "bobs-refresh"
+    session.finish(api.authorize(url), HOST)
+    state = session.state()
+    assert state["email"] == "bob@example.com" and state["account_changed"] is True
+    assert session.access_token() == "bobs-access"
+    session.sign_out()
+    assert api.revocations[-1] == {"token": "bobs-refresh", "token_type_hint": "refresh_token", "client_id": "app_Bob"}
+    assert session.state()["account_changed"] is False
+
+
+def test_switching_accounts_revokes_the_earlier_accounts_grant(tmp_path):
+    session, api, _ = signed_in(tmp_path)
+    url = session.start(PORT, new_registration=True)
+    as_bob(api)
+    api.access, api.refresh = "bobs-access", "bobs-refresh"
+    session.finish(api.authorize(url), HOST)
+    # Ada's grant, with the client ID it was issued to: nothing holds it now, so Sign out couldn't reach it.
+    assert api.revocations == [{"token": "rt-1", "token_type_hint": "refresh_token", "client_id": "app_Test123"}]
+    state = session.state()
+    assert (state["email"], state["account_changed"], state["error"]) == ("bob@example.com", True, None)
+    session.sign_out()
+    assert api.revocations[-1] == {"token": "bobs-refresh", "token_type_hint": "refresh_token", "client_id": "app_Bob"}
+
+
+def test_a_held_rotation_is_the_grant_a_switch_revokes(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    api.refresh_id_token = {}
+    api.jwks_status = 503
+    clock.now += 3600
+    with pytest.raises(ChatGPTError):
+        session.access_token()  # rt-1 is used up; rt-2 waits for its identity to be checked
+    api.jwks_status = 200
+    url = session.start(PORT, new_registration=True)
+    as_bob(api)
+    api.access, api.refresh = "bobs-access", "bobs-refresh"
+    session.finish(api.authorize(url), HOST)
+    assert [(r["token"], r["client_id"]) for r in api.revocations] == [("rt-2", "app_Test123")]
+    assert session.access_token() == "bobs-access"
+
+
+@pytest.mark.parametrize("other_account", [True, False])
+def test_a_replaced_grant_whose_revocation_is_not_confirmed_is_noted(tmp_path, other_account):
+    session, api, _ = signed_in(tmp_path)
+    api.revoke_status = 503
+    url = session.start(PORT, new_registration=True)
+    if other_account:
+        as_bob(api)
+    else:
+        api.client_id = "app_Ada2"  # Ada again, on a registration of its own
+    api.access, api.refresh = "new-access", "new-refresh"
+    session.finish(api.authorize(url), HOST)
+    state = session.state()
+    assert api.revocations[-1]["token"] == "rt-1" and state["status"] == "connected"
+    assert state["error"] == (EARLIER_ACCOUNT_UNCONFIRMED if other_account else EARLIER_SIGN_IN_UNCONFIRMED)
+    assert "ChatGPT Settings" in state["error"] and session.access_token() == "new-access"
+    # A model list that doesn't load is told of too, after the note.
+    api.catalog_status = 503
+    url = session.start(PORT, new_registration=True)
+    api.client_id, api.refresh = "app_Third", "newer-refresh"
+    session.finish(api.authorize(url), HOST)
+    error = session.state()["error"]
+    assert error.startswith("ChatGPT did not confirm") and " You are signed in, but the list of ChatGPT models could not be loaded." in error
+
+
+def test_signing_in_again_on_the_same_registration_revokes_nothing(tmp_path):
+    # A server may revoke every grant of one account and client at once, the new sign-in's with it: the grant a
+    # sign-in on the same registration replaces is left to expire (Sign out revokes the one in use).
+    session, api, _ = signed_in(tmp_path)
+    api.access, api.refresh = "new-access", "new-refresh"
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    assert api.revocations == [] and session.access_token() == "new-access"
+    session.sign_out()
+    assert api.revocations == [{"token": "new-refresh", "token_type_hint": "refresh_token", "client_id": "app_Test123"}]
+
+
+def test_signing_out_during_a_new_registration_revokes_with_the_old_client_id(tmp_path):
+    session, api, _ = signed_in(tmp_path)
+    session.start(PORT, new_registration=True)
+    session.sign_out()
+    assert api.revocations == [{"token": "rt-1", "token_type_hint": "refresh_token", "client_id": "app_Test123"}]
+    assert session.state()["error"] is None
+
+
+def test_a_new_registration_that_is_refused_keeps_the_current_sign_in(tmp_path):
+    session, api, _ = signed_in(tmp_path)
+    url = session.start(PORT, new_registration=True)
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(url, code=None, error="invalid_client"), HOST)
+    assert caught.value.code == "registration_rejected"
+    assert session.state()["status"] == "connected" and session.access_token() == "at-1"
+
+
+def test_a_new_registration_that_cannot_be_saved_keeps_the_old_one(tmp_path):
+    session, api, _ = signed_in(tmp_path)
+    path = session.path
+    (tmp_path / "blocked").write_text("a file where the settings folder would be")
+    session.path = tmp_path / "blocked" / "chatgpt.json"
+    with pytest.raises(ChatGPTError) as caught:
+        session.start(PORT, new_registration=True)
+    assert caught.value.code == "storage_failed"
+    session.path = path
+    assert dict(httpx.URL(session.start(PORT)).params)["client_id"] == api.client_id
+    assert saved(tmp_path)["client_id"] == api.client_id
+
+
+def test_signing_in_again_after_the_sign_in_expired_names_the_account(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    assert "login_hint" not in dict(httpx.URL(session.start(PORT)).params)  # signed in
+    api.refresh_reply = (400, {"error": "invalid_grant"})
+    clock.now += 3600
+    with pytest.raises(ChatGPTError):
+        session.access_token()
+    params = dict(httpx.URL(session.start(PORT)).params)
+    assert params["login_hint"] == "ada@example.com" and params["client_id"] == api.client_id
+    # A new registration may be for anyone.
+    assert "login_hint" not in dict(httpx.URL(session.start(PORT, new_registration=True)).params)
+    api.refresh_reply = None
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    assert session.state()["account_changed"] is False  # the same account
+    session.sign_out()
+    assert "login_hint" not in dict(httpx.URL(session.start(PORT)).params)
+
+
+@pytest.mark.parametrize("how", ["registration_rejected", "new_registration"])
+def test_another_account_after_an_expired_sign_in_is_accepted_and_reported(tmp_path, how):
+    session, api, clock = signed_in(tmp_path)
+    api.refresh_reply = (401, {"error": "invalid_client"}) if how == "registration_rejected" else (400, {"error": "invalid_grant"})
+    clock.now += 3600
+    with pytest.raises(ChatGPTError):
+        session.access_token()
+    assert session.state()["status"] == "reauth_required" and session.state()["account_changed"] is False
+    url = session.start(PORT, new_registration=how == "new_registration")
+    params = dict(httpx.URL(url).params)
+    assert params["client_id"] == REGISTRATION_ENTRY
+    # After a rejected registration ChatGPT is asked for Ada's account; Bob signs in all the same.
+    assert params.get("login_hint") == ("ada@example.com" if how == "registration_rejected" else None)
+    as_bob(api)
+    api.refresh_reply = None
+    session.finish(api.authorize(url), HOST)
+    state = session.state()
+    assert state["status"] == "connected" and state["email"] == "bob@example.com" and state["account_changed"] is True
+    assert saved(tmp_path)["client_id"] == "app_Bob" and saved(tmp_path)["subject"] == "user-bob"
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    assert session.state()["account_changed"] is False
 
 
 @pytest.mark.parametrize("initial", [True, False])
@@ -882,3 +1319,17 @@ def test_non_auth_api_errors_keep_the_session(tmp_path, code, status):
     session, _, _ = signed_in(tmp_path)
     session.handle_api_error(session.access_token(), code, status)
     assert session.access_token() == "at-1" and session.state()["status"] == "connected"
+
+
+def test_the_state_says_whether_the_app_is_registered(tmp_path):
+    # The page offers "Use another ChatGPT account" from a saved registration, which outlives the sign-in.
+    session, api, _ = new_session(tmp_path)
+    assert session.state()["registered"] is False
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    assert session.state()["registered"] is True
+    session.sign_out()
+    assert session.state()["registered"] is True
+    restarted, _, _ = new_session(tmp_path, api)
+    assert restarted.state()["registered"] is True and restarted.state()["status"] == "disconnected"
+    restarted.start(PORT, new_registration=True)
+    assert restarted.state()["registered"] is False

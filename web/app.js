@@ -1,6 +1,7 @@
 // Effect Size Finder: the page. Talks to the JSON API in python/esf/server.py.
 
 import { decisionsBasis } from '/lib/evidence.js';
+import { download } from '/lib/export.js';
 import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
 import { keyKind, keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS, ROLE_INFO, roleNames } from '/lib/providers.js';
 import { searchMap } from '/lib/search-map.js';
@@ -22,7 +23,11 @@ const state = {
   provider: 'anthropic', models: {}, chatgpt: null, signInTimer: null, agentsOpen: false, scrollY: 0, namesKey: '',
   id: null, project: null, papers: [], tab: 'extracted', timer: null, specKey: '', papersKey: '', config: {},
   reviewAt: {}, // tab -> the paper id shown there
+  accessKey: '', locked: false, // the server's access key, and whether the server turned the page away without it
 };
+// The access key `esf serve` prints in the page's address (#key=...): kept on this browser for this
+// address only (storage is per origin, so per port) and sent with every request to the API.
+const ACCESS_KEY = 'esf-access-key';
 // How the agents run (see PROVIDERS in /lib/providers.js): 'anthropic' (Claude with an API key),
 // 'openai' (OpenAI's models with an API key) or 'chatgpt' (OpenAI's models on the signed-in plan).
 const PROVIDER = 'esf-provider';
@@ -32,13 +37,19 @@ const MODELS = (provider) => `esf-models-${provider}`; // a key provider's model
 const KEYS = {
   anthropic: {
     storage: 'esf-anthropic-api-key', box: '#anthropic-box', input: '#api-key', remember: '#remember-key', forget: '#forget-key',
-    status: '#key-status', header: 'X-Anthropic-Api-Key', serverHas: 'server_has_key', runs: 'Claude',
+    status: '#key-status', note: '#remember-key-note', header: 'X-Anthropic-Api-Key', serverHas: 'server_has_key', runs: 'Claude',
+    env: 'ANTHROPIC_API_KEY',
   },
   openai: {
     storage: 'esf-openai-api-key', box: '#openai-box', input: '#openai-key', remember: '#remember-openai-key', forget: '#forget-openai-key',
-    status: '#openai-key-status', header: 'X-OpenAI-Api-Key', serverHas: 'server_has_openai_key', runs: "OpenAI's models",
+    status: '#openai-key-status', note: '#remember-openai-key-note', header: 'X-OpenAI-Api-Key', serverHas: 'server_has_openai_key',
+    runs: "OpenAI's models", env: 'OPENAI_API_KEY',
   },
 };
+// Keys are taken only on a secure connection: HTTPS, or http://127.0.0.1 and localhost on the computer
+// that runs the server. Over plain HTTP from another computer a key would cross the network readable,
+// so the boxes are off and no key is sent.
+const KEYS_ALLOWED = window.isSecureContext;
 // What goes where, for the privacy notice on the Agents page.
 const PRIVACY = {
   anthropic: "Your paragraph and the text of the papers go from this server to Anthropic's API, where Claude reads them, and so does your key if you enter one; the server does not store it. Don't paste anything you can't share with Anthropic.",
@@ -74,10 +85,17 @@ function storage(kind) {
 }
 
 function loadKeys() {
-  for (const { storage: name, input, remember } of Object.values(KEYS)) {
+  for (const { storage: name, input, remember, forget, note, env } of Object.values(KEYS)) {
+    if (!KEYS_ALLOWED) {
+      for (const el of [input, remember, forget]) $(el).disabled = true;
+      $(note).hidden = true;
+      continue;
+    }
     const remembered = storage('local')?.getItem(name);
     $(input).value = remembered || storage('session')?.getItem(name) || '';
     $(remember).checked = Boolean(remembered);
+    $(note).textContent = `A remembered key is kept on this browser for ${location.origin}, and any page served at that address later can read it. `
+      + `For a key that should last, set ${env} where the server runs instead.`;
   }
 }
 
@@ -100,7 +118,10 @@ function forgetKey(provider) {
   $(KEYS[provider].input).focus();
 }
 
-const keyOf = (provider) => (KEYS[provider] ? $(KEYS[provider].input).value.trim() : '');
+const keyOf = (provider) => (KEYS_ALLOWED && KEYS[provider] ? $(KEYS[provider].input).value.trim() : '');
+
+const INSECURE = "This page isn't on a secure connection, so a key typed here could be read on the network; the key boxes are turned off. "
+  + 'To enter a key, open the page over HTTPS, or at http://127.0.0.1 on the computer that runs the server.';
 
 // What is wrong with the key in a provider's box, if anything (see keyProblem in /lib/providers.js).
 const keyProblemOf = (provider) => keyProblem(provider, keyOf(provider));
@@ -109,7 +130,10 @@ function showKeyStatus(provider) {
   const { box, status, remember, serverHas, runs } = KEYS[provider];
   const problem = keyProblemOf(provider);
   $(box).dataset.missing = String(Boolean(problem));
-  if (problem) {
+  if (!KEYS_ALLOWED) {
+    $(box).dataset.missing = String(!state.config[serverHas]);
+    $(status).textContent = state.config[serverHas] ? `${INSECURE} Meanwhile the server's own key is used.` : INSECURE;
+  } else if (problem) {
     $(status).textContent = problem.text;
   } else if (keyOf(provider)) {
     $(status).textContent = `${$(remember).checked ? 'Remembered on this browser' : 'Kept for this tab only'}. `
@@ -133,7 +157,9 @@ function notReady(provider = state.provider) {
   }
   const problem = keyProblemOf(provider);
   if (problem?.wrong) return problem.text;
-  return keyOf(provider) || state.config[KEYS[provider].serverHas] ? '' : `Enter your ${PROVIDERS[provider].keyName} first.`;
+  if (keyOf(provider) || state.config[KEYS[provider].serverHas]) return '';
+  return KEYS_ALLOWED ? `Enter your ${PROVIDERS[provider].keyName} first.`
+    : `Open this page over HTTPS to enter your ${PROVIDERS[provider].keyName}.`;
 }
 
 // A job needs a ready provider; without one, the Agents page opens and says what is missing.
@@ -262,11 +288,14 @@ function closeAgents() {
   $('#agents-toggle').focus({ preventScroll: true });
 }
 
-// The Agents page is shown instead of the intro and the searches.
+// The Agents page is shown instead of the intro and the searches; without the access key, only the
+// notice that says how to get it.
 function showPage() {
-  $('#agents-page').hidden = !state.agentsOpen;
-  $('#intro').hidden = state.agentsOpen;
-  $('#searches').hidden = state.agentsOpen;
+  $('#access-notice').hidden = !state.locked;
+  $('#agents-toggle').hidden = state.locked;
+  $('#agents-page').hidden = state.locked || !state.agentsOpen;
+  $('#intro').hidden = state.locked || state.agentsOpen;
+  $('#searches').hidden = state.locked || state.agentsOpen;
   $('#agents-toggle').setAttribute('aria-expanded', String(state.agentsOpen));
 }
 
@@ -394,15 +423,28 @@ function stopWaiting() {
   state.signInTimer = null;
 }
 
+// Whether a sign-in's error tells the person to choose "Use another ChatGPT account": the server's
+// messages for a ChatGPT tab that never came back, an incomplete registration and another account's.
+const namesAnother = (error) => Boolean(error?.includes(`"${$('#chatgpt-another').textContent}"`));
+
 function showChatGPT() {
   const plan = state.chatgpt || { status: 'disconnected', models: [] };
   const box = $('#chatgpt-box');
   box.dataset.missing = 'false';
   const connected = plan.status === 'connected' && !plan.remote;
   const pending = Boolean(plan.pending) && !plan.remote;
-  $('#chatgpt-sign-in').hidden = connected;
-  $('#chatgpt-sign-in').textContent = plan.status === 'reauth_required' ? 'Sign in with ChatGPT again' : 'Sign in with ChatGPT';
+  // Signed in, a sign-in is offered only when a message asks for one: the error's, or ChatGPT's
+  // permission screen to show again.
+  const again = connected && Boolean(plan.error || plan.reconsent);
+  $('#chatgpt-sign-in').hidden = connected && !again;
+  $('#chatgpt-sign-in').textContent = plan.status === 'reauth_required' || plan.reconsent || again ? 'Sign in with ChatGPT again' : 'Sign in with ChatGPT';
   $('#chatgpt-sign-in').disabled = Boolean(plan.remote);
+  // ChatGPT ties this app's registration to one account: another account signs in on a new one. Offered
+  // when there is an account to switch from (signed in, expired, or a registration saved by an earlier
+  // sign-in, kept through Sign out and a restart), or when the error names it.
+  const another = !plan.remote && (connected || plan.status === 'reauth_required' || plan.registered || namesAnother(plan.error));
+  $('#chatgpt-another').hidden = !another;
+  $('#chatgpt-another-hint').hidden = !another;
   $('#chatgpt-cancel').hidden = !pending;
   $('#chatgpt-sign-out').hidden = !connected;
   const who = [plan.name, plan.email && `(${plan.email})`].filter(Boolean).join(' ');
@@ -415,14 +457,25 @@ function showChatGPT() {
         disconnected: 'Opens ChatGPT in a new tab. A ChatGPT Plus or Pro plan then runs the models, with no API key; only this server holds the sign-in, in memory.',
       }[plan.status] || '';
   if (pending && connected) $('#chatgpt-status').textContent += ' Another sign-in is waiting on a ChatGPT tab.';
-  if (plan.error && !plan.remote) $('#chatgpt-status').textContent += ` ${plan.error}`;
+  if (connected && plan.account_changed) {
+    $('#chatgpt-status').textContent += ' This is a different ChatGPT account from the one signed in before, so the searches now run on its plan.';
+  }
+  if (plan.remote) return;
+  // After ChatGPT did not let this app use the plan, the next sign-in shows its permission screen again
+  // by itself (the error, while shown, says so too).
+  if (plan.reconsent && !plan.error) {
+    $('#chatgpt-status').textContent += pending ? " On ChatGPT's permission screen, allow Effect Size Finder to use your plan."
+      : " The next sign-in shows ChatGPT's permission screen again: allow Effect Size Finder to use your plan there.";
+  }
+  if (plan.error) $('#chatgpt-status').textContent += ` ${plan.error}`;
 }
 
-async function signInWithChatGPT() {
+// Sign in ('sign-in'), or sign in with another ChatGPT account ('another-account'), on a new ChatGPT tab.
+async function signInWithChatGPT(action = 'sign-in') {
   // Opened now, while the click still counts, so the browser doesn't block it; pointed at ChatGPT below.
   const tab = window.open('about:blank', '_blank');
   try {
-    const { url } = await api('/api/chatgpt/sign-in', { method: 'POST' });
+    const { url } = await api(`/api/chatgpt/${action}`, { method: 'POST' });
     if (tab) {
       tab.opener = null;
       tab.location.href = url;
@@ -458,29 +511,82 @@ function agentHeaders() {
   const headers = { 'X-Model-Provider': state.provider };
   const key = KEYS[state.provider];
   if (!key) return headers;
-  if (keyOf(state.provider) && !keyProblemOf(state.provider)?.wrong) headers[key.header] = keyOf(state.provider);
+  if (KEYS_ALLOWED && keyOf(state.provider) && !keyProblemOf(state.provider)?.wrong) headers[key.header] = keyOf(state.provider);
   const models = chosenModels();
   if (models.manager) headers['X-Manager-Model'] = models.manager;
   if (models.worker) headers['X-Worker-Model'] = models.worker;
   return headers;
 }
 
+// -- the server's access key ----------------------------------------------------------
+
+// Takes the key out of the address the person opened (#key=..., then optionally &<a search's id>), so it
+// stays out of the address bar, the history and any link copied from there. Whether there was one.
+function takeAccessKey() {
+  const match = /^#key=([^&]*)&?(.*)$/.exec(location.hash);
+  if (!match) return false;
+  try {
+    state.accessKey = decodeURIComponent(match[1]);
+  } catch {
+    state.accessKey = match[1];
+  }
+  try { storage('local')?.setItem(ACCESS_KEY, state.accessKey); } catch { /* kept for this page only */ }
+  history.replaceState(null, '', `${location.pathname}${location.search}${match[2] ? `#${match[2]}` : ''}`);
+  return true;
+}
+
+function loadAccessKey() {
+  if (takeAccessKey()) return;
+  try {
+    state.accessKey = storage('local')?.getItem(ACCESS_KEY) || '';
+  } catch { /* storage unavailable: only an address with the key opens the page */ }
+}
+
+const accessHeaders = () => (state.accessKey ? { 'X-ESF-Token': state.accessKey } : {});
+
+// Turned away for want of the access key: only the notice that says where to find it is shown.
+function lockOut() {
+  state.locked = true;
+  stopWaiting();
+  clearTimeout(state.timer);
+  $('#models').textContent = '';
+  showPage();
+}
+
+// A failed request's error, with the server's message. The access check also locks the page.
+async function failure(response) {
+  let detail = `${response.status} ${response.statusText}`;
+  let body = null;
+  try {
+    body = await response.json();
+    detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+  } catch { /* not JSON */ }
+  if (response.status === 401 && body?.code === 'access_key') lockOut();
+  return new Error(detail);
+}
+
 async function api(path, options = {}) {
   const { withAgents, ...rest } = options;
-  const init = { ...rest, headers: { 'Content-Type': 'application/json', ...(withAgents ? agentHeaders() : {}) } };
+  const init = { ...rest, headers: { 'Content-Type': 'application/json', ...accessHeaders(), ...(withAgents ? agentHeaders() : {}) } };
   if (init.body !== undefined && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
   const response = await fetch(path, init);
   if (!response.ok && withAgents && state.provider === 'chatgpt') loadChatGPT();
-  if (!response.ok) {
-    let detail = `${response.status} ${response.statusText}`;
-    try {
-      const body = await response.json();
-      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
-    } catch { /* not JSON */ }
-    throw new Error(detail);
-  }
+  if (!response.ok) throw await failure(response);
   const type = response.headers.get('content-type') || '';
   return type.includes('json') ? response.json() : response.text();
+}
+
+// An export, fetched with the access key like every request and saved under the name the server gives it.
+async function saveExport(path) {
+  try {
+    const response = await fetch(path, { headers: accessHeaders() });
+    if (!response.ok) throw await failure(response);
+    const name = /filename="([^"]+)"/.exec(response.headers.get('content-disposition') || '')?.[1] || 'effect-sizes';
+    const blob = await response.blob();
+    download(name, blob, blob.type);
+  } catch (error) {
+    alert(`Could not export: ${error.message}`);
+  }
 }
 
 function showError(el, message) {
@@ -754,11 +860,6 @@ function renderReview() {
     onclick: () => { state.tab = k; state.papersKey = ''; renderReview(); },
   }, `${label} (${groups[k].length})`)));
 
-  const base = `/api/projects/${state.id}`;
-  $('#export-included').href = `${base}/export.csv?included_only=true`;
-  $('#export-all').href = `${base}/export.csv`;
-  $('#export-json').href = `${base}/export.json`;
-
   const trials = new Map();
   for (const paper of state.papers) {
     for (const nct of paper.nct_ids || []) trials.set(nct, (trials.get(nct) || 0) + 1);
@@ -1006,23 +1107,41 @@ async function start() {
   }
   $('#model-manager').addEventListener('change', chooseModels);
   $('#model-worker').addEventListener('change', chooseModels);
-  $('#chatgpt-sign-in').addEventListener('click', signInWithChatGPT);
+  $('#chatgpt-sign-in').addEventListener('click', () => signInWithChatGPT());
+  $('#chatgpt-another').addEventListener('click', () => signInWithChatGPT('another-account'));
   $('#chatgpt-cancel').addEventListener('click', () => leaveChatGPT('cancel'));
   $('#chatgpt-sign-out').addEventListener('click', () => leaveChatGPT('sign-out'));
   // Back from the ChatGPT tab: the sign-in may have finished there.
-  window.addEventListener('focus', () => { if (state.provider === 'chatgpt') loadChatGPT(); });
+  window.addEventListener('focus', () => { if (state.provider === 'chatgpt' && !state.locked) loadChatGPT(); });
+  $('#export-included').addEventListener('click', () => saveExport(`/api/projects/${state.id}/export.csv?included_only=true`));
+  $('#export-all').addEventListener('click', () => saveExport(`/api/projects/${state.id}/export.csv`));
+  $('#export-json').addEventListener('click', () => saveExport(`/api/projects/${state.id}/export.json`));
+  // The printed address opened in a tab already on this page changes only its #part: no reload.
+  window.addEventListener('hashchange', () => {
+    if (!takeAccessKey()) return;
+    state.locked = false;
+    showPage();
+    load();
+  });
+  loadAccessKey();
   loadKeys();
   loadModels();
   try {
     const saved = storage('local')?.getItem(PROVIDER);
     if (PROVIDERS[saved]) state.provider = saved;
   } catch { /* storage unavailable */ }
+  await load();
+}
+
+// What the page shows from the server: its settings, the sign-in, the searches and the open one.
+async function load() {
   try {
     const config = await api('/api/config');
     state.config = config;
   } catch {
-    $('#models').textContent = 'The server is not responding.';
+    if (!state.locked) $('#models').textContent = 'The server is not responding.';
   }
+  if (state.locked) return;
   showAgents();
   await loadChatGPT();
   // The page opens on the Agents page until the chosen provider can run the agents; a link to a search

@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
@@ -40,7 +41,12 @@ PENDING_SECONDS = 600  # how long a started sign-in waits for its callback
 MAX_PENDING = 3  # sign-ins started again (another click, a closed tab) that stay valid alongside
 
 MODELS_URL = f"{RESOURCE}/models"
-REFRESH_MARGIN = 120  # seconds of validity left when an access token is renewed
+# Seconds of validity left when an access token is renewed, if ChatGPT allows a refresh by then
+# (earliest_refresh_at); until it does, the token is used for as long as it lasts.
+REFRESH_MARGIN = 60
+REFRESH_WAIT = 60  # the longest a request waits for a refresh ChatGPT doesn't allow yet, once its token has expired
+# The longest a job's model call waits for it: a job would otherwise fail every record in that time.
+JOB_REFRESH_WAIT = 600
 TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 CLIENT_ID = re.compile(r"[A-Za-z0-9_-]{1,200}")
 ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,100}")
@@ -58,14 +64,29 @@ AGAIN = "Sign in with ChatGPT again."
 LATER = "Try again in a few minutes."
 ENDPOINTS = ("authorization_endpoint", "token_endpoint", "jwks_uri", "revocation_endpoint")
 
+# The page's action that calls start(new_registration=True); messages name it so the person can find it.
+ANOTHER_ACCOUNT = "Use another ChatGPT account"
 SIGN_IN_AGAIN = "Your ChatGPT sign-in has expired or was revoked. Sign in with ChatGPT again."
 IDENTITY_UNAVAILABLE = "ChatGPT's identity check is temporarily unavailable. Try again in a few minutes."
 INVALID_IDENTITY = "ChatGPT's reply did not carry a valid identity for this sign-in. Sign in with ChatGPT again."
 PLAN_NOT_GRANTED = (
-    "ChatGPT did not let this app use your plan. That needs a ChatGPT Plus or Pro plan, and the permission "
-    "must be allowed when you sign in. Check your plan, then sign in with ChatGPT again."
+    "ChatGPT did not let this app use your plan. That needs a ChatGPT Plus or Pro plan. If you have one, sign in "
+    f"with ChatGPT again and, on the next screen, allow {APP_NAME} to use your plan."
 )
 SIGN_IN_EXPIRED = "This sign-in took longer than ten minutes. Sign in with ChatGPT again."
+NO_CALLBACK = (
+    f"The ChatGPT tab didn't come back to {APP_NAME} within ten minutes. If ChatGPT showed an error there, "
+    f'choose "{ANOTHER_ACCOUNT}"; otherwise sign in with ChatGPT again.'
+)
+REGISTRATION_INCOMPLETE = (
+    "ChatGPT did not complete this app's registration. If you signed in with a different ChatGPT account or "
+    f'workspace than before, choose "{ANOTHER_ACCOUNT}"; otherwise sign in with ChatGPT again.'
+)
+ACCOUNT_MISMATCH = (
+    f'This app is registered to another ChatGPT account. Sign in with that account, or choose "{ANOTHER_ACCOUNT}" '
+    "to register the app for this one."
+)
+REFRESH_NOT_READY = f"ChatGPT doesn't allow this app to renew your sign-in yet. {LATER}"
 REGISTRATION_REJECTED = (
     f"ChatGPT no longer accepts this app's registration. Sign in with ChatGPT again to register {APP_NAME} anew."
 )
@@ -73,6 +94,17 @@ REJECTED_REGISTRATION_CODES = frozenset({"invalid_client", "unauthorized_client"
 REVOCATION_UNCONFIRMED = (
     "You are signed out here, but ChatGPT did not confirm that this app's access was revoked. "
     f"To be sure, disconnect {APP_NAME} in ChatGPT Settings."
+)
+# A sign-in on a new registration revokes the grant of the tokens it replaces, issued to the earlier
+# registration, which Sign out could no longer reach; these say so when ChatGPT doesn't confirm it, for
+# another account's grant and for the same account's earlier registration.
+EARLIER_ACCOUNT_UNCONFIRMED = (
+    "ChatGPT did not confirm that the account signed in before lost this app's access, so it may still be active. "
+    f"To be sure, disconnect {APP_NAME} in that account's ChatGPT Settings."
+)
+EARLIER_SIGN_IN_UNCONFIRMED = (
+    "ChatGPT did not confirm that this app's earlier registration lost its access, so it may still be active. "
+    f"To be sure, disconnect the older {APP_NAME} in ChatGPT Settings."
 )
 
 
@@ -160,6 +192,8 @@ class _Tokens:
     refresh_token: str
     expires_at: float  # on the session's clock
     scopes: list[str]
+    client_id: str  # the registration they were issued to, which renews and revokes them
+    refresh_after: float = 0.0  # earliest_refresh_at in epoch seconds: ChatGPT refuses a refresh before it
 
 
 @dataclass(repr=False)
@@ -204,11 +238,29 @@ def _json(response: httpx.Response) -> Any:
         return None
 
 
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _positive(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+    return _number(value) and value > 0
 
 
-def _token_fields(body: dict, sent_at: float, previous_scopes: list[str] | None = None) -> _Tokens:
+def _epoch(value: Any) -> float:
+    """earliest_refresh_at as epoch seconds. It may come as seconds or as an ISO 8601 time; anything
+    else allows a refresh at once, as in the DevKit."""
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            # Python before 3.11 doesn't read a "Z"; a time without a zone is taken as UTC.
+            when = datetime.fromisoformat(text[:-1] + "+00:00" if text[-1:] in ("Z", "z") else text)
+            return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+        except (ValueError, OverflowError, OSError):
+            return 0.0
+    return float(value) if _number(value) else 0.0
+
+
+def _token_fields(body: dict, sent_at: float, client_id: str, previous_scopes: list[str] | None = None) -> _Tokens:
     scope = body.get("scope")
     if scope is None and previous_scopes is not None:
         scopes = list(previous_scopes)  # a refresh may leave out scope when it is unchanged
@@ -226,7 +278,8 @@ def _token_fields(body: dict, sent_at: float, previous_scopes: list[str] | None 
         or not (isinstance(refresh, str) and refresh)
     ):
         raise ChatGPTError("invalid_token_response", f"ChatGPT returned incomplete sign-in credentials. {AGAIN}")
-    return _Tokens(access, refresh, sent_at + float(body["expires_in"]), scopes)
+    expires_at = sent_at + float(body["expires_in"])
+    return _Tokens(access, refresh, expires_at, scopes, client_id, _epoch(body.get("earliest_refresh_at")))
 
 
 def _reasoning_levels(value: Any) -> list[str] | None:
@@ -273,12 +326,15 @@ class ChatGPTSession:
         clock: Callable[[], float] = time.time,
         manager_model: str = "gpt-6.1-sol",
         worker_model: str = "gpt-6-luna",
+        sleep: Callable[[float], None] = time.sleep,
     ):
         self.path = Path(path)
         self._client = client or httpx.Client(
             timeout=TIMEOUT, follow_redirects=False, headers={"User-Agent": f"effect-size-finder/{__version__}"}
         )
+        # Wall-clock time (earliest_refresh_at is compared with it); tests replace it and sleep together.
         self._clock = clock
+        self._sleep = sleep
         # _lock guards the fields below and is never held across a network call. _refresh_lock is taken
         # (before _lock) by everything that replaces the tokens: refresh tokens rotate on every refresh,
         # so two refreshes must never run at once, and a sign-in or sign-out must not interleave with one.
@@ -300,6 +356,8 @@ class ChatGPTSession:
         self._tokens: _Tokens | None = None
         self._rotation: _Rotation | None = None
         self._attempts: list[_Attempt] = []
+        self._reconsent = False  # ChatGPT did not grant use of the plan: the next sign-in asks again
+        self._account_changed = False  # the latest sign-in was for another account than the one before it
         # Bumped by sign-out and cancel, so a code exchange already under way can't sign the person back in.
         self._generation = 0
         self._load()
@@ -364,14 +422,28 @@ class ChatGPTSession:
 
     def state(self) -> dict:
         """The sign-in ("status": disconnected, connected or reauth_required, from whether tokens are held)
-        and whether a sign-in waits for its callback ("pending"); never a token."""
+        and whether a sign-in waits for its callback ("pending"); never a token. "account_changed" says
+        the latest sign-in was for another ChatGPT account than the one signed in before it,
+        "reconsent" that the next sign-in asks ChatGPT to show its permission screen again, and
+        "registered" that the app's registration with ChatGPT is saved (it is bound to one account, so
+        another account needs a new one), after a sign-out or a restart too."""
         with self._lock:
+            pending = any(not self._expired(a) for a in self._attempts)
+            error = self._error
+            if error is None and self._attempts and not pending and self._status != "connected":
+                # Sign-ins that ran out of time with no callback at all: ChatGPT shows its own error page,
+                # and sends nobody back, for a client ID it won't take (another account's, for one). Not
+                # while signed in: that sign-in still serves, and the message would stay until the next one.
+                error = NO_CALLBACK
             return {
                 "status": self._status,
-                "pending": any(not self._expired(a) for a in self._attempts),
+                "pending": pending,
                 "name": self._name,
                 "email": self._email,
-                "error": self._error,
+                "error": error,
+                "account_changed": self._account_changed,
+                "reconsent": self._reconsent,
+                "registered": self._client_id is not None,
                 "models": [_copy_model(m) for m in self._models],
                 "manager_model": self._manager_model,
                 "worker_model": self._worker_model,
@@ -458,15 +530,18 @@ class ChatGPTSession:
             raise invalid
         key = self._signing_key(jwks_uri, kid)
         try:
+            # iat must be there, but isn't held against this computer's clock, which may run behind
+            # OpenAI's: jose, which the DevKit uses, checks it only for a maximum token age.
             claims = jwt.decode(
                 id_token, key.key, algorithms=["RS256"], audience=client_id, issuer=ISSUER, leeway=leeway,
-                options={"require": ["exp", "iat", "sub", "aud", "iss"]},
+                options={"require": ["exp", "iat", "sub", "aud", "iss"], "verify_iat": False},
             )
         except jwt.PyJWTError as exc:
             raise invalid from exc
         audience = claims.get("aud")
         if (
-            not isinstance(claims.get("sub"), str)
+            not _number(claims.get("iat"))
+            or not isinstance(claims.get("sub"), str)
             or not claims["sub"]
             or (nonce is not None and claims.get("nonce") != nonce)
             or ("azp" in claims and claims["azp"] != client_id)
@@ -498,7 +573,13 @@ class ChatGPTSession:
 
     # -- sign-in ------------------------------------------------------------------
 
-    def start(self, port: int) -> str:
+    def start(self, port: int, reconsent: bool = False, new_registration: bool = False) -> str:
+        """The address of ChatGPT's sign-in page, for a sign-in that comes back to this port.
+
+        reconsent asks ChatGPT to show its permission screen again, as the next sign-in does by itself
+        after ChatGPT did not grant use of the plan. new_registration (the page's "Use another ChatGPT
+        account") forgets the saved registration and registers the app anew, since OpenAI binds each
+        issued client ID to one ChatGPT account and workspace."""
         if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
             raise ValueError("The sign-in callback port must be a number from 1 to 65535.")
         endpoint = self._discovery()["authorization_endpoint"]
@@ -507,15 +588,27 @@ class ChatGPTSession:
             port=port, started_at=self._clock(),
         )
         with self._lock:
+            before = self._host_id, self._client_id, self._registered_subject
             if self._host_id is None:
                 self._host_id = uuid.uuid4().urn
+            if new_registration:
+                # Tokens held stay usable until the new sign-in replaces them: they carry their own client ID.
+                self._client_id = self._registered_subject = None
+            if (self._host_id, self._client_id, self._registered_subject) != before:
                 try:
                     self._save()
                 except ChatGPTError:
-                    self._host_id = None
+                    self._host_id, self._client_id, self._registered_subject = before
                     raise
+            if new_registration:
+                # Sign-ins already started, and a code exchange under way, are for the forgotten registration.
+                self._attempts = []
+                self._generation += 1
             client_id = self._client_id
             host_id = self._host_id
+            # After a sign-in expires, ChatGPT is told which account to expect; a new registration may be for any.
+            login_hint = self._email if self._status == "reauth_required" and not new_registration else None
+            consent = reconsent or self._reconsent
             # Earlier attempts stay valid (a second click, a closed tab): whichever finishes first wins.
             self._attempts = [a for a in self._attempts if not self._expired(a)][-(MAX_PENDING - 1):] + [attempt]
             self._error = None
@@ -534,6 +627,10 @@ class ChatGPTSession:
         if client_id is None:
             # The first sign-in registers the app under this name; later ones reuse the issued client ID.
             params["agent_name_hint"] = APP_NAME
+        if login_hint:
+            params["login_hint"] = login_hint
+        if consent:
+            params["prompt"] = "consent"
         return endpoint + ("&" if urlsplit(endpoint).query else "?") + urlencode(params, quote_via=quote)
 
     def finish(self, query: str, host: str) -> None:
@@ -586,7 +683,7 @@ class ChatGPTSession:
     def _complete(self, attempt: _Attempt, params: dict[str, list[str]], saved: str | None, generation: int) -> None:
         if "error" in params:
             error = api_error({"error": params["error"][0]})
-            raise self._registration_rejected() if error.code in REJECTED_REGISTRATION_CODES else error
+            raise self._registration_rejected(saved) if error.code in REJECTED_REGISTRATION_CODES else error
         codes, returned = params.get("code", []), params.get("client_id", [])
         if len(codes) != 1 or not codes[0]:
             raise ChatGPTError("invalid_callback", f"ChatGPT's sign-in callback had no authorization code. {AGAIN}")
@@ -597,7 +694,7 @@ class ChatGPTSession:
             or client_id == REGISTRATION_ENTRY
             or (saved is not None and client_id != saved)
         ):
-            raise ChatGPTError("registration_incomplete", f"ChatGPT did not complete this app's registration. {AGAIN}")
+            raise ChatGPTError("registration_incomplete", REGISTRATION_INCOMPLETE)
         if client_id != saved:
             # Saved before the code exchange, so a failed exchange doesn't register the app a second time.
             with self._lock:
@@ -615,9 +712,14 @@ class ChatGPTSession:
             })
         except ChatGPTError as exc:
             if exc.code in REJECTED_REGISTRATION_CODES:
-                raise self._registration_rejected() from None
+                raise self._registration_rejected(client_id) from None
             raise
-        tokens = _token_fields(body, sent)
+        try:
+            tokens = _token_fields(body, sent, client_id)
+        except ChatGPTError as exc:
+            if exc.code == "plan_not_granted":
+                self._plan_refused(body, client_id)
+            raise
         id_token = body.get("id_token")
         if not isinstance(id_token, str) or not id_token:
             raise ChatGPTError("invalid_id_token", INVALID_IDENTITY)
@@ -628,7 +730,7 @@ class ChatGPTSession:
                     if generation != self._generation:
                         raise ChatGPTError("canceled", f"Sign-in was canceled in {APP_NAME} before it finished.")
                     if self._registered_subject is not None and claims["sub"] != self._registered_subject:
-                        raise ChatGPTError("account_mismatch", "Sign in with the ChatGPT account originally used to register this app.")
+                        raise ChatGPTError("account_mismatch", ACCOUNT_MISMATCH)
                     if self._registered_subject is None:
                         # Also migrates registrations saved before account binding was recorded.
                         self._registered_subject = claims["sub"]
@@ -637,62 +739,110 @@ class ChatGPTSession:
                         except ChatGPTError:
                             self._registered_subject = None
                             raise
+                    # The rotation's tokens are the live ones while one is held: its parent is used up.
+                    replaced = self._rotation.tokens if self._rotation is not None else self._tokens
                     self._tokens, self._rotation = tokens, None
                     self._status, self._error = "connected", None
+                    # Against the account signed in before (kept through an expired sign-in), so the page
+                    # can say the plan in use is another account's now.
+                    self._account_changed = self._subject is not None and claims["sub"] != self._subject
+                    other_account = self._account_changed
                     self._subject = claims["sub"]
+                    self._reconsent = False
                     self._name = claims["name"] if isinstance(claims.get("name"), str) else None
                     self._email = claims["email"] if isinstance(claims.get("email"), str) else None
                     self._models = []
             except ChatGPTError:
                 self._revoke(tokens.refresh_token, client_id)
                 raise
+        # Only a grant of another registration: revoking one issued to this registration could, on a server
+        # that revokes per account and client, take the new sign-in with it. Sign out still reaches that.
+        if replaced is not None and replaced.client_id != tokens.client_id:
+            self._revoke_replaced(replaced, tokens, other_account)
         try:
             models = self._fetch_models(tokens.access_token)
         except ChatGPTError as exc:
             with self._lock:
                 if self._tokens is tokens:
-                    self._error = f"You are signed in, but the list of ChatGPT models could not be loaded. {exc}"
+                    # After the note about the replaced grant, if there is one: both still hold.
+                    failed = f"You are signed in, but the list of ChatGPT models could not be loaded. {exc}"
+                    self._error = f"{self._error} {failed}" if self._error else failed
         else:
             with self._lock:
                 if self._tokens is tokens:
                     self._models = models
 
+    def _revoke_replaced(self, replaced: _Tokens, tokens: _Tokens, other_account: bool) -> None:
+        """Revoke the grant of the tokens a sign-in replaced, with the client ID they were issued to, best
+        effort: no one holds them any more, so Sign out could not revoke it later."""
+        if self._revoke(replaced.refresh_token, replaced.client_id):
+            return
+        with self._lock:
+            if self._tokens is tokens:  # not signed out, or in again, meanwhile
+                self._error = EARLIER_ACCOUNT_UNCONFIRMED if other_account else EARLIER_SIGN_IN_UNCONFIRMED
+
     # -- tokens -------------------------------------------------------------------
 
-    def access_token(self) -> str:
+    def access_token(self, max_wait: float = REFRESH_WAIT) -> str:
+        """A valid access token, renewed when it needs to be. A renewal ChatGPT doesn't allow yet is
+        waited for, for up to max_wait seconds: REFRESH_WAIT suits a page's request, and a job's model
+        calls wait longer (JOB_REFRESH_WAIT)."""
         token = self._current_token()
         if token is not None:
             return token
+        self._wait_for_refresh(max_wait)  # outside the locks, so a sign-out doesn't wait for it
         with self._refresh_lock:
             # Another thread may have refreshed while this one waited for the lock.
             token = self._current_token()
-            return token if token is not None else self._refresh()
+            if token is None:
+                token = self._refresh()
+        # None: a kept rotation was installed, and the refresh it needs is not allowed yet.
+        return token if token is not None else self.access_token(max_wait)
 
     def _current_token(self) -> str | None:
-        """The access token while it has more than REFRESH_MARGIN seconds left; None when it needs renewing."""
+        """The access token while it has more than REFRESH_MARGIN seconds left, or while it is still valid
+        and ChatGPT doesn't allow a refresh yet; None when it needs renewing."""
         with self._lock:
-            if self._tokens is None:
+            tokens = self._tokens
+            if tokens is None:
                 if self._status == "reauth_required":
                     raise ChatGPTError("reauth_required", SIGN_IN_AGAIN)
                 raise ChatGPTError("signed_out", "Sign in with ChatGPT first.")
-            if self._rotation is None and self._tokens.expires_at - self._clock() > REFRESH_MARGIN:
-                return self._tokens.access_token
+            if self._rotation is not None:
+                return None
+            now = self._clock()
+            left = tokens.expires_at - now
+            if left > REFRESH_MARGIN or (left > 0 and now < tokens.refresh_after):
+                return tokens.access_token
             return None
 
-    def _refresh(self) -> str:
-        """Renew the tokens. Called with _refresh_lock held."""
+    def _wait_for_refresh(self, max_wait: float) -> None:
+        """Wait until ChatGPT allows a refresh, when the access token expired before it does, for up to
+        max_wait seconds; longer than that is a retryable error, on which a job's run stops."""
         with self._lock:
-            tokens, rotation, client_id, subject = self._tokens, self._rotation, self._client_id, self._subject
+            if self._tokens is None or self._rotation is not None:
+                return
+            wait = self._tokens.refresh_after - self._clock()
+        if wait <= 0:
+            return
+        if wait > max_wait:
+            raise self._note(ChatGPTError("refresh_not_ready", REFRESH_NOT_READY, True))
+        self._sleep(wait)
+
+    def _refresh(self) -> str | None:
+        """Renew the tokens; None when a kept rotation, installed now, needs a refresh ChatGPT doesn't
+        allow yet, which the caller waits for outside the locks. Called with _refresh_lock held."""
+        with self._lock:
+            tokens, rotation, subject = self._tokens, self._rotation, self._subject
         if tokens is None:
             raise ChatGPTError("signed_out", "Sign in with ChatGPT first.")
-        if client_id is None:  # the registration was rejected while these tokens were held
-            raise self._sign_in_again(ChatGPTError("registration_rejected", REGISTRATION_REJECTED))
+        kept = rotation is not None  # received by an earlier call, which couldn't verify it then
         if rotation is None:
             sent = self._clock()
             try:
                 body = self._token_request({
                     "grant_type": "refresh_token",
-                    "client_id": client_id,
+                    "client_id": tokens.client_id,
                     "refresh_token": tokens.refresh_token,
                     "resource": RESOURCE,
                 })
@@ -700,14 +850,16 @@ class ChatGPTSession:
                 if exc.code in REAUTH_CODES:
                     raise self._sign_in_again(ChatGPTError(exc.code, SIGN_IN_AGAIN, False, exc.status)) from None
                 if exc.code in REJECTED_REGISTRATION_CODES:
-                    raise self._sign_in_again(self._registration_rejected()) from None
+                    raise self._sign_in_again(self._registration_rejected(tokens.client_id)) from None
                 raise self._note(exc)
             try:
-                fresh = _token_fields(body, sent, previous_scopes=tokens.scopes)
+                fresh = _token_fields(body, sent, tokens.client_id, previous_scopes=tokens.scopes)
                 id_token = body.get("id_token")
                 if id_token is not None and not (isinstance(id_token, str) and id_token):
                     raise ChatGPTError("invalid_id_token", INVALID_IDENTITY)
             except ChatGPTError as exc:
+                if exc.code == "plan_not_granted":
+                    self._plan_refused(body, tokens.client_id)
                 # The old refresh token is used up, so there is nothing left to retry with.
                 raise self._sign_in_again(exc) from None
             if id_token is None:
@@ -717,7 +869,9 @@ class ChatGPTSession:
                 self._rotation = rotation
         try:
             # As of when it arrived (as the DevKit does): a key-service outage may outlast the id_token.
-            claims = self._verify(rotation.id_token, client_id, None, leeway=5 + max(0.0, time.time() - rotation.received_at))
+            claims = self._verify(
+                rotation.id_token, rotation.tokens.client_id, None, leeway=5 + max(0.0, time.time() - rotation.received_at)
+            )
             if claims["sub"] != subject:
                 raise ChatGPTError(
                     "account_mismatch", "ChatGPT renewed the sign-in for a different account. Sign in with ChatGPT again."
@@ -727,9 +881,10 @@ class ChatGPTSession:
                 raise self._note(exc)  # the rotation is kept, and verified on the next call
             raise self._sign_in_again(exc) from None
         token = self._install(rotation.tokens, claims)
-        if rotation.tokens.expires_at - self._clock() <= REFRESH_MARGIN:
-            # The outage outlasted the access token too: renew it with the rotation's refresh token.
-            return self._refresh()
+        if kept and self._current_token() is None:
+            # The outage outlasted the rotated access token too. It is renewed with the rotation's refresh
+            # token, unless ChatGPT doesn't allow that yet: then the caller waits for it.
+            return None if rotation.tokens.refresh_after > self._clock() else self._refresh()
         return token
 
     def _install(self, tokens: _Tokens, claims: dict | None) -> str:
@@ -742,20 +897,31 @@ class ChatGPTSession:
                     self._email = claims["email"]
             return tokens.access_token
 
-    def _registration_rejected(self) -> ChatGPTError:
+    def _registration_rejected(self, client_id: str | None) -> ChatGPTError:
         """Forget a registration ChatGPT rejects for good, so the next sign-in registers the app again."""
         with self._lock:
-            self._client_id = None
-            self._registered_subject = None
-            # Tokens held from before were issued to the rejected registration, so they go too.
-            if self._tokens is not None or self._rotation is not None:
+            if client_id is not None and self._client_id == client_id:
+                self._client_id = None
+                self._registered_subject = None
+                try:
+                    self._save()
+                except ChatGPTError:
+                    pass  # forgotten in memory; the file is rewritten at the next registration
+            # Tokens held that were issued to the rejected registration go too.
+            held = self._rotation.tokens if self._rotation is not None else self._tokens
+            if held is not None and held.client_id == client_id:
                 self._tokens = self._rotation = None
                 self._status = "reauth_required"
-            try:
-                self._save()
-            except ChatGPTError:
-                pass  # forgotten in memory; the file is rewritten at the next registration
         return ChatGPTError("registration_rejected", REGISTRATION_REJECTED)
+
+    def _plan_refused(self, body: dict, client_id: str) -> None:
+        """ChatGPT granted a sign-in without use of the plan: give back the grant that came with it, and
+        have the next sign-in show ChatGPT's permission screen again, where the person can allow it."""
+        with self._lock:
+            self._reconsent = True
+        refresh = body.get("refresh_token")
+        if isinstance(refresh, str) and refresh:
+            self._revoke(refresh, client_id)  # best effort: the sign-in fails either way
 
     def _note(self, error: ChatGPTError) -> ChatGPTError:
         with self._lock:
@@ -829,14 +995,14 @@ class ChatGPTSession:
         with self._refresh_lock:
             with self._lock:
                 held = self._rotation.tokens if self._rotation is not None else self._tokens
-                client_id = self._client_id
                 self._tokens = self._rotation = None
                 self._attempts = []
                 self._generation += 1
                 self._status = "disconnected"
                 self._name = self._email = self._subject = None
                 self._models, self._error = [], None
+                self._account_changed = False
             # Local tokens are gone whatever happens next; revoking the grant at OpenAI is best effort.
-            if held is not None and not self._revoke(held.refresh_token, client_id):
+            if held is not None and not self._revoke(held.refresh_token, held.client_id):
                 with self._lock:
                     self._error = REVOCATION_UNCONFIRMED

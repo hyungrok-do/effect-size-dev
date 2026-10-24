@@ -69,11 +69,18 @@ export function keyKind(key) {
   return null;
 }
 
+// Admin keys manage a whole organization (its members, keys and billing), so a page that only runs
+// models has no use for one. They have the shape of an ordinary key, so this is checked first.
+const isAdminKey = (key) => /^sk-ant-admin/.test(key) || /^sk-admin-/.test(key);
+
 // What is wrong with a key pasted for `provider`, if anything, in words for the page. `wrong` when it is
-// surely another key (the other vendor's, or an NCBI key): that one is never sent. A key of an
-// unfamiliar shape only gets a warning, so a new key format doesn't lock anyone out.
+// surely another key (an admin key, the other vendor's, or an NCBI key): that one is never sent. A key
+// of an unfamiliar shape only gets a warning, so a new key format doesn't lock anyone out.
 export function keyProblem(provider, key) {
   if (!key) return null;
+  if (isAdminKey(key)) {
+    return { wrong: true, text: 'This is an admin key, which can manage the whole account; use an ordinary API key. It is not sent.' };
+  }
   const { keyName, vendor, prefix } = PROVIDERS[provider];
   const kind = keyKind(key);
   if (kind === 'ncbi') {

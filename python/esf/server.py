@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import html
 import io
 import ipaddress
@@ -19,9 +20,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .chatgpt import CALLBACK_PATH, ChatGPTError, ChatGPTSession
+from .chatgpt import CALLBACK_PATH, JOB_REFRESH_WAIT, ChatGPTError, ChatGPTSession
 from .config import MODEL_CHOICES, Settings
-from .llm import LLM, ClaudeLLM
+from .llm import LLM, NO_KEY, ClaudeLLM, server_credentials
 from .openai_llm import OpenAILLM
 from .pipeline import Pipeline, previous_summary
 from .schemas import LEVEL_NAMES, SearchSpec, upgrade_spec
@@ -51,17 +52,30 @@ class Agents:
     remote: bool = False
 
 
+MAX_KEY_LENGTH = 512
+
+
 def agents_headers(
     request: Request,
     x_model_provider: str | None = Header(default=None, max_length=32),
-    x_anthropic_api_key: str | None = Header(default=None, max_length=512),
-    x_openai_api_key: str | None = Header(default=None, max_length=512),
+    # No max_length on the keys: FastAPI's error for it would quote the whole key back to the page.
+    x_anthropic_api_key: str | None = Header(default=None),
+    x_openai_api_key: str | None = Header(default=None),
     x_manager_model: str | None = Header(default=None),
     x_worker_model: str | None = Header(default=None),
 ) -> Agents:
     """The headers the page sends with each request that starts work on the models. Each vendor's key
     has its own header and only that vendor's is read; it is used for that job only, held in memory,
     and never written to disk."""
+    for sent in (x_anthropic_api_key, x_openai_api_key):
+        if sent is None:
+            continue
+        if len(sent) > MAX_KEY_LENGTH:
+            raise HTTPException(400, "The API key is too long. Paste only the key itself.")
+        # Over plain HTTP from another computer the key has crossed the network readable: refused, so
+        # that setup fails visibly instead of running on keys anyone on the network could copy.
+        if sent.strip() and request.url.scheme != "https" and _remote(request):
+            raise HTTPException(400, "This server takes API keys from other computers only over HTTPS.")
     provider = x_model_provider or "anthropic"
     if provider not in PROVIDERS:
         raise HTTPException(400, "Unknown model provider.")
@@ -89,16 +103,17 @@ LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1"}
 
 def _remote(request: Request) -> bool:
     """Whether the page was opened from another computer: ChatGPT sends the browser back to
-    127.0.0.1, which there is that computer, not this server. A request through a proxy, or to a name
-    other than this computer's own, counts as remote."""
+    127.0.0.1, which there is that computer, not this server. A request through a proxy, from a peer
+    that is not a loopback address (or no address at all, as on a Unix socket behind a proxy), or to a
+    name other than this computer's own, counts as remote."""
+    if any(header in request.headers for header in FORWARDING_HEADERS):
+        return True
     peer = request.client.host if request.client else ""
     try:
         if not ipaddress.ip_address(peer).is_loopback:
             return True
     except ValueError:
-        return False  # not an address (the test client); nothing to say it is remote
-    if any(header in request.headers for header in FORWARDING_HEADERS):
-        return True
+        return True  # nothing shows the request came from this computer
     return _host_name(request.headers.get("host", "")) not in LOOPBACK_NAMES
 
 
@@ -128,6 +143,27 @@ def _own_page(request: Request, host: str, allowed_hosts: set[str]) -> bool:
         return True  # not a browser's cross-site request: those carry an Origin
     origin_host = origin.split("://", 1)[-1].lower()
     return origin_host == host.lower() or _host_name(origin_host) in allowed_hosts - {"localhost"}
+
+
+# The header that carries the access key `esf serve` puts in the page's address (#key=...), and what a
+# request without it is told. Loopback is no boundary between people: other users of this computer, its
+# other programs, and a proxy in front of the server all reach it from 127.0.0.1.
+ACCESS_HEADER = "x-esf-token"
+NEEDS_ACCESS_KEY = "Open the address that esf serve printed in the terminal; it carries this server's access key."
+
+
+def _has_access(request: Request, access_token: str | None) -> bool:
+    """Whether a request may go on: with an access key, every /api request must carry it. The page's
+    own files hold no data and need none, nor does ChatGPT's return to /auth/callback, which its state
+    and PKCE verifier tie to a sign-in that was started with the key."""
+    # The path as the routes match it: without the prefix a proxy may serve the app under (root_path).
+    path, root = request.scope["path"], request.scope.get("root_path", "")
+    if root and path.startswith(root + "/"):
+        path = path[len(root):]
+    if access_token is None or not (path == "/api" or path.startswith("/api/")):
+        return True
+    given = request.headers.get(ACCESS_HEADER, "")
+    return hmac.compare_digest(given.encode("utf-8", "replace"), access_token.encode("utf-8"))
 
 
 def _is_address(name: str) -> bool:
@@ -194,6 +230,19 @@ EXPORT_COLUMNS = [
 ]
 
 
+# A spreadsheet runs a cell that starts with one of these as a formula, so such text (a quote from a
+# paper, a title, a reason typed on the page) gets a leading apostrophe. A number written as text, such
+# as "-0.42", stays as it is.
+FORMULA_START = re.compile(r"[=+\-@\t\r]")
+PLAIN_NUMBER = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?", re.ASCII)
+
+
+def csv_cell(value: object) -> object:
+    if isinstance(value, str) and FORMULA_START.match(value) and not PLAIN_NUMBER.fullmatch(value):
+        return "'" + value
+    return value
+
+
 def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict]:
     decisions = store.decisions(project_id)
     rows = []
@@ -244,6 +293,25 @@ def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict
     return rows
 
 
+def plan_llm(settings: Settings, session: ChatGPTSession) -> OpenAILLM:
+    """OpenAI's models on the signed-in ChatGPT plan, with the models chosen for the sign-in."""
+    chosen = session.state()
+
+    def token() -> str:
+        # A job waits longer than a page's request for a renewal ChatGPT doesn't allow yet, rather than
+        # fail every record meanwhile; past that, the run stops (see stops_the_run).
+        return session.access_token(max_wait=JOB_REFRESH_WAIT)
+
+    return OpenAILLM(
+        settings,
+        token,
+        manager_model=chosen["manager_model"],
+        worker_model=chosen["worker_model"],
+        reasoning_levels=session.reasoning_levels,
+        on_error=session.handle_api_error,
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     llm: LLM | None = None,
@@ -253,9 +321,12 @@ def create_app(
     chatgpt: ChatGPTSession | None = None,
     llm_for_chatgpt: Callable[[ChatGPTSession], LLM] | None = None,
     llm_for_openai: Callable[[str, str, str], LLM] | None = None,
+    access_token: str | None = None,
 ) -> FastAPI:
     """`llm_for_key` and `llm_for_openai` make the models for a job from (key, manager model, worker
-    model): Claude's with an Anthropic API key, OpenAI's with an OpenAI API key."""
+    model): Claude's with an Anthropic API key, OpenAI's with an OpenAI API key. With `access_token`
+    (`esf serve` makes one per launch), every /api request must carry it in X-ESF-Token; without it, as
+    in the tests or an app that embeds this one, the API is open to whoever reaches it."""
     settings = settings or Settings.from_env()
     store = store or Store(settings.data_dir / "esf.sqlite3")
     store.interrupt_running()
@@ -272,19 +343,7 @@ def create_app(
         manager_model=settings.openai_manager_model,
         worker_model=settings.openai_worker_model,
     )
-
-    def plan_llm(session: ChatGPTSession) -> LLM:
-        chosen = session.state()
-        return OpenAILLM(
-            settings,
-            session.access_token,
-            manager_model=chosen["manager_model"],
-            worker_model=chosen["worker_model"],
-            reasoning_levels=session.reasoning_levels,
-            on_error=session.handle_api_error,
-        )
-
-    llm_for_chatgpt = llm_for_chatgpt or plan_llm
+    llm_for_chatgpt = llm_for_chatgpt or (lambda session: plan_llm(settings, session))
 
     def pipeline_for(agents: Agents) -> Pipeline:
         """The models a job runs on: OpenAI's on the signed-in ChatGPT plan; OpenAI's with a key from
@@ -315,12 +374,14 @@ def create_app(
         worker = agents.worker_model or settings.worker_model
         if agents.key:
             return pipeline.using(llm_for_key(agents.key, manager, worker))
+        if not isinstance(pipeline.llm, ClaudeLLM):
+            return pipeline  # a stand-in for Claude (the tests') runs as it is
+        # The server's own credential (ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN only), if it has one.
+        if pipeline.llm.client is None:
+            raise HTTPException(409, NO_KEY)
         if (manager, worker) == (settings.manager_model, settings.worker_model):
             return pipeline
-        # The server's own credentials on other models. A stand-in for Claude (the tests') runs as it is.
-        if isinstance(pipeline.llm, ClaudeLLM):
-            return pipeline.using(ClaudeLLM(settings, pipeline.llm.client, manager, worker))
-        return pipeline
+        return pipeline.using(ClaudeLLM(settings, pipeline.llm.client, manager, worker))
 
     jobs = ThreadPoolExecutor(max_workers=4, thread_name_prefix="esf-job")
     busy: set[str] = set()
@@ -342,6 +403,9 @@ def create_app(
         name = _host_name(host)
         if not (name in allowed_hosts or _is_address(name)):
             return JSONResponse({"detail": "This server answers only to its address or localhost; ESF_ALLOWED_HOSTS lists other names."}, status_code=403)
+        if not _has_access(request, access_token):
+            # The code tells the page it is the access check, so it says how to get in instead of failing.
+            return JSONResponse({"detail": NEEDS_ACCESS_KEY, "code": "access_key"}, status_code=401)
         if request.method in ("POST", "PUT", "PATCH", "DELETE") and not _own_page(request, host, allowed_hosts):
             return JSONResponse({"detail": "Only this server's own page may make changes."}, status_code=403)
         response = await call_next(request)
@@ -392,7 +456,9 @@ def create_app(
             "openai_worker_model": settings.openai_worker_model,
             "model_choices": {provider: list(models) for provider, models in MODEL_CHOICES.items()},
             "contact_email_set": bool(settings.contact_email),
-            "server_has_key": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
+            # Whether Claude can run without a key from the page: on the client the server built from its
+            # own credential, or, for a stand-in for Claude, on the variables that client is built from.
+            "server_has_key": pipeline.llm.client is not None if isinstance(pipeline.llm, ClaudeLLM) else bool(server_credentials()),
             "server_has_openai_key": bool(os.environ.get("OPENAI_API_KEY", "").strip()),
             "max_candidates": settings.max_candidates,
             "max_extractions": settings.max_extractions,
@@ -413,13 +479,23 @@ def create_app(
                 pass  # the session records what went wrong
         return {**chatgpt.state(), "remote": _remote(request)}
 
-    @app.post("/api/chatgpt/sign-in")
-    def chatgpt_sign_in(request: Request) -> dict:
-        """The address of ChatGPT's sign-in page, which comes back to this server's /auth/callback."""
+    def sign_in_url(request: Request, new_registration: bool = False) -> dict:
         if _remote(request):
             raise HTTPException(400, "Sign in with ChatGPT works only in a browser on the computer that runs the server.")
         port = request.url.port or (443 if request.url.scheme == "https" else 80)
-        return {"url": chatgpt.start(port)}
+        return {"url": chatgpt.start(port, new_registration=new_registration)}
+
+    @app.post("/api/chatgpt/sign-in")
+    def chatgpt_sign_in(request: Request) -> dict:
+        """The address of ChatGPT's sign-in page, which comes back to this server's /auth/callback. After
+        ChatGPT did not grant use of the plan, the session has it show its permission screen again."""
+        return sign_in_url(request)
+
+    @app.post("/api/chatgpt/another-account")
+    def chatgpt_another_account(request: Request) -> dict:
+        """The page's "Use another ChatGPT account": a sign-in on a new registration of this app, since
+        ChatGPT ties each registration to one account. The current sign-in stays until the new one ends."""
+        return sign_in_url(request, new_registration=True)
 
     @app.get(CALLBACK_PATH, response_class=HTMLResponse)
     def chatgpt_callback(request: Request) -> HTMLResponse:
@@ -561,7 +637,8 @@ def create_app(
         buffer = io.StringIO()
         writer = csv.DictWriter(buffer, fieldnames=EXPORT_COLUMNS)
         writer.writeheader()
-        writer.writerows(export_rows(store, project_id, included_only))
+        for row in export_rows(store, project_id, included_only):
+            writer.writerow({column: csv_cell(value) for column, value in row.items()})
         name = f"effect-sizes-{project_id}{'-included' if included_only else ''}.csv"
         return Response(
             buffer.getvalue(),

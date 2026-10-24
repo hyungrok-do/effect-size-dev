@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Effect Size Finder</title>
@@ -157,6 +158,22 @@
   .keybox[data-missing="true"] { border-color: var(--error); }
   .keybox[data-missing="true"] .hint { color: var(--error); }
   .keybox #provider-note { color: var(--ink-2); }
+  .keybox #remember-note, .keybox #limit-note { color: var(--muted); }
+  /* The OpenAI subscription, chosen here: how to run the local edition, which can use the plan. */
+  .local-box { margin: 16px 0 0; padding: 14px 16px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; font-size: 14.5px; color: var(--ink-2); }
+  .local-box[data-missing="true"] { border-color: var(--error); }
+  #agents-page .local-box h3 { margin-top: 0; color: var(--ink); }
+  .local-box p { margin: 8px 0 0; max-width: 80ch; }
+  .local-steps { margin: 8px 0 0; padding-left: 22px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .local-steps .cmd { display: flex; align-items: flex-start; gap: 8px; margin-top: 4px; }
+  .local-steps .os { display: block; margin-top: 8px; }
+  .local-steps pre {
+    flex: 1; min-width: 0; margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    overflow-x: auto; color: var(--ink); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .local-steps pre code { font: inherit; overflow-wrap: normal; }
+  .local-box[data-missing="true"] #local-status { color: var(--error); }
+  #roles-note { margin: 8px 0 0; font-size: 13px; }
 
   /* The Agents page: how the agents run, the key, and which model does each role. */
   .agents-page { max-width: 1240px; margin: 20px auto 48px; }
@@ -170,8 +187,6 @@
   .provider-card input { position: absolute; left: 16px; top: 17px; margin: 0; }
   .provider-card:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); background: var(--accent-soft); }
   .provider-card:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .provider-card[data-unavailable="true"] { cursor: default; background: var(--surface-2); }
-  .provider-card[data-unavailable="true"] .pc-title { color: var(--ink-2); }
   .pc-title { font-size: 16px; font-weight: 600; color: var(--ink); }
   .pc-sub { font-size: 13.5px; color: var(--ink-2); }
   .pc-models { font-size: 13px; color: var(--muted); }
@@ -413,7 +428,7 @@
   <div class="brand"><h1>Effect Size Finder</h1></div>
   <div class="top-right">
     <p id="models" class="status"></p>
-    <button id="agents-toggle" type="button" class="secondary small" aria-controls="agents-page" aria-expanded="false">Agents: <span id="agents-label">Claude API</span></button>
+    <button id="agents-toggle" type="button" class="secondary small" aria-controls="agents-page" aria-expanded="false">Agents: <span id="agents-label">Claude API</span><span id="agents-flag" class="sr-only"> (not ready)</span></button>
     <button id="activity-toggle" type="button" class="secondary small" aria-expanded="false" aria-controls="activity">
       <span class="pulse" aria-hidden="true" hidden></span>Agent activity
     </button>
@@ -446,27 +461,48 @@
     <h2 id="agents-title">Agents</h2>
     <button id="agents-back" type="button" class="secondary small">Back to your searches</button>
   </div>
-  <p class="summary">The agents read your problem, plan and run the search, screen the records and extract what the papers report. Choose how they run: on Anthropic's or OpenAI's API with your own key, or on your ChatGPT subscription.</p>
+  <p class="summary">The agents read your problem, plan and run the search, screen the records and extract what the papers report. Choose how they run: on Anthropic's or OpenAI's API with your own key, or, in the local edition, on your ChatGPT subscription.</p>
   <fieldset class="provider-cards">
     <legend class="sr-only">How the agents run</legend>
     <label class="provider-card" data-provider="anthropic"><input type="radio" name="provider" value="anthropic" checked><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models"></span></label>
     <label class="provider-card" data-provider="openai"><input type="radio" name="provider" value="openai"><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models"></span></label>
-    <label class="provider-card" data-provider="chatgpt" data-unavailable="true"><input type="radio" name="provider" value="chatgpt" disabled><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models">In the local edition only: OpenAI allows ChatGPT sign-in only for apps that run on your own computer, and this page is served from the web. Run the local edition (see the README) to use your plan.</span></label>
+    <label class="provider-card" data-provider="chatgpt"><input type="radio" name="provider" value="chatgpt"><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models">In the local edition only, which runs on your own computer</span></label>
   </fieldset>
-  <div class="keybox">
+  <div id="key-box" class="keybox">
     <label id="api-key-label" for="api-key">Anthropic API key</label>
     <div class="key-row">
       <input id="api-key" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true">
-      <label class="check"><input id="remember-key" type="checkbox"> Remember on this browser</label>
+      <label class="check"><input id="remember-key" type="checkbox" aria-describedby="remember-note"> Remember on this browser</label>
       <button id="check-key" type="button" class="secondary small">Check key</button>
       <button id="forget-key" type="button" class="secondary small">Forget</button>
     </div>
+    <p id="remember-note" class="hint"></p>
     <p id="key-status" class="hint" aria-live="polite"></p>
+    <p id="limit-note" class="hint"></p>
     <p id="provider-note" class="hint" hidden>OpenAI has nothing like Claude's web fetch, so a PDF this page may not download is not fetched: the abstract is read instead, and you can upload the PDF.</p>
+  </div>
+  <div id="local-box" class="local-box" data-missing="false" hidden>
+    <h3 id="local-title" tabindex="-1">Your ChatGPT plan runs in the local edition</h3>
+    <p>Your ChatGPT plan can run the agents in the local edition, which runs on your own computer. OpenAI allows plan use only for apps on your own computer: its sign-in returns to <code>http://127.0.0.1</code>, which a page served from the web cannot receive.</p>
+    <ol class="local-steps">
+      <li>Get the code:<div class="cmd"><pre><code>git clone https://github.com/hyungrok-do/effect-size-dev.git
+cd effect-size-dev</code></pre><button type="button" class="secondary small copy" aria-label="Copy the commands of step 1">Copy</button></div></li>
+      <li>Install it, on macOS or Linux:<div class="cmd"><pre><code>python3 -m venv .venv
+.venv/bin/python -m pip install -e .</code></pre><button type="button" class="secondary small copy" aria-label="Copy the macOS and Linux commands of step 2">Copy</button></div>
+        <span class="os">or on Windows:</span><div class="cmd"><pre><code>py -m venv .venv
+.venv\Scripts\python -m pip install -e .</code></pre><button type="button" class="secondary small copy" aria-label="Copy the Windows commands of step 2">Copy</button></div></li>
+      <li>Start it, on macOS or Linux:<div class="cmd"><pre><code>.venv/bin/esf serve</code></pre><button type="button" class="secondary small copy" aria-label="Copy the macOS and Linux command of step 3">Copy</button></div>
+        <span class="os">or on Windows:</span><div class="cmd"><pre><code>.venv\Scripts\esf serve</code></pre><button type="button" class="secondary small copy" aria-label="Copy the Windows command of step 3">Copy</button></div></li>
+    </ol>
+    <p><code>esf serve</code> opens the local edition in your browser. If it doesn't, open the address it prints; it carries the server's access key. There, choose OpenAI subscription and click Sign in with ChatGPT.</p>
+    <p>To search here instead, choose the Claude API or the OpenAI API above. Searches stay in this browser either way.</p>
+    <p><button id="forget-saved" type="button" class="secondary small">Forget saved keys</button> Removes any Anthropic, OpenAI or NCBI API key this page keeps, in this tab and on this browser.</p>
+    <p id="local-status" class="hint" aria-live="polite"></p>
   </div>
   <h3>Who does what</h3>
   <ul id="roles" class="roles"></ul>
-  <p class="notice">Your key, searches and decisions stay in this browser. Your paragraph and the papers' text are sent to <span data-name="vendor">Anthropic</span>'s API to be read, and searches go to PubMed, ClinicalTrials.gov, Europe PMC and Unpaywall. Don't paste anything you can't share with them.</p>
+  <p id="roles-note" class="hint" hidden>In the local edition you choose the model of each from your plan's own list.</p>
+  <p id="agents-notice" class="notice">Your key, searches and decisions stay in this browser. Your paragraph and the papers' text are sent to <span data-name="vendor">Anthropic</span>'s API to be read, and searches go to PubMed, ClinicalTrials.gov, Europe PMC and Unpaywall. Don't paste anything you can't share with them.</p>
   <div class="actions"><button id="agents-done" type="button" class="primary">Done</button></div>
 </section>
 </div>
@@ -494,7 +530,7 @@
       <div class="agents-line"><span id="agents-summary"></span><button id="open-agents" type="button" class="secondary small">Change agents</button></div>
       <div class="settings-grid">
         <div><label for="contact-email">Contact email <span class="hint">NCBI asks for one; Unpaywall needs it to find open-access PDFs.</span></label><input id="contact-email" type="text" inputmode="email" autocomplete="email" placeholder="you@university.edu"></div>
-        <div><label for="ncbi-key">NCBI API key <span class="hint">Optional; lets PubMed searches run faster.</span></label><input id="ncbi-key" type="password" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true"><p id="ncbi-status" class="error" role="alert" hidden></p></div>
+        <div><label for="ncbi-key">NCBI API key <span class="hint">Optional; lets PubMed searches run faster. Kept for this tab, where reopening a closed tab can bring it back, or on this browser along with a remembered API key.</span></label><input id="ncbi-key" type="password" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true"><p id="ncbi-status" class="error" role="alert" hidden></p></div>
       </div>
       <div class="actions"><button id="setup-done" type="button" class="primary">Next: describe the study</button></div>
     </section>

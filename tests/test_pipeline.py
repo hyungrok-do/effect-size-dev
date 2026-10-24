@@ -1,14 +1,22 @@
+import json
+
 import anthropic
 import httpx
+import pytest
 
+from esf.chatgpt import JOB_REFRESH_WAIT, REFRESH_NOT_READY, ChatGPTError
 from esf.config import Settings
-from esf.pipeline import Pipeline
+from esf.openai_llm import OpenAIError, OpenAILLM
+from esf.pipeline import Pipeline, stops_the_run
 from esf.schemas import SearchLevel, SearchSpec, upgrade_spec
-from esf.server import export_rows
+from esf.server import export_rows, plan_llm
 from esf.sources import Sources
 from esf.store import Store
 from esf import prompts
-from fixtures import CITED_TRIAL, NOT_A_STUDY, PLAN, PMC_ONLY, PREPRINT, REVIEW, FakeLLM, LiteratureAPIs, mock_client
+from fixtures import (
+    CITED_TRIAL, NOT_A_STUDY, PLAN, PMC_ONLY, PREPRINT, REVIEW, FakeLLM, FakeOpenAI, LiteratureAPIs, mock_client,
+)
+from test_chatgpt import HOST, PORT, new_session
 
 
 def make_pipeline(tmp_path, **overrides):
@@ -380,3 +388,111 @@ def test_a_stopping_error_in_the_review_keeps_the_workers_extraction(tmp_path):
     assert pilot["status"] == "extracted" and pilot["extracted_by"] == "worker"
     assert any(r.startswith("manager review failed: The Anthropic account has run out of credit") for r in pilot["escalation"]["reasons"])
     assert llm.calls.count("adjudicate") == 1
+
+
+@pytest.mark.parametrize("code, stops", [
+    ("subscription_sharing_unsupported_capability", True),
+    ("subscription_sharing_v2_unsupported_capability", True),
+    ("subscription_sharing_route_not_supported", True),
+    ("subscription_sharing_v2_route_not_supported", True),
+    ("subscription_sharing_usage_unavailable", False),
+    ("invalid_value", False),
+])
+def test_a_kind_of_request_the_plan_refuses_stops_the_run(code, stops):
+    assert stops_the_run(OpenAIError(code, "refused", 400)) is stops
+    # A sign-in ChatGPT won't let the app renew for longer than a job waits is; ChatGPT out of reach for a moment is not.
+    assert stops_the_run(ChatGPTError("refresh_not_ready", "Not yet.", retryable=True)) is True
+    assert stops_the_run(ChatGPTError("network_error", "Offline.", retryable=True)) is False
+    assert stops_the_run(ChatGPTError("reauth_required", "Sign in again.")) is True
+
+
+def run_on_the_plan(tmp_path, refuse):
+    """A run on OpenAI models whose Responses API answers 400 with the code refuse(body) gives, if any."""
+    settings = Settings(data_dir=tmp_path, contact_email="test@example.com", audit_fraction=0.0, worker_concurrency=1)
+    store = Store(tmp_path / "test.sqlite3")
+    api = FakeOpenAI()
+    sent = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        code = refuse(body)
+        if code:
+            return httpx.Response(400, json={"error": {"code": code, "message": "Not on the plan."}})
+        return api(request)
+
+    llm = OpenAILLM(settings, lambda: "plan-token", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    llm.responses.sleep = lambda seconds: None
+    pipeline = Pipeline(store, llm, Sources(settings, client=mock_client(LiteratureAPIs())), settings)
+    project_id = store.create_project("We plan a randomized trial of a mindfulness app versus waitlist for PHQ-9 at 12 weeks.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    return store, project_id, sent
+
+
+def step(body: dict) -> str | None:
+    return body.get("text", {}).get("format", {}).get("name")
+
+
+@pytest.mark.parametrize("code", ["subscription_sharing_unsupported_capability", "subscription_sharing_v2_route_not_supported"])
+def test_a_screening_request_the_plan_refuses_stops_the_run_at_once(tmp_path, code):
+    store, project_id, sent = run_on_the_plan(tmp_path, lambda body: code if step(body) == "ScreenDecision" else None)
+    project = store.project(project_id)
+    assert project["status"] == "error" and "ChatGPT plan usage does not support" in project["error"]
+    assert [step(body) for body in sent].count("ScreenDecision") == 1  # one refused request, then no more
+
+
+def test_a_pdf_the_plan_refuses_goes_as_its_text_layer_and_the_run_goes_on(tmp_path):
+    def no_files(body):
+        parts = [part for item in body["input"] if isinstance(item.get("content"), list) for part in item["content"]]
+        return "subscription_sharing_unsupported_capability" if any(part.get("type") == "input_file" for part in parts) else None
+
+    store, project_id, sent = run_on_the_plan(tmp_path, no_files)
+    project = store.project(project_id)
+    assert project["status"] == "done", project["error"]
+    assert sum(no_files(body) is not None for body in sent) == 1  # refused once, then sent as text
+    texts = [part["text"] for body in sent if step(body) == "PaperExtraction" for part in body["input"][0]["content"]
+             if part["type"] == "input_text"]
+    assert any(text.startswith("Document: Brief mindfulness") and "(the text layer of its PDF)" in text for text in texts)
+    assert sum(p["status"] == "extracted" for p in store.papers(project_id)) == 8
+
+
+@pytest.mark.parametrize("late", [300, JOB_REFRESH_WAIT + 300])
+def test_a_renewal_chatgpt_allows_late_is_waited_for_or_stops_the_run(tmp_path, late):
+    # The access token runs out during screening, and ChatGPT allows its renewal only `late` seconds on.
+    settings = Settings(data_dir=tmp_path, contact_email="test@example.com", audit_fraction=0.0, worker_concurrency=1)
+    store = Store(tmp_path / "test.sqlite3")
+    session, sign_in, clock = new_session(tmp_path / "plan")
+    issued = clock.now
+    sign_in.token_changes = {"earliest_refresh_at": issued + 3600 + late}
+    session.finish(sign_in.authorize(session.start(PORT)), HOST)
+    responses, screened, tokens = FakeOpenAI(), [], []
+
+    def handler(request):
+        body = json.loads(request.content)
+        tokens.append(request.headers["authorization"])
+        if step(body) == "ScreenDecision":
+            screened.append(body)
+            if len(screened) == 2:
+                clock.now = issued + 3600  # after this record, the token has expired
+        return responses(request)
+
+    llm = plan_llm(settings, session)  # as the server makes it for a job on the plan
+    llm.responses.client = httpx.Client(transport=httpx.MockTransport(handler))
+    pipeline = Pipeline(store, llm, Sources(settings, client=mock_client(LiteratureAPIs())), settings)
+    project_id = store.create_project("We plan a randomized trial of a mindfulness app versus waitlist for PHQ-9 at 12 weeks.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    project, papers = store.project(project_id), store.papers(project_id)
+    assert not any("Screening failed" in (p["screen"] or {}).get("reason", "") for p in papers)
+    if late <= JOB_REFRESH_WAIT:
+        # The job waited (on the session's clock) for the renewal, and went on with the new token.
+        assert project["status"] == "done", project["error"]
+        assert clock.slept == [late] and sign_in.refreshes == 1 and tokens[-1] == "Bearer at-2"
+        assert len(screened) == 9 and session.state()["error"] is None
+    else:
+        # Too long a wait: the run stops at once, saying why, and the records not yet screened wait for the next run.
+        assert project["status"] == "error" and project["error"] == REFRESH_NOT_READY
+        assert clock.slept == [] and sign_in.refreshes == 0 and len(screened) == 2
+        assert [p["status"] for p in papers].count("candidate") == len(papers) - 2
+        assert session.state()["status"] == "connected" and session.state()["error"] == REFRESH_NOT_READY

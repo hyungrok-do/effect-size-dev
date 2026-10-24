@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .config import Settings
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -119,10 +125,58 @@ def _encode(key: str, value: Any) -> Any:
     return json.dumps(value) if key in JSON_COLUMNS and value is not None else value
 
 
+APP_FILES = ("esf.sqlite3", "chatgpt.json")  # what the app keeps in its data folder
+# Everything else the app may leave there: the texts read from papers, the address `esf serve` opens.
+APP_EXTRAS = ("projects", "open.html", "address.txt")
+
+
+def _only_ours(folder: Path, database: str) -> bool:
+    """Whether the folder holds the app's files and nothing else (the database and its journals, the
+    ChatGPT settings and their temporary copies, the papers' texts)."""
+    entries = [entry.name for entry in folder.iterdir()]
+    ours = {database, *APP_FILES, *APP_EXTRAS}
+    journals = tuple(f"{database}-{kind}" for kind in ("wal", "shm", "journal"))
+    return bool(entries) and all(
+        name in ours or name.startswith(journals) or (name.startswith(".chatgpt.json.") and name.endswith(".tmp"))
+        for name in entries
+    )
+
+
+def private_folder(folder: Path, database: str = APP_FILES[0]) -> None:
+    """Make the folder the searches are kept in, readable by its owner only: under the usual umask other
+    users of the computer could otherwise read every paragraph and extraction, the server stopped or not.
+
+    Only a folder that is evidently the app's own is changed: the default data folder, one made just now,
+    or one that holds the app's files and nothing else (made by an older version, say). ESF_DATA_DIR may
+    name a home folder or one shared with a group, whose mode is the owner's to choose: that is warned of
+    at every start, and left as it is even once it holds the app's files."""
+    try:
+        folder.mkdir(parents=True, mode=0o700)
+        made = True
+    except FileExistsError:
+        if not folder.is_dir():
+            raise
+        made = False
+    if os.name != "posix":
+        return
+    info = folder.stat()
+    if info.st_uid != os.getuid() or not info.st_mode & 0o077:
+        return
+    if not (made or folder.resolve() == Settings.data_dir.resolve() or _only_ours(folder, database)):
+        log.warning("%s is open to other users of this computer, who may be able to read the searches kept there. "
+                    "It is left as it is, since it does not look like the app's own folder: set ESF_DATA_DIR to a "
+                    "folder of its own, or make this one private (chmod 700).", folder)
+        return
+    try:
+        folder.chmod(0o700)
+    except OSError as exc:  # a read-only file system, say: the searches still open
+        log.warning("Could not make %s private to its owner: %s", folder, exc)
+
+
 class Store:
     def __init__(self, path: Path | str):
         if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            private_folder(Path(path).parent, Path(path).name)
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._lock = threading.RLock()

@@ -10,6 +10,7 @@ read and quote.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Callable, Protocol, TypeVar
 
 import anthropic
@@ -40,6 +41,31 @@ class ModelDeclined(RuntimeError):
 
 class ModelTruncated(RuntimeError):
     """The response hit max_tokens before the structured output was complete."""
+
+
+class NoCredentials(RuntimeError):
+    """Claude was asked to run without a key: none from the page, and the server has none of its own."""
+
+
+NO_KEY = "Enter your Anthropic API key first, on the Agents page."
+
+
+def server_credentials() -> dict[str, str]:
+    """The server's own Claude credential as client arguments: ANTHROPIC_API_KEY, else
+    ANTHROPIC_AUTH_TOKEN, else none. Only these two count. Left to itself the SDK also takes a profile
+    saved on disk, and the page would then be told the server has no key while jobs ran on it."""
+    for variable, argument in (("ANTHROPIC_API_KEY", "api_key"), ("ANTHROPIC_AUTH_TOKEN", "auth_token")):
+        value = os.environ.get(variable, "").strip()
+        if value:
+            return {argument: value}
+    return {}
+
+
+def server_client() -> anthropic.Anthropic | None:
+    """A client on the server's own credential, or None when it has none."""
+    credential = server_credentials()
+    # An explicit credential argument also keeps the SDK from looking anywhere else.
+    return anthropic.Anthropic(**credential) if credential else None
 
 
 def output_schema(model: type) -> dict:
@@ -170,12 +196,19 @@ class ClaudeLLM:
         manager_model: str | None = None,
         worker_model: str | None = None,
     ):
+        """Without a client, the server's own credential (server_client); without that, client is None
+        and every call fails at once with NO_KEY."""
         self.settings = settings
-        self.client = client or anthropic.Anthropic()
+        self.client = client if client is not None else server_client()
         self.manager_model = manager_model or settings.manager_model
         self.worker_model = worker_model or settings.worker_model
 
     # -- plumbing ---------------------------------------------------------------
+
+    def _api(self) -> anthropic.Anthropic:
+        if self.client is None:
+            raise NoCredentials(NO_KEY)
+        return self.client
 
     @staticmethod
     def _record(sink: UsageSink | None, step: str, message: Any) -> None:
@@ -218,7 +251,7 @@ class ClaudeLLM:
             **fallback_for(model),
         }
         # Streamed so long documents and high-effort thinking don't run into HTTP timeouts.
-        with self.client.beta.messages.stream(**params) as stream:
+        with self._api().beta.messages.stream(**params) as stream:
             message = stream.get_final_message()
         self._record(sink, step, message)
         return self._unwrap(message, output_format)
@@ -242,7 +275,7 @@ class ClaudeLLM:
 
     def plan_search(self, spec: SearchSpec, toolbox: SearchToolbox, sink: UsageSink | None = None) -> SearchPlan:
         submitted: dict[str, SearchPlan] = {}
-        runner = self.client.beta.messages.tool_runner(
+        runner = self._api().beta.messages.tool_runner(
             model=self.manager_model,
             max_tokens=16000,
             system=_cached_system(prompts.SEARCH),

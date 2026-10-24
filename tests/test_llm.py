@@ -8,8 +8,28 @@ import httpx2
 import pytest
 
 from esf.config import Settings
-from esf.llm import ClaudeLLM, ModelDeclined, ModelTruncated, describe_error
+from esf.llm import NO_KEY, ClaudeLLM, ModelDeclined, ModelTruncated, NoCredentials, describe_error, server_credentials
 from fixtures import SPEC, streamed
+
+# Every variable the Anthropic SDK reads a credential from, besides a profile on disk.
+CREDENTIAL_VARIABLES = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_IDENTITY_TOKEN", "ANTHROPIC_IDENTITY_TOKEN_FILE",
+)
+
+
+def profile_on_disk(home, monkeypatch):
+    """A person's saved Anthropic sign-in, in a home folder of its own, as the SDK finds it unasked; and
+    no credential in the environment."""
+    config = home / ".config" / "anthropic"
+    (config / "configs").mkdir(parents=True)
+    (config / "credentials").mkdir()
+    (config / "configs" / "default.json").write_text(json.dumps({"authentication": {"type": "user_oauth"}}))
+    (config / "credentials" / "default.json").write_text(json.dumps({"access_token": "sk-ant-oat01-PROFILE", "expires_at": 4102444800}))
+    monkeypatch.setenv("HOME", str(home))
+    for name in CREDENTIAL_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    assert anthropic.Anthropic().credentials is not None  # the SDK left to itself would use it
 
 DOC = {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "PHQ-9 8.1 (4.2)"}}
 EXTRACTION = {
@@ -120,6 +140,27 @@ def test_a_rejected_key_is_explained():
     assert "API key box" in describe_error(caught.value)
     headers = api.requests[0][0].headers
     assert "test-key" in headers.get("x-api-key", "") + headers.get("authorization", "")
+
+
+def test_the_servers_own_client_takes_only_the_two_documented_variables(tmp_path, monkeypatch):
+    profile_on_disk(tmp_path, monkeypatch)
+    llm = ClaudeLLM(Settings())
+    assert llm.client is None and server_credentials() == {}
+    # Every step fails at once, asking for a key: there is no client to call anything with.
+    for step in (lambda: llm.read_spec("A paragraph."), lambda: llm.screen(SPEC, "x"), lambda: llm.plan_search(SPEC, Toolbox())):
+        with pytest.raises(NoCredentials) as caught:
+            step()
+        assert describe_error(caught.value) == NO_KEY == "Enter your Anthropic API key first, on the Agents page."
+
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", " sk-ant-oat01-SERVER ")
+    client = ClaudeLLM(Settings()).client
+    assert (client.api_key, client.auth_token, client.credentials) == (None, "sk-ant-oat01-SERVER", None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-SERVER")  # the API key comes first, as in the SDK
+    client = ClaudeLLM(Settings()).client
+    assert (client.api_key, client.auth_token, client.credentials) == ("sk-ant-api03-SERVER", None, None)
+    # A client given to it is used as it is.
+    given = anthropic.Anthropic(api_key="sk-ant-given")
+    assert ClaudeLLM(Settings(), given).client is given
 
 
 def _message(content, stop_reason):

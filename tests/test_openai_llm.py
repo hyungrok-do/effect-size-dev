@@ -11,7 +11,7 @@ import pytest
 from esf.config import Settings
 from esf.fulltext import FullText
 from esf.llm import ModelDeclined, ModelTruncated, describe_error, output_schema, search_tools
-from esf.openai_llm import OpenAIError, OpenAILLM, effort_for, function_tools, input_content, strict_schema
+from esf.openai_llm import OpenAIError, OpenAILLM, at_most, effort_for, function_tools, input_content, strict_schema
 from esf.pipeline import Pipeline
 from esf.schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchSpec
 from esf.sources import Sources
@@ -107,6 +107,23 @@ def test_manager_steps_run_on_the_manager_model_at_the_effort_it_takes():
     assert spec["reasoning"] == {"effort": "high"} and adjudicate["reasoning"] == {"effort": "high"}
     assert "None: the junior reviewer" in adjudicate["input"][0]["content"][1]["text"]
     assert effort_for("xhigh", None) == "xhigh" and effort_for("medium", ["high", "xhigh"]) == "high"
+
+
+@pytest.mark.parametrize("plan", [True, False])
+def test_an_effort_above_high_is_capped_on_the_plan_when_the_model_levels_are_unknown(plan):
+    api = Scripted([answer(EXTRACTION, "gpt-6.1-sol"), answer(SPEC.model_dump(), "gpt-6.1-sol"), answer(SCREEN)])
+    llm = make_llm(api, namespaced_tools=plan)  # no catalog: no model's levels are known
+    llm.adjudicate(SPEC, {"type": "text", "text": "the paper"}, None, ["a flag"])
+    llm.read_spec("A paragraph.")
+    llm.screen(SPEC, "x")
+    efforts = [body["reasoning"]["effort"] for _, body in api.requests]
+    # An API key keeps the effort asked for, as before.
+    assert efforts == (["high", "high", "low"] if plan else ["xhigh", "high", "low"])
+    # A catalog entry that lists xhigh gets it on the plan too.
+    api = Scripted([answer(EXTRACTION, "gpt-6.1-sol")])
+    make_llm(api, reasoning_levels=lambda model: ["low", "high", "xhigh"]).adjudicate(SPEC, {"type": "text", "text": "p"}, None, [])
+    assert api.requests[0][1]["reasoning"] == {"effort": "xhigh"}
+    assert at_most("max", "high") == "high" and at_most("medium", "high") == "medium" and at_most("other", "high") == "other"
 
 
 def test_a_pdf_goes_as_a_file_or_as_its_text_layer_when_plan_usage_refuses_files():
@@ -226,12 +243,42 @@ def test_search_agent_calls_tools_in_a_namespace_then_submits_a_plan():
     # Not stored: each turn sends the whole conversation, the reasoning included.
     second = bodies[1]["input"]
     assert second[1] == reasoning_item() and second[2]["call_id"] == "c1"
+    calls = [item for item in second if item.get("type") == "function_call"]
+    assert [item["call_id"] for item in calls] == ["c1", "c2", "c3", "c4"]
+    assert all("id" not in item and "status" not in item and item["namespace"] == "literature" for item in calls)
     outputs = {item["call_id"]: item["output"] for item in second if item.get("type") == "function_call_output"}
     assert "#12 12 | q11" in outputs["c1"] and "Total hits: 12" in outputs["c2"]
     assert outputs["c4"] == "Error: Tool 'search_everything' not found"
     rejected = next(item["output"] for item in bodies[2]["input"] if item.get("call_id") == "c5" and item["type"] == "function_call_output")
     assert rejected.startswith("Error: Invalid arguments")
     assert len(bodies[3]["input"]) == len(bodies[2]["input"]) + 2
+
+
+@pytest.mark.parametrize("namespaced", [True, False])
+def test_replayed_turns_carry_no_server_ids(namespaced):
+    # Nothing is stored, so the ids of earlier messages and calls would point at nothing.
+    count = function_call_item("count_pubmed", {"queries": ["q"]}, "c1")
+    submit = function_call_item("submit_search_plan", PLAN.model_dump(), "c2")
+    api = Scripted([
+        (200, openai_sse([reasoning_item(), message_item("Counting first."), count], "gpt-6.1-sol")),
+        (200, openai_sse([submit], "gpt-6.1-sol")),
+        (200, openai_sse([message_item("Done.")], "gpt-6.1-sol")),
+    ])
+    make_llm(api, namespaced_tools=namespaced).plan_search(SPEC, Toolbox())
+    last = api.requests[2][1]["input"]
+    assert last[1] == reasoning_item()  # whole: its id and encrypted_content carry the reasoning
+    assert last[2] == {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Counting first.", "annotations": []}]}
+    without_ids = [{key: value for key, value in item.items() if key not in ("id", "status")} for item in (count, submit)]
+    assert [item for item in last if item.get("type") == "function_call"] == without_ids
+    assert [item["call_id"] for item in last if item.get("type") == "function_call_output"] == ["c1", "c2"]
+
+
+def test_a_search_on_a_model_without_reasoning_settings_asks_for_no_reasoning_back():
+    api = Scripted([(200, openai_sse([function_call_item("submit_search_plan", PLAN.model_dump(), "c1")], "gpt-6.1-sol")),
+                    (200, openai_sse([message_item("Done.")], "gpt-6.1-sol"))])
+    make_llm(api, reasoning_levels=lambda model: []).plan_search(SPEC, Toolbox())
+    for _, body in api.requests:
+        assert "reasoning" not in body and "include" not in body
 
 
 def test_search_agent_without_a_plan_is_an_error():

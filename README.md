@@ -20,7 +20,7 @@ This project was largely generated with Claude Code and is under validation.
 |---|---|---|
 | Runs | Entirely in the page; published on GitHub Pages | A Python server on your computer |
 | Install | None: open the page | `pip install -e .` and `esf serve` |
-| Agents | Claude API or OpenAI API, with your own key | Claude API, OpenAI API, or OpenAI subscription (Sign in with ChatGPT, no key) |
+| Agents | Claude API or OpenAI API, with your own key (the OpenAI subscription card says how to run the local edition) | Claude API, OpenAI API, or OpenAI subscription (Sign in with ChatGPT, no key) |
 | API key | Each person pastes their own; it goes only to Anthropic or OpenAI | Pasted in the page, or set on the server; none with a subscription |
 | Searches stored | In that person's browser (IndexedDB) | In `data/` on the server |
 | PDFs the browser can't download | Fetched by Claude Sonnet 5.5 (web fetch); with OpenAI, the abstract is read and the PDF can be uploaded | Downloaded by the server |
@@ -167,14 +167,26 @@ counts against the plan's usage; ChatGPT Settings shows it and lets you cap this
 page then lists the models your plan offers, to pick the manager and the workers.
 
 OpenAI offers this self-serve to open-source apps that run on your own computer: ChatGPT returns to
-`http://127.0.0.1:<port>/auth/callback` only. The GitHub Pages edition is a hosted page, so there
-the subscription is shown but can't be chosen; use the OpenAI API with a key, or the local edition. Open the local page on the computer that runs the server (the server
-refuses a sign-in started from another machine). The sign-in uses OAuth with PKCE and an OIDC nonce,
+`http://127.0.0.1:<port>/auth/callback` only (it refuses a callback on a web address such as GitHub
+Pages), and its terms ask that plan usage come from the user's own computer. So the GitHub Pages
+edition can't sign in with ChatGPT. Choosing **OpenAI subscription** there shows how to install and
+start the local edition instead, and nothing runs on it there; to search in the hosted page, use the
+Claude API or the OpenAI API with a key. Open the local page on the computer that runs the server
+(the server refuses a sign-in started from another machine). The sign-in uses OAuth with PKCE and an OIDC nonce,
 and the identity token is verified against OpenAI's signing keys (`python/esf/chatgpt.py`). Only the
 app's stable host ID, registration (its issued client ID and verified account subject), and your choice of models are saved, in
 `data/chatgpt.json`; the tokens stay in the server's memory, are renewed as they expire, and are gone
 when the server stops, so you sign in again after a restart. **Sign out** revokes them; you can also
-disconnect the app in ChatGPT Settings. Returning sign-ins must use the account that registered this app.
+disconnect the app in ChatGPT Settings.
+
+ChatGPT binds the app's registration to the account (and workspace) that made it, so a later sign-in
+must use that account. To use another one, click **Use another ChatGPT account**: the app registers
+anew for the account that signs in next (sign out of ChatGPT in that browser first, or switch accounts
+on ChatGPT's screen), and the earlier registration's grant is revoked. If you didn't allow plan usage
+on ChatGPT's permission screen, the next sign-in asks for that screen again. If the ChatGPT tab never
+comes back (ChatGPT showed an error there), the page says so after ten minutes. The identity token's
+issue time is not held against this computer's clock, and the tokens are renewed only when ChatGPT
+allows it (`earliest_refresh_at`): a search waits up to ten minutes for that, then stops and says so.
 
 While a sign-in waits in the ChatGPT tab, **Cancel** drops it; starting it again keeps the first tab
 valid. If the plan's share runs out, or the sign-in expires, during a search, the search stops and
@@ -199,6 +211,13 @@ the error names the reason.
 Keep the tab open while a search runs; if it closes, open the search again and choose **Continue**.
 Searches live in that browser only: another browser or computer starts empty, and clearing the
 site's data deletes them. Export what you want to keep.
+
+All the GitHub Pages sites of one account share one web origin (`https://<account>.github.io`), and
+browser storage is per origin, so a remembered key, the NCBI key and the searches can be read by any
+script on any of that account's Pages sites. For a page other people will use, give it an origin of
+its own: a custom domain (**Settings → Pages → Custom domain**, with DNS pointing at GitHub) or a
+GitHub organization that publishes nothing else. Searches saved under the old address stay there, so
+ask people to export them first.
 
 To try the page on your own computer:
 
@@ -231,18 +250,32 @@ Requirements: Python 3.10 or later, and an Anthropic API key or a ChatGPT Plus o
 git clone https://github.com/hyungrok-do/effect-size-dev.git
 cd effect-size-dev
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e .
 
 export ESF_CONTACT_EMAIL=you@university.edu   # NCBI asks for it; Unpaywall requires it for PDFs
-esf serve                                      # then open http://127.0.0.1:8000
+esf serve                                      # opens the page in your browser
 ```
+
+On Windows, `py -m venv .venv`, then `.venv\Scripts\python -m pip install -e .` and
+`.venv\Scripts\esf serve` (no activation needed).
+
+`esf serve` makes a new **access key** each time it starts and opens
+`http://127.0.0.1:8000/#key=<access key>` in your browser (`--no-browser` only prints it). Every
+request the page makes carries the key, so another user of the computer, another program, or a
+visitor through a proxy can't use the server's keys or your ChatGPT plan, or read your searches. A tab
+opened without the key says to open the address `esf serve` printed. When the output isn't a terminal
+(`esf serve > esf.log`), the address is written to `data/address.txt`, readable by you only, instead of
+being printed with its key. Set `ESF_ACCESS_TOKEN` to keep one key across restarts.
 
 Open **Agents** at the top of the page and choose how the agents run. With the **Claude API** or
 the **OpenAI API**, paste the key; the page sends it only with the requests that run the agents
 (reading the problem, searching, extracting), in its own header, and the server uses it for that
 job in memory and never writes it to disk. In the browser it is kept for the tab, or on the browser
-if you tick **Remember on this browser**; **Forget** clears it. Alternatively, set
-`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` on the server, and the box becomes optional. With an
+if you tick **Remember on this browser** (stored for `http://127.0.0.1:8000`, which any page later
+served at that address could read); **Forget** clears it. For a key that should persist, set
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` on the server instead, and the box becomes optional. The
+server uses only those two variables (or `ANTHROPIC_AUTH_TOKEN`), never a credential found elsewhere
+on the computer. From another computer, the page sends a key only over HTTPS. With an
 **OpenAI subscription**, click **Sign in with ChatGPT** (see
 [above](#sign-in-with-chatgpt-local-edition)).
 
@@ -259,6 +292,7 @@ Searches are stored in `data/esf.sqlite3`, and the text read from each paper in 
 | `ESF_OPENAI_MANAGER_MODEL` | `gpt-6.1-sol` | The manager model on a ChatGPT plan, until the page picks another. |
 | `ESF_OPENAI_WORKER_MODEL` | `gpt-6-luna` | The worker model on a ChatGPT plan, until the page picks another. |
 | `ESF_ALLOWED_HOSTS` | | Host names the server answers to besides its addresses and `localhost`, comma-separated, to serve it under a name of its own. |
+| `ESF_ACCESS_TOKEN` | a new one each start | The access key every request must carry (letters, digits and `. _ ~ -`). |
 | `ESF_AUDIT_FRACTION` | `0.1` | Share of clean extractions that Opus re-checks anyway. |
 | `ESF_PER_QUERY_LIMIT` | `100` | Records taken from each level's query, by relevance. |
 | `ESF_MAX_CANDIDATES` | `300` | Records screened from the levels and registry queries. |
@@ -373,7 +407,7 @@ papers print them. If you change a decision afterwards, the page says the summar
 until you write it again; so does re-extracting a paper. If writing it again fails, the previous
 summary stays, with the error.
 
-## Privacy
+## Privacy and security
 
 Your paragraph and the text of the papers are sent to Anthropic's API, or to OpenAI's if you choose
 it. Literature requests go to
@@ -381,22 +415,39 @@ NCBI, ClinicalTrials.gov, Europe PMC, and Unpaywall, and, in the browser edition
 host open-access PDFs. Nothing else leaves your browser (browser edition) or the machine running the
 server (local server).
 
-In the browser edition the API key goes from the page straight to Anthropic (with the header
-Anthropic requires for calls from a browser) or to OpenAI. Anyone who can run scripts in the page could read it,
-so use the page only from its published address and don't add third-party scripts to it. In the
-local server edition the key travels from the page to the server in a request header (the
-Anthropic key in `X-Anthropic-Api-Key`, the OpenAI key in `X-OpenAI-Api-Key`, only the chosen one); if
-you host that server for others, serve it over HTTPS. The server answers only to its own address,
+**API keys in the browser edition.** The key goes from the page straight to Anthropic (with the
+header Anthropic requires for calls from a browser) or to OpenAI, and nowhere else: a key that is
+surely the other vendor's, an NCBI key, or an admin key (which can manage the whole account) is
+neither sent nor kept. It is kept for the tab (reopening a closed tab can bring it back), or on this
+browser with **Remember**; **Forget** removes the Anthropic, OpenAI and NCBI keys from both. The NCBI
+key goes only to NCBI: when PubMed is reached through Claude's web fetch, it is taken out of the
+address, and the activity log records only where a fetch went, never its query. The page runs under a
+Content-Security-Policy that allows only its own scripts, and the GitHub Actions that build it are
+pinned to exact commits. Anyone who can run scripts on the page's origin could still read the key:
+other Pages sites of the same GitHub account share that origin (see
+[Publish the browser edition](#publish-the-browser-edition-on-github-pages)), and so do browser
+extensions allowed on the site. Use a key with a spending limit: an Anthropic workspace with a monthly
+limit, or an OpenAI project with a budget of its own.
+
+**API keys in the local server edition.** The key travels from the page to the server in a request
+header (the Anthropic key in `X-Anthropic-Api-Key`, the OpenAI key in `X-OpenAI-Api-Key`, only the
+chosen one), is used for that job in memory, and is never written to disk; from another computer it
+is taken only over HTTPS. Every request needs the server's access key (see
+[Run the local server](#run-the-local-server)). The server answers only to its own address,
 `localhost`, or a name in `ESF_ALLOWED_HOSTS`, accepts changes only from its own page, and may not be
-shown in a frame on another site, so another web page open in the same browser can't drive it. A
-ChatGPT sign-in can be used only from the computer that runs the server: another computer can't run
-jobs on that plan, see who signed in, or sign them out.
+shown in a frame on another site. A ChatGPT sign-in can be used only from the computer that runs the
+server, and its tokens stay in the server's memory. The data folder, the database and the sign-in's
+settings are readable by you only; a folder you name with `ESF_DATA_DIR` that holds other files keeps
+its own permissions, with a warning. The OAuth code in the sign-in's callback is kept out of the
+access log.
 
 Behind a reverse proxy, have the proxy pass the original `Host` (or list the public name in
-`ESF_ALLOWED_HOSTS`) and `X-Forwarded-Proto`; for a proxy on another machine, uvicorn also needs
-`FORWARDED_ALLOW_IPS` set to its address. Requests through a proxy count as coming from another
-computer, so the ChatGPT sign-in can't be used that way: open the server's own address on its
-computer for that, or use an API key.
+`ESF_ALLOWED_HOSTS`), `X-Forwarded-For` and `X-Forwarded-Proto`; for a proxy on another machine,
+uvicorn also needs `FORWARDED_ALLOW_IPS` set to its address. Requests through a proxy that says so
+count as coming from another computer, so the ChatGPT sign-in can't be used that way. A proxy that
+passes none of these headers (nginx's defaults) makes every visitor look local: anyone you give the
+access key could then use a ChatGPT plan signed in on that server, so don't sign in with ChatGPT on a
+server you share; use API keys there.
 
 ## Not yet
 
