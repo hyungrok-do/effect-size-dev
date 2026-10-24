@@ -451,18 +451,30 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.on("console", lambda m: errors.append(f"{m.text} ({m.location.get('url')})") if m.type == "error" and not expected(m) else None)
 
     page.goto(site_url)
-    # Without a key the page opens at Setup, and a job sent off without one comes back to it.
-    assert page.get_attribute("#tab-setup", "aria-selected") == "true" and page.is_visible("#setup-flag")
+    # Without a key the page opens on the Agents page, and a job sent off without one comes back to it.
+    assert page.is_visible("#agents-page") and page.is_hidden(".layout") and page.is_hidden(".intro")
+    assert page.get_attribute("#agents-toggle", "data-missing") == "true"
+    assert page.locator(".provider-card .pc-title").all_inner_texts() == ["Claude API", "OpenAI API", "OpenAI subscription"]
+    assert page.is_checked("input[name='provider'][value='anthropic']")
+    # The subscription runs only in the local edition; here it says so and can't be chosen.
+    assert page.is_disabled("input[name='provider'][value='chatgpt']")
+    assert "local edition only" in page.inner_text(".provider-card[data-provider='chatgpt']")
+    page.click("#agents-back")
+    assert page.is_hidden("#agents-page") and page.get_attribute("#tab-setup", "aria-selected") == "true"
     page.click("#tab-problem")
     page.fill("#paragraph", "We propose a two-arm randomized trial of a 12-week mindfulness app versus waitlist for PHQ-9 in students.")
     page.click("#read")
-    assert page.get_attribute("#tab-setup", "aria-selected") == "true"
-    assert page.get_attribute(".keybox", "data-missing") == "true"
+    assert page.is_visible("#agents-page") and page.get_attribute(".keybox", "data-missing") == "true"
     page.fill("#api-key", KEY)
+    assert page.get_attribute("#agents-toggle", "data-missing") == "false"
+    assert page.locator("#roles li strong").all_inner_texts()[0] == "Opus 5.5 · manager"
+    assert page.locator("#roles select").evaluate_all("els => els.map((e) => e.value)") == [OPUS, SONNET, HAIKU]
+    page.click("#agents-done")
+    page.click("#tab-setup")
+    assert page.inner_text("#agents-summary") == ("Claude API: Opus 5.5 plans and reviews, Sonnet 5.5 fetches, "
+                                                  "Haiku 5.5 screens and reads.")
     page.fill("#contact-email", "test@example.com")
     page.dispatch_event("#contact-email", "change")
-    assert page.is_hidden("#setup-flag")
-    assert page.locator("#roles li strong").all_inner_texts()[0] == "Opus 5.5 · manager"
     page.click("#setup-done")
     assert page.get_attribute("#tab-problem", "aria-selected") == "true"
     page.click("#read")
@@ -505,7 +517,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert find.is_visible() and page.get_attribute("[data-part='numbers']", "data-editing") == "true"
     find.fill("Mean, SD, n, Mean difference")
     find.press("Enter")
-    assert "Mean · SD · n · Mean difference" in page.inner_text("[data-part='numbers']")
+    page.locator("[data-part='numbers']").get_by_text("Mean · SD · n · Mean difference").wait_for()
     # Rows: + Add opens the new row's first field; × removes a row; a row added and left empty is dropped.
     outcomes = page.locator("[data-part='outcomes']")
     outcomes.locator(".add-row").click()
@@ -859,7 +871,7 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     context.route("**/*", Network())
     page = context.new_page()
     page.goto(site_url)
-    assert page.get_attribute("#tab-setup", "aria-selected") == "true"
+    assert page.is_visible("#agents-page")
 
     # An NCBI key pasted into the Anthropic box is caught before anything is sent.
     page.fill("#api-key", "0123456789abcdef0123456789abcdef1234")
@@ -871,6 +883,7 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     page.wait_for_function("document.querySelector('#key-status').textContent.includes('did not accept')")
     status = page.inner_text("#key-status")
     assert "claude-opus-5-5: Anthropic did not accept the API key (401: invalid x-api-key (request req_test))" in status
+    page.click("#agents-done")
     page.click("#tab-problem")
     page.fill("#paragraph", "A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.")
     page.click("#read")
@@ -878,7 +891,7 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
     assert "Anthropic did not accept the API key (401: invalid x-api-key" in page.inner_text("#problem-error")
 
     # A good key: every model is reachable.
-    page.click("#tab-setup")
+    page.click("#agents-toggle")
     page.fill("#api-key", KEY)
     page.click("#check-key")
     page.wait_for_function("document.querySelector('#key-status').textContent.startsWith('The key works')")
@@ -899,7 +912,8 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     page.fill("#api-key", KEY)  # a Claude key first: switching keeps each provider's key apart
     page.check("input[name='provider'][value='openai']")
     assert page.inner_text("#api-key-label") == "OpenAI API key" and page.input_value("#api-key") == ""
-    assert page.is_visible("#provider-note") and "Sign in with ChatGPT" in page.inner_text("#provider-note")
+    assert page.is_visible("#provider-note") and "the abstract is read instead" in page.inner_text("#provider-note")
+    assert page.inner_text("#agents-label") == "OpenAI API" and page.get_attribute("#agents-toggle", "data-missing") == "true"
     page.fill("#api-key", "sk-ant-api03-wrong-provider")
     assert "doesn't look like an OpenAI API key" in page.inner_text("#key-status")
     page.fill("#api-key", "sk-proj-not-the-right-key-000")
@@ -912,11 +926,18 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     assert page.inner_text("#key-status") == "The key works, and it may use GPT-6.1 Sol, GPT-6 Luna."
     assert page.locator("#roles li strong").all_inner_texts() == ["GPT-6.1 Sol · manager", "GPT-6 Luna · workers", "Code · search and checks"]
     assert page.inner_text("#models") == "GPT-6.1 Sol plans and reviews · GPT-6 Luna screens and reads"
-    assert "sent to OpenAI's API" in page.inner_text("#setup .notice")
+    assert "sent to OpenAI's API" in page.inner_text("#agents-page .notice")
+    assert page.locator("#model-worker option").all_inner_texts() == ["GPT-6.1 Sol", "GPT-6 Luna"]
     page.check("input[name='provider'][value='anthropic']")
     assert page.input_value("#api-key") == KEY and page.inner_text("#models").startswith("Opus 5.5 plans")
+    # Each provider keeps its own choice of models.
+    page.select_option("#model-worker", "claude-sonnet-5-5")
+    assert page.inner_text("#models") == "Opus 5.5 plans and reviews · Sonnet 5.5 fetches · Sonnet 5.5 screens and reads"
+    assert "Opus 5.5 · Sonnet 5.5 · Sonnet 5.5" in page.inner_text(".provider-card[data-provider='anthropic']")
     page.check("input[name='provider'][value='openai']")
-    assert page.input_value("#api-key") == OPENAI_KEY
+    assert page.input_value("#api-key") == OPENAI_KEY and page.input_value("#model-worker") == "gpt-6-luna"
+    page.click("#agents-done")
+    assert page.is_hidden("#agents-page") and page.is_visible(".layout")
 
     page.fill("#contact-email", "test@example.com")
     page.dispatch_event("#contact-email", "change")

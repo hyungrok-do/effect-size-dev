@@ -5,7 +5,7 @@
 import { Activity, liveTasks, short } from './lib/activity.js';
 import { Claude, looksLikeAnthropicKey, MODELS } from './lib/claude.js';
 import { looksLikeOpenAIKey, OPENAI_MODELS, OpenAI } from './lib/openai.js';
-import { modelLabel, roleNames, roleOf, whoDid } from './lib/providers.js';
+import { MODEL_CHOICES, modelLabel, PROVIDERS as PROVIDER_INFO, ROLE_INFO, roleNames, roleOf, whoDid } from './lib/providers.js';
 import { csvOf, download, exportRows, LOG_COLUMNS, logRows, PAPER, toCsv } from './lib/export.js';
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
@@ -35,37 +35,44 @@ const LEVEL_SHORT = {
   reviews: 'Reviews search', primary: 'Target-population search', full_text: 'Full-text search',
   wider: 'Related-populations search', outcome_data: 'Outcome-data search', cited: 'Cited by a review', named: 'Named in the search plan',
 };
-// The two ways to run the models, each with its own key. OpenAI's plan sign-in (Sign in with ChatGPT)
-// is for apps on the user's own computer, so it is in the local edition only.
+// How the agents run, as the Agents page offers it (PROVIDER_INFO in providers.js): Claude's or
+// OpenAI's models with the person's own key. The third way, OpenAI's models on a ChatGPT
+// subscription, is in the local edition only: OpenAI allows that sign-in only for apps that run on
+// the person's own computer, and this page is served from the web.
 const PROVIDERS = {
   anthropic: {
-    vendor: 'Anthropic', models: MODELS, keyName: 'Anthropic API key', placeholder: 'sk-ant-…', storage: 'esf-anthropic-api-key',
+    ...PROVIDER_INFO.anthropic, defaults: MODELS, roles: ['manager', 'fetcher', 'worker'], storage: 'esf-anthropic-api-key',
     looksLike: looksLikeAnthropicKey, wrongKey: "This doesn't look like an Anthropic API key: those start with sk-ant-.",
-    console: ['https://console.anthropic.com/settings/keys', 'Anthropic Console'],
-    canFetch: true,
-    client: (apiKey) => new Claude({ apiKey }),
+    canFetch: true, client: (apiKey, models) => new Claude({ apiKey, models }),
   },
   openai: {
-    vendor: 'OpenAI', models: OPENAI_MODELS, keyName: 'OpenAI API key', placeholder: 'sk-…', storage: 'esf-openai-api-key',
+    ...PROVIDER_INFO.openai, defaults: OPENAI_MODELS, roles: ['manager', 'worker'], storage: 'esf-openai-api-key',
     looksLike: looksLikeOpenAIKey, wrongKey: "This doesn't look like an OpenAI API key: those start with sk-.",
-    console: ['https://platform.openai.com/api-keys', 'OpenAI dashboard'],
-    canFetch: false,
-    client: (apiKey) => new OpenAI({ apiKey }),
+    canFetch: false, client: (apiKey, models) => new OpenAI({ apiKey, models }),
   },
 };
 const PROVIDER = 'esf-provider';
+const modelsSetting = (name) => `esf-models-${name}`;
 const provider = () => PROVIDERS[state.provider] || PROVIDERS.anthropic;
-const names = () => roleNames(provider().models);
-// The agents of the chosen provider: key (a role, see providers.js), name, role, what it does.
-function agents() {
-  const n = names();
-  return [
-    ['manager', n.manager, 'manager', 'Reads the problem, plans the search, reviews flagged extractions'],
-    n.fetcher && ['fetcher', n.fetcher, 'fetcher', 'Downloads what the browser may not read'],
-    ['worker', n.worker, 'workers', 'Screen every record and extract every paper'],
-    ['code', 'Code', 'search and checks', 'Runs the searches, gets the text, checks every quote'],
-  ].filter(Boolean);
+// What each role is called on its card.
+const ROLE_TITLES = { manager: 'manager', fetcher: 'fetcher', worker: 'workers', code: 'search and checks' };
+
+// The model of each of a provider's roles: the person's choice on the Agents page, else the default.
+function chosenModels(name = state.provider) {
+  const chosen = PROVIDERS[name];
+  let saved = {};
+  try {
+    saved = JSON.parse(readSetting(modelsSetting(name)) || '{}') || {};
+  } catch { /* a damaged setting: the defaults */ }
+  return Object.fromEntries(chosen.roles.map((role) => [role, MODEL_CHOICES[name].includes(saved[role]) ? saved[role] : chosen.defaults[role]]));
 }
+const names = () => roleNames(chosenModels());
+const client = () => provider().client(apiKey(), chosenModels());
+// The agents of the chosen provider: key (a role, see providers.js), name, role, what it does.
+const agents = () => {
+  const n = names();
+  return [...provider().roles, 'code'].map((role) => [role, n[role], ROLE_TITLES[role], ROLE_INFO[role][1]]);
+};
 const ACTIVITY_OPEN = 'esf-activity-open';
 const EMAIL = 'esf-contact-email';
 const NCBI_KEY = 'esf-ncbi-api-key';
@@ -75,7 +82,7 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const store = new Store();
 const jobs = new Set(); // projects and papers with work running in this tab
 const state = {
-  provider: 'anthropic', id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
+  provider: 'anthropic', agentsOpen: false, id: null, project: null, papers: [], decisions: {}, usage: [], events: [], tab: 'extracted', specKey: '', papersKey: '',
   uploadFor: null, step: 'setup', stepChosen: false, source: 'papers', filter: 'all', timelineAll: false,
   available: { setup: true, problem: true, spec: false, progress: false, review: false, summary: false },
   reviewAt: {}, // `${source}:${tab}` -> the paper id shown there
@@ -164,6 +171,7 @@ function saveKey() {
     if (key) storage($('#remember-key').checked ? 'local' : 'session')?.setItem(name, key);
   } catch { /* storage unavailable */ }
   showKeyStatus();
+  showProvider();
 }
 
 function chooseProvider(name) {
@@ -172,6 +180,17 @@ function chooseProvider(name) {
   writeSetting(PROVIDER, name);
   loadKey();
   showKeyStatus();
+  namesChanged();
+}
+
+function chooseModel(role, model) {
+  writeSetting(modelsSetting(state.provider), JSON.stringify({ ...chosenModels(), [role]: model }));
+  showProvider();
+  namesChanged();
+}
+
+// The parts of an open search that name the models.
+function namesChanged() {
   if (state.project) {
     renderProgress(state.project);
     renderReview();
@@ -184,17 +203,51 @@ function chooseProvider(name) {
 function showProvider() {
   const chosen = provider();
   const n = names();
-  for (const input of document.querySelectorAll('input[name="provider"]')) input.checked = input.value === state.provider;
+  $('#agents-label').textContent = chosen.label;
+  $('#agents-toggle').dataset.missing = String(!apiKey());
   $('#api-key-label').textContent = chosen.keyName;
   $('#api-key').placeholder = chosen.placeholder;
   $('#provider-note').hidden = state.provider !== 'openai';
   for (const el of document.querySelectorAll('[data-name]')) {
     el.textContent = el.dataset.name === 'vendor' ? chosen.vendor : n[el.dataset.name] || el.textContent;
   }
+  const line = [`${n.manager} plans and reviews`, n.fetcher && `${n.fetcher} fetches`, `${n.worker} screens and reads`].filter(Boolean);
+  $('#models').textContent = line.join(' · ');
+  $('#agents-summary').replaceChildren(h('strong', {}, `${chosen.label}: `), `${line.join(', ')}.`,
+    apiKey() ? '' : ` No ${chosen.keyName} yet.`);
+  showAgentsPage();
+}
+
+// The Agents page: the three ways to run the agents, the key, and the model of each role.
+function showAgentsPage() {
+  for (const card of document.querySelectorAll('.provider-card')) {
+    const name = card.dataset.provider;
+    card.querySelector('.pc-title').textContent = PROVIDER_INFO[name].label;
+    card.querySelector('.pc-sub').textContent = PROVIDER_INFO[name].billing;
+    if (PROVIDERS[name]) {
+      const n = roleNames(chosenModels(name));
+      card.querySelector('.pc-models').textContent = [n.manager, n.fetcher, n.worker].filter(Boolean).join(' · ');
+    }
+    card.querySelector('input').checked = name === state.provider;
+  }
+  const models = chosenModels();
   $('#roles').replaceChildren(...agents().map(([key, name, role, does]) => h('li', { 'data-agent': key },
-    h('strong', {}, `${name} · ${role}`), does)));
-  $('#models').textContent = [`${n.manager} plans and reviews`, n.fetcher && `${n.fetcher} fetches`, `${n.worker} screens and reads`]
-    .filter(Boolean).join(' · ');
+    h('strong', {}, `${name} · ${role}`), does,
+    key !== 'code' && h('select', {
+      id: `model-${key}`, 'aria-label': `Model for the ${role}`, onchange: (event) => chooseModel(key, event.target.value),
+    }, MODEL_CHOICES[state.provider].map((model) => h('option', { value: model, selected: model === models[key] || null }, modelLabel(model)))))));
+}
+
+function setAgentsOpen(open) {
+  state.agentsOpen = open;
+  $('#agents-page').hidden = !open;
+  $('.intro').hidden = open;
+  $('.layout').hidden = open;
+  $('#agents-toggle').setAttribute('aria-expanded', String(open));
+  if (open) {
+    showAgentsPage();
+    window.scrollTo(0, 0);
+  }
 }
 
 function forgetKey() {
@@ -206,7 +259,7 @@ function forgetKey() {
 
 function showKeyStatus() {
   $('.keybox').dataset.missing = 'false';
-  $('#setup-flag').hidden = Boolean(apiKey());
+  $('#agents-toggle').dataset.missing = String(!apiKey());
   const status = $('#key-status');
   const chosen = provider();
   if (apiKey() && !chosen.looksLike(apiKey())) {
@@ -230,7 +283,7 @@ async function checkKey() {
   const chosen = provider();
   status.textContent = `Checking the key with ${chosen.vendor}…`;
   try {
-    const results = await chosen.client(apiKey()).checkAccess();
+    const results = await client().checkAccess();
     const failed = results.filter((r) => !r.ok);
     $('.keybox').dataset.missing = String(failed.length > 0);
     status.textContent = failed.length
@@ -244,10 +297,10 @@ async function checkKey() {
   }
 }
 
-// The jobs need a key; without one, the page goes to Setup and says so.
+// The jobs need a key; without one, the page opens the Agents page and says so.
 function haveKey() {
   if (apiKey()) return true;
-  selectStep('setup');
+  setAgentsOpen(true);
   $('.keybox').dataset.missing = 'true';
   $('#key-status').textContent = `Enter your ${provider().keyName} first.`;
   $('#api-key').focus();
@@ -259,7 +312,7 @@ function haveKey() {
 const literature = () => new Sources({ email: $('#contact-email').value.trim(), ncbiApiKey: $('#ncbi-key').value.trim() });
 
 function pipeline(projectId) {
-  const llm = provider().client(apiKey());
+  const llm = client();
   const activity = new Activity(store, projectId);
   const sources = new Sources({
     email: $('#contact-email').value.trim(),
@@ -1128,10 +1181,16 @@ async function start() {
   for (const input of document.querySelectorAll('input[name="provider"]')) {
     input.addEventListener('change', () => chooseProvider(input.value));
   }
+  $('#agents-toggle').addEventListener('click', () => setAgentsOpen(!state.agentsOpen));
+  $('#open-agents').addEventListener('click', () => setAgentsOpen(true));
+  $('#agents-back').addEventListener('click', () => setAgentsOpen(false));
+  $('#agents-done').addEventListener('click', () => setAgentsOpen(false));
   $('#activity-toggle').addEventListener('click', () => setActivityOpen($('#activity').hidden));
   $('#activity-close').addEventListener('click', () => setActivityOpen(false));
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !$('#activity').hidden && window.innerWidth < 1280) setActivityOpen(false);
+    if (event.key !== 'Escape') return;
+    if (state.agentsOpen) setAgentsOpen(false);
+    else if (!$('#activity').hidden && window.innerWidth < 1280) setActivityOpen(false);
   });
   const remembered = readSetting(ACTIVITY_OPEN);
   // Below 1280px the panel covers the page, so there it opens only when asked.
@@ -1142,9 +1201,11 @@ async function start() {
   });
   loadSettings();
   showKeyStatus();
-  // Setup comes first until there is a key; after that, a new visit starts at Describe.
+  // The Agents page comes first until there is a key, then Setup; after that, a new visit starts at Describe.
+  // A link to a search opens the search (the Agents button says a key is needed).
   state.step = apiKey() ? 'problem' : 'setup';
   renderTabs();
+  if (!apiKey() && !location.hash.slice(1)) setAgentsOpen(true);
   await store.interruptRunning();
   await loadProjects();
   const id = location.hash.slice(1);

@@ -36,3 +36,34 @@ export function whoDid(event, names) {
   const models = [...new Set((event.models || []).map(modelLabel))];
   return models.length ? models.join(', ') : names[roleOf(event.agent)] || event.agent;
 }
+
+// The three ways to run the agents, as the Agents page offers them. `credential` is what the person
+// gives: an API key, or a ChatGPT sign-in (the local edition only: OpenAI allows it for apps that run
+// on the person's own computer).
+export const PROVIDERS = {
+  anthropic: {
+    label: 'Claude API', vendor: 'Anthropic', credential: 'key', billing: 'Anthropic API key · billed per use',
+    keyName: 'Anthropic API key', placeholder: 'sk-ant-…', console: ['https://console.anthropic.com/settings/keys', 'Anthropic Console'],
+  },
+  openai: {
+    label: 'OpenAI API', vendor: 'OpenAI', credential: 'key', billing: 'OpenAI API key · billed per use',
+    keyName: 'OpenAI API key', placeholder: 'sk-…', console: ['https://platform.openai.com/api-keys', 'OpenAI dashboard'],
+  },
+  chatgpt: {
+    label: 'OpenAI subscription', vendor: 'OpenAI', credential: 'sign-in', billing: 'ChatGPT Plus or Pro · no key',
+  },
+};
+
+// The models each provider's roles can use, best first. A ChatGPT plan lists its own (the sign-in's catalog).
+export const MODEL_CHOICES = {
+  anthropic: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'],
+  openai: ['gpt-6.1-sol', 'gpt-6-luna'],
+};
+
+// What each role does, for the Agents page and the cards.
+export const ROLE_INFO = {
+  manager: ['Manager', 'Reads the problem, plans the search, reviews flagged extractions, checks overlap, writes the summary'],
+  fetcher: ['Fetcher', 'Downloads what the browser may not read (Claude only)'],
+  worker: ['Workers', 'Screen every record and extract every paper'],
+  code: ['Code', 'Runs the searches, gets the text, checks every quote'],
+};

@@ -14,8 +14,10 @@ import { SourceError } from './sources.js';
 export const MODELS = { manager: 'claude-opus-5-5', fetcher: 'claude-sonnet-5-5', worker: 'claude-haiku-5-5' };
 
 // Opus and Sonnet: when a safety classifier declines a benign request, the API retries it on the
-// model Anthropic recommends for that refusal category. Haiku has no server-side fallback.
+// model Anthropic recommends for that refusal category. Haiku has no server-side fallback, whichever
+// role it plays.
 const FALLBACK = { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' };
+const fallbackFor = (model) => (/haiku/.test(model) ? {} : FALLBACK);
 
 export class ModelDeclined extends Error {}
 export class ModelTruncated extends Error {}
@@ -119,13 +121,14 @@ export class Claude {
 
   // Streamed, so long documents and high-effort thinking don't run into request timeouts.
   async parse({ step, manager, system, content, schema, effort, sink, maxTokens = 64000 }) {
+    const model = manager ? this.models.manager : this.models.worker;
     const params = {
-      model: manager ? this.models.manager : this.models.worker,
+      model,
       max_tokens: maxTokens,
       system: cachedSystem(system),
       messages: [{ role: 'user', content }],
       output_config: { effort, format: { type: 'json_schema', schema } },
-      ...(manager ? FALLBACK : {}),
+      ...fallbackFor(model),
     };
     const message = await this.client.beta.messages.stream(params).finalMessage();
     Claude.record(sink, step, message);
@@ -149,7 +152,7 @@ export class Claude {
         tools: SEARCH_TOOLS,
         messages,
         output_config: { effort: 'high' },
-        ...FALLBACK,
+        ...fallbackFor(this.models.manager),
       });
       Claude.record(sink, 'search', message);
       if (message.stop_reason === 'refusal') throw new ModelDeclined("the search agent's request was declined");
@@ -211,7 +214,7 @@ export class Claude {
         role: 'user',
         content: `Fetch ${url} with the web_fetch tool. Do not summarize or analyze it; once it is fetched, reply only "done".`,
       }],
-      ...FALLBACK,
+      ...fallbackFor(this.models.fetcher),
     });
     Claude.record(sink, 'fetch', message);
     const result = message.content.find((b) => b.type === 'web_fetch_tool_result');
