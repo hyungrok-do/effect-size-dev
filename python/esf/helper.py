@@ -111,6 +111,7 @@ class Helper:
             self.root = (data if data.is_absolute() else self.home / ".local" / "share") / "effect-size-finder"
             self.service = (config if config.is_absolute() else self.home / ".config") / "systemd" / "user" / UNIT
         self.config = self.root / "helper.json"
+        self.just_unloaded = False
 
     def require_user(self) -> None:
         if self.uid == 0:
@@ -131,7 +132,18 @@ class Helper:
     def start_service(self) -> None:
         if self.platform == "darwin":
             command(["launchctl", "enable", f"gui/{self.uid}/{LABEL}"])
-            command(["launchctl", "bootstrap", f"gui/{self.uid}", str(self.service)])
+            # bootout is asynchronous even after the port closes. A replacement registration can
+            # briefly fail with EIO while launchd disposes of the old job. Retry only after our own
+            # successful unload, with a short bound; other bootstrap failures are reported at once.
+            attempts = 61 if self.just_unloaded else 1
+            for attempt in range(attempts):
+                result = command(["launchctl", "bootstrap", f"gui/{self.uid}", str(self.service)], check=False)
+                if result.returncode == 0:
+                    self.just_unloaded = False
+                    return
+                if result.returncode != 5 or attempt == attempts - 1:
+                    raise HelperError(f"launchctl could not start the helper: {result.stderr.strip()[-500:]}")
+                time.sleep(0.5)
         else:
             command(["systemctl", "--user", "daemon-reload"])
             command(["systemctl", "--user", "enable", "--now", UNIT])
@@ -141,6 +153,7 @@ class Helper:
             target = f"gui/{self.uid}/{LABEL}"
             if command(["launchctl", "print", target], check=False).returncode == 0:
                 command(["launchctl", "bootout", target])
+                self.just_unloaded = True
         else:
             command(["systemctl", "--user", "disable", "--now", UNIT], check=self.service.exists())
 
@@ -246,9 +259,15 @@ class Helper:
         config = load_config(self.config)
         if not self.service.exists():
             raise HelperError("Automatic startup is not installed. Run esf helper install first.")
-        self.stop_service()
-        self.wait_stopped(config)
-        self.start_service()
+        if self.platform == "darwin":
+            target = f"gui/{self.uid}/{LABEL}"
+            if command(["launchctl", "print", target], check=False).returncode == 0:
+                # kickstart owns the stop/start ordering and keeps the existing job registration.
+                command(["launchctl", "kickstart", "-k", target])
+            else:
+                self.start_service()
+        else:
+            command(["systemctl", "--user", "restart", UNIT])
         self.wait_ready(config)
         print("Helper restarted. Your browser stays paired; sign in with ChatGPT again in the companion window.")
 

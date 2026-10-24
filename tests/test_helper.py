@@ -177,15 +177,28 @@ def test_health_endpoint_is_authenticated_and_loopback_only(tmp_path):
     assert client.get("/api/helper", headers={"X-ESF-Token": "private-key", "X-Forwarded-For": "127.0.0.1"}).status_code == 403
 
 
-def test_restart_waits_for_the_old_process_to_release_its_port(tmp_path, monkeypatch, installed_environment):
+def test_reinstallation_waits_for_the_old_port_and_launchd_registration(tmp_path, monkeypatch, installed_environment):
     instance = helper.Helper(platform="darwin", home=tmp_path, uid=501)
     instance.install(open_browser=False)
-    occupied = iter([True, True, False])
+    occupied = iter([False, True, True, False])  # the new port is free; the old one takes time to close
     waits = []
     monkeypatch.setattr(helper, "port_busy", lambda port: next(occupied))
     monkeypatch.setattr(helper.time, "sleep", lambda seconds: waits.append(seconds))
+    run = helper.subprocess.run
+    bootstraps = []
+
+    def delayed_registration(args, **kwargs):
+        if args[:2] == ["launchctl", "bootstrap"]:
+            bootstraps.append(args)
+            if len(bootstraps) == 1:
+                return subprocess.CompletedProcess(args, 5, stdout="", stderr="Bootstrap failed: 5: Input/output error")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(helper.subprocess, "run", delayed_registration)
+    instance.install(8123, open_browser=False)
+    assert waits == [0.1, 0.1, 0.5] and len(bootstraps) == 2
     instance.restart()
-    assert waits == [0.1, 0.1]
+    assert installed_environment[-1] == ["launchctl", "kickstart", "-k", f"gui/501/{helper.LABEL}"]
 
 
 def test_setup_explains_unsupported_sessions_without_changing_startup(tmp_path, installed_environment):
@@ -222,6 +235,14 @@ def test_native_login_service_lifecycle(tmp_path, monkeypatch):
         assert instance.status()
         instance.restart()
         assert helper.load_config(instance.config) == config and instance.status()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            new_port = sock.getsockname()[1]
+        instance.install(new_port, open_browser=False)
+        changed = helper.load_config(instance.config)
+        assert changed["port"] == new_port and changed["access_key"] == config["access_key"] and instance.status()
+        assert not helper.healthy(config)
+        config = changed
         instance.uninstall()
         deadline = time.monotonic() + 10
         while helper.healthy(config) and time.monotonic() < deadline:
