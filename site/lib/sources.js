@@ -72,7 +72,9 @@ export class Http {
       try {
         response = await this.fetch(url);
       } catch {
-        // A TypeError here is how browsers report a refused cross-site request (or no network).
+        // A TypeError here is how browsers report a refused cross-site request (or no network). With a
+        // fetcher, the host's later requests go through it; without one (OpenAI), only this request fails.
+        if (!this.proxy) throw new SourceError(`${new URL(url).host} doesn't accept requests from web pages.`);
         this.blocked.add(new URL(url).host);
         return this.viaProxy(url, as);
       }

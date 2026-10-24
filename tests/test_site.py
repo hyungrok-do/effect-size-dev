@@ -144,6 +144,7 @@ class Network:
         self.claude: list[tuple[dict, dict]] = []
         self.openai = FakeOpenAI()
         self.openai_calls: list[tuple[dict, dict]] = []
+        self.openai_quota: int | None = None  # screenings the OpenAI account has credit for
         self.refused: list[str] = []
 
     def __call__(self, route, request):
@@ -196,6 +197,10 @@ class Network:
                                  body=json.dumps({"id": model, "object": "model", "owned_by": "openai"}))
         body = json.loads(request.post_data)
         self.openai_calls.append((request.headers, body))
+        screened = [b for _, b in self.openai_calls if b.get("text", {}).get("format", {}).get("name") == "ScreenDecision"]
+        if self.openai_quota is not None and len(screened) > self.openai_quota:
+            error = {"error": {"message": "You exceeded your current quota.", "type": "insufficient_quota", "code": "insufficient_quota"}}
+            return route.fulfill(status=429, headers={**CORS, "content-type": "application/json"}, body=json.dumps(error))
         route.fulfill(status=200, headers={**CORS, "content-type": "text/event-stream"}, body=self.openai.respond(body))
 
     def structured(self, body):
@@ -875,7 +880,16 @@ def test_the_page_says_what_is_wrong_with_a_key(browser, site_url):
 
     # An NCBI key pasted into the Anthropic box is caught before anything is sent.
     page.fill("#api-key", "0123456789abcdef0123456789abcdef1234")
-    assert "doesn't look like an Anthropic API key" in page.inner_text("#key-status")
+    assert "This looks like an NCBI API key, not an Anthropic API key" in page.inner_text("#key-status")
+    page.click("#agents-done")
+    page.click("#tab-problem")
+    page.fill("#paragraph", "A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.")
+    page.click("#read")  # not sent: the Agents page opens again and says why
+    assert page.is_visible("#agents-page") and "It is not sent to Anthropic" in page.inner_text("#key-status")
+    # A key of an unfamiliar shape only gets a warning.
+    page.fill("#api-key", "a-new-kind-of-key")
+    assert "doesn't look like an Anthropic API key: those start with sk-ant-" in page.inner_text("#key-status")
+    assert page.get_attribute("#agents-toggle", "data-missing") == "false"
 
     # A refused key: Check key and a failed step both quote Anthropic's own error.
     page.fill("#api-key", "sk-ant-api03-not-a-real-key")
@@ -915,7 +929,7 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     assert page.is_visible("#provider-note") and "the abstract is read instead" in page.inner_text("#provider-note")
     assert page.inner_text("#agents-label") == "OpenAI API" and page.get_attribute("#agents-toggle", "data-missing") == "true"
     page.fill("#api-key", "sk-ant-api03-wrong-provider")
-    assert "doesn't look like an OpenAI API key" in page.inner_text("#key-status")
+    assert "This is an Anthropic API key, not an OpenAI API key: choose Claude API to use it" in page.inner_text("#key-status")
     page.fill("#api-key", "sk-proj-not-the-right-key-000")
     page.click("#check-key")
     page.wait_for_function("document.querySelector('#key-status').textContent.includes('did not accept')")
@@ -994,3 +1008,124 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     assert network.openai.tool_outputs["c1"] == f"#1 4 | mindfulness[tiab]\n#2 1 | mindfulness[tiab] AND {REVIEW_FILTER}"
     assert "| PPR | preprint |" in network.openai.tool_outputs["c2"]
     assert not errors, errors
+
+
+def test_a_search_saved_before_openai_keeps_its_credits(browser, site_url):
+    """A search run with Claude before the agents were named by role still credits Claude's models,
+    whichever provider is chosen now; a key is never sent to the other vendor."""
+    network = Network()
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    context.route("**/*", network)
+    page = context.new_page()
+    page.goto(site_url)
+    papers = [
+        _paper(1, [("PHQ-9", "12 weeks", [("App", "mean", 8.1), ("App", "sd", 4.2)])], ext_id="1001", extracted_by="manager", fetched_by="sonnet",
+               fulltext_kind="oa_pdf", escalation={"reasons": ["a quote is not in the source"], "audit": False}),
+        _paper(2, [("PHQ-9", "12 weeks", [("App", "mean", 9.0)])], ext_id="1002", extracted_by="worker"),
+    ]
+    project_id = page.evaluate("""async ([papers, spec]) => {
+        const { Store } = await import('/lib/store.js');
+        const store = new Store();
+        const id = await store.createProject('A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.');
+        await store.updateProject(id, { status: 'done', spec, progress: { stage: 'done', done: 0, total: 0 },
+          search_plan: { levels: [{ level: 'primary', query: 'q', why: '' }], clinicaltrials_queries: [], extra_ids: [] } });
+        for (const { id: _, ...paper } of papers) await store.addPaper(id, paper);
+        const usage = { input_tokens: 10, output_tokens: 5 };
+        await store.addUsage(id, 'search', 'claude-opus-5-5', usage);
+        await store.addUsage(id, 'fetch', 'claude-sonnet-5-5', usage);
+        await store.addUsage(id, 'extract', 'claude-haiku-5-5', usage);
+        await store.addEvent(id, { agent: 'opus', step: 'search', phase: 'done', text: 'Planning the search', models: ['claude-opus-5-5'] });
+        await store.addEvent(id, { agent: 'sonnet', step: 'fetch', phase: 'done', text: 'Fetching a PDF', models: ['claude-sonnet-5-5'] });
+        await store.addEvent(id, { agent: 'haiku', step: 'extract', phase: 'done', text: 'Extracting a trial', models: ['claude-haiku-5-5'] });
+        return id;
+    }""", [papers, SPEC.model_dump()])
+    page.evaluate("""() => { localStorage.setItem('esf-provider', 'openai'); localStorage.setItem('esf-openai-api-key', 'sk-proj-test-site-0123456789'); }""")
+    page.goto(f"{site_url}#{project_id}")
+    page.reload()
+    page.wait_for_selector("#review:not([hidden]) .paper")
+    assert page.inner_text("#agents-label") == "OpenAI API"
+    # The papers, the agents' cards, the timeline and the map credit Claude's models, which did the work.
+    reviewed = open_paper(page, "Trial 1")
+    reviewed.locator(".paper-details summary").click()
+    assert reviewed.locator(".badge", has_text="Reviewed by Opus 5.5").count() == 1
+    assert reviewed.locator(".badge", has_text="Fetched by Sonnet 5.5").count() == 1
+    assert "Why Opus 5.5 reviewed it: a quote is not in the source" in reviewed.inner_text()
+    extracted = open_paper(page, "Trial 2")
+    extracted.locator(".paper-details summary").click()
+    assert extracted.locator(".badge", has_text="Extracted by Haiku 5.5").count() == 1
+    names = [" ".join(x.split()) for x in page.locator("#agents .agent h3").all_inner_texts()]
+    assert names == ["Opus 5.5 manager", "Sonnet 5.5 fetcher", "Haiku 5.5 workers", "Code search and checks"], names
+    assert page.locator("#timeline li .who").all_inner_texts() == ["Haiku 5.5", "Sonnet 5.5", "Opus 5.5"]
+    page.click("#activity-filter button:has-text('Sonnet')")
+    assert page.locator("#timeline li .who").all_inner_texts() == ["Sonnet 5.5"]
+    page.click("#tab-progress")
+    chips = page.locator("#map-body [data-stage='extract'] .map-agent").all_inner_texts()
+    assert chips == ["Code", "Sonnet 5.5", "Haiku 5.5", "Opus 5.5"], chips
+    assert "downloaded by Sonnet 5.5" in page.inner_text("#map-body [data-stage='extract']")
+
+    # A dated snapshot is named as its model; a host that failed once is tried again without a fetcher.
+    labels = page.evaluate("""async () => {
+        const { modelLabel } = await import('/lib/providers.js');
+        return [modelLabel('gpt-6.1-sol-2026-08-12'), modelLabel('claude-haiku-5-5')];
+    }""")
+    assert labels == ["GPT-6.1 Sol", "Haiku 5.5"]
+    retried = page.evaluate("""async () => {
+        const { Http } = await import('/lib/sources.js');
+        let calls = 0;
+        const http = new Http({ fetchImpl: async () => {
+            calls += 1;
+            if (calls === 1) throw new TypeError('Failed to fetch');
+            return new Response('{"ok": true}', { headers: { 'content-type': 'application/json' } });
+        } });
+        let first;
+        try { await http.get('https://eutils.ncbi.nlm.nih.gov/x'); } catch (error) { first = error.message; }
+        return [first, await http.get('https://eutils.ncbi.nlm.nih.gov/x')];
+    }""")
+    assert retried == ["eutils.ncbi.nlm.nih.gov doesn't accept requests from web pages.", {"ok": True}]
+
+    # An Anthropic key in the OpenAI box is caught, and nothing goes to OpenAI.
+    page.click("#agents-toggle")
+    page.fill("#api-key", KEY)
+    page.click("#agents-done")
+    page.click("#new-project")
+    page.fill("#paragraph", "A randomized trial of a mindfulness app versus waitlist for PHQ-9 in students.")
+    page.click("#read")
+    assert page.is_visible("#agents-page") and "This is an Anthropic API key, not an OpenAI API key" in page.inner_text("#key-status")
+    assert not network.openai_calls and not network.claude
+    context.close()
+
+
+def test_a_run_stops_when_the_openai_account_runs_out_of_credit(browser, site_url):
+    network = Network()
+    network.openai_quota = 2
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    context.route("**/*", network)
+    page = context.new_page()
+    page.goto(site_url)
+    page.check("input[name='provider'][value='openai']")
+    page.fill("#api-key", OPENAI_KEY)
+    page.click("#agents-done")
+    page.fill("#contact-email", "test@example.com")
+    page.dispatch_event("#contact-email", "change")
+    page.click("#setup-done")
+    page.fill("#paragraph", "We propose a two-arm randomized trial of a 12-week mindfulness app versus waitlist for PHQ-9 in students.")
+    page.click("#read")
+    page.wait_for_selector("#spec:not([hidden])")
+    page.click("#run")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().project(location.hash.slice(1))).status;
+    }""") != "error":
+        time.sleep(0.2)
+    project = page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        const store = new Store();
+        const id = location.hash.slice(1);
+        return { project: await store.project(id), statuses: (await store.papers(id)).map((p) => p.status) };
+    }""")
+    assert "run out of credit" in (project["project"]["error"] or ""), (project["project"]["status"], project["project"]["error"], project["statuses"])
+    screened = [b for _, b in network.openai_calls if b.get("text", {}).get("format", {}).get("name") == "ScreenDecision"]
+    assert len(screened) <= 2 + 6  # the refused calls already under way, then no more
+    assert "unsure" not in project["statuses"] and "candidate" in project["statuses"]
+    context.close()

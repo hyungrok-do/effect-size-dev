@@ -86,6 +86,22 @@ def test_manager_steps_run_on_opus_with_fallbacks():
     assert "None: the junior reviewer" in adjudicate["messages"][0]["content"][1]["text"]
 
 
+def test_the_chosen_models_run_with_the_fallback_their_own_model_takes():
+    api = FakeAPI([
+        ("sse", streamed("claude-haiku-5-5", SPEC.model_dump())),
+        ("sse", streamed("claude-sonnet-5-5", SCREEN)),
+    ])
+    client = anthropic.Anthropic(api_key="test-key", max_retries=0, http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(api)))
+    llm = ClaudeLLM(Settings(), client, manager_model="claude-haiku-5-5", worker_model="claude-sonnet-5-5")
+    llm.read_spec("A paragraph.")
+    llm.screen(SPEC, "Title: a trial")
+    (spec_req, spec), (screen_req, screen) = api.requests
+    # Haiku has no server-side fallback, even as the manager; Sonnet has one, even as a worker.
+    assert spec["model"] == "claude-haiku-5-5" and "fallbacks" not in spec and "anthropic-beta" not in spec_req.headers
+    assert screen["model"] == "claude-sonnet-5-5" and screen["fallbacks"] == "default"
+    assert "server-side-fallback-2026-07-01" in screen_req.headers["anthropic-beta"]
+
+
 def test_refusal_and_truncation_are_errors():
     llm, _ = make_llm([
         ("sse", streamed("claude-haiku-5-5", SCREEN, stop_reason="refusal")),

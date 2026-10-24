@@ -7,18 +7,20 @@ import html
 import io
 import ipaddress
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Callable, Literal
 
 import anthropic
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .chatgpt import CALLBACK_PATH, ChatGPTError, ChatGPTSession
-from .config import Settings
+from .config import MODEL_CHOICES, Settings
 from .llm import LLM, ClaudeLLM
 from .openai_llm import OpenAILLM
 from .pipeline import Pipeline, previous_summary
@@ -29,16 +31,50 @@ from .store import RUNNING, Store
 PAPER = -1  # result_index of a decision about the whole paper
 
 
-def key_header() -> object:
-    """The page sends the user's Anthropic API key in this header with each request that starts
-    Claude work. The key is used for that job only, held in memory, and never written to disk."""
-    return Header(default=None, alias="X-Anthropic-Api-Key", max_length=512)
+# What runs a job, as the page's X-Model-Provider header says: Claude with an Anthropic API key (the
+# default), OpenAI's models with an OpenAI API key, or OpenAI's models on the plan of the person
+# signed in with ChatGPT.
+PROVIDERS = ("anthropic", "openai", "chatgpt")
+MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")
 
 
-def provider_header() -> object:
-    """Which models run a job: "anthropic" (Claude, the default) or "chatgpt" (OpenAI models on the
-    plan of the person signed in with ChatGPT)."""
-    return Header(default=None, alias="X-Model-Provider", max_length=32)
+@dataclass(frozen=True)
+class Agents:
+    """A job's provider, the page's key for it (if it sent one) and the models for its roles (as the
+    page chose them, else the provider's defaults; on a ChatGPT plan the session's choice is used),
+    and whether the request came from another computer."""
+
+    provider: str
+    key: str | None
+    manager_model: str | None
+    worker_model: str | None
+    remote: bool = False
+
+
+def agents_headers(
+    request: Request,
+    x_model_provider: str | None = Header(default=None, max_length=32),
+    x_anthropic_api_key: str | None = Header(default=None, max_length=512),
+    x_openai_api_key: str | None = Header(default=None, max_length=512),
+    x_manager_model: str | None = Header(default=None),
+    x_worker_model: str | None = Header(default=None),
+) -> Agents:
+    """The headers the page sends with each request that starts work on the models. Each vendor's key
+    has its own header and only that vendor's is read; it is used for that job only, held in memory,
+    and never written to disk."""
+    provider = x_model_provider or "anthropic"
+    if provider not in PROVIDERS:
+        raise HTTPException(400, "Unknown model provider.")
+    if provider == "chatgpt":
+        return Agents(provider, None, None, None, _remote(request))
+    models = {}
+    for role, value in (("manager", x_manager_model), ("worker", x_worker_model)):
+        value = (value or "").strip()
+        if value and not MODEL_NAME.fullmatch(value):
+            raise HTTPException(400, f"The {role} model's name is not valid.")
+        models[role] = value or None
+    key = x_anthropic_api_key if provider == "anthropic" else x_openai_api_key
+    return Agents(provider, (key or "").strip() or None, models["manager"], models["worker"], _remote(request))
 
 
 class ModelChoice(BaseModel):
@@ -54,6 +90,28 @@ def _remote(request: Request) -> bool:
         return not ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False  # not an address (the test client); nothing to say it is remote
+
+
+def _loopback_only(request: Request) -> None:
+    """The ChatGPT sign-in is the person's at this computer: other computers may not use or see it."""
+    if _remote(request):
+        raise HTTPException(403, "Your ChatGPT sign-in can be used only in a browser on the computer that runs the server.")
+
+
+def _host_name(host: str) -> str:
+    """The name in a Host header, without its port: "127.0.0.1:8000" -> "127.0.0.1", "[::1]:8000" -> "::1"."""
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host[1:host.index("]")] if "]" in host else host
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+def _is_address(name: str) -> bool:
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
 
 
 def _callback_page(title: str, message: str, status: int) -> HTMLResponse:
@@ -166,15 +224,24 @@ def create_app(
     llm: LLM | None = None,
     sources: Sources | None = None,
     store: Store | None = None,
-    llm_for_key: Callable[[str], LLM] | None = None,
+    llm_for_key: Callable[[str, str, str], LLM] | None = None,
     chatgpt: ChatGPTSession | None = None,
     llm_for_chatgpt: Callable[[ChatGPTSession], LLM] | None = None,
+    llm_for_openai: Callable[[str, str, str], LLM] | None = None,
 ) -> FastAPI:
+    """`llm_for_key` and `llm_for_openai` make the models for a job from (key, manager model, worker
+    model): Claude's with an Anthropic API key, OpenAI's with an OpenAI API key."""
     settings = settings or Settings.from_env()
     store = store or Store(settings.data_dir / "esf.sqlite3")
     store.interrupt_running()
     pipeline = Pipeline(store, llm or ClaudeLLM(settings), sources or Sources(settings), settings)
-    llm_for_key = llm_for_key or (lambda key: ClaudeLLM(settings, anthropic.Anthropic(api_key=key)))
+    llm_for_key = llm_for_key or (
+        lambda key, manager, worker: ClaudeLLM(settings, anthropic.Anthropic(api_key=key), manager, worker)
+    )
+    # An API key takes plain function tools; only plan usage needs them in a namespace.
+    llm_for_openai = llm_for_openai or (
+        lambda key, manager, worker: OpenAILLM(settings, lambda: key, manager, worker, namespaced_tools=False)
+    )
     chatgpt = chatgpt or ChatGPTSession(
         settings.data_dir / "chatgpt.json",
         manager_model=settings.openai_manager_model,
@@ -193,20 +260,42 @@ def create_app(
 
     llm_for_chatgpt = llm_for_chatgpt or plan_llm
 
-    def pipeline_for(api_key: str | None, provider: str | None = None) -> Pipeline:
-        """The models a job runs on: OpenAI's on the signed-in ChatGPT plan; or Claude, with a key from
-        the page, or without one the server's own credentials."""
-        if (provider or "anthropic") == "chatgpt":
-            status = chatgpt.state()["status"]
-            if status != "connected":
-                again = status == "reauth_required"
-                raise HTTPException(409, "Your ChatGPT sign-in has expired. Sign in with ChatGPT again, in Setup."
-                                    if again else "Sign in with ChatGPT first, in Setup.")
+    def pipeline_for(agents: Agents) -> Pipeline:
+        """The models a job runs on: OpenAI's on the signed-in ChatGPT plan; OpenAI's with a key from
+        the page or the server's; or Claude, with a key from the page, or without one the server's own
+        credentials. A key provider's models are the page's choice, else the configured ones."""
+        if agents.provider == "chatgpt":
+            if agents.remote:
+                raise HTTPException(403, "Your ChatGPT plan can be used only from the computer that runs the server.")
+            chosen = chatgpt.state()
+            if chosen["status"] != "connected":
+                again = chosen["status"] == "reauth_required"
+                raise HTTPException(409, "Your ChatGPT sign-in has expired. Sign in with ChatGPT again, on the Agents page."
+                                    if again else "Sign in with ChatGPT first, on the Agents page.")
+            # Every call would fail on a model the plan does not offer.
+            offered = {model["slug"] for model in chosen["models"]}
+            for role, label in (("manager", "manager"), ("worker", "workers'")):
+                if offered and chosen[f"{role}_model"] not in offered:
+                    raise HTTPException(409, f"Your ChatGPT plan does not offer {chosen[f'{role}_model']}. "
+                                        f"Choose the {label} model on the Agents page.")
             return pipeline.using(llm_for_chatgpt(chatgpt))
-        if provider not in (None, "anthropic"):
-            raise HTTPException(400, "Unknown model provider.")
-        api_key = (api_key or "").strip()
-        return pipeline.using(llm_for_key(api_key)) if api_key else pipeline
+        if agents.provider == "openai":
+            key = agents.key or os.environ.get("OPENAI_API_KEY", "").strip()
+            if not key:
+                raise HTTPException(409, "Enter your OpenAI API key first, on the Agents page.")
+            manager = agents.manager_model or settings.openai_manager_model
+            return pipeline.using(llm_for_openai(key, manager, agents.worker_model or settings.openai_worker_model))
+        manager = agents.manager_model or settings.manager_model
+        worker = agents.worker_model or settings.worker_model
+        if agents.key:
+            return pipeline.using(llm_for_key(agents.key, manager, worker))
+        if (manager, worker) == (settings.manager_model, settings.worker_model):
+            return pipeline
+        # The server's own credentials on other models. A stand-in for Claude (the tests') runs as it is.
+        if isinstance(pipeline.llm, ClaudeLLM):
+            return pipeline.using(ClaudeLLM(settings, pipeline.llm.client, manager, worker))
+        return pipeline
+
     jobs = ThreadPoolExecutor(max_workers=4, thread_name_prefix="esf-job")
     busy: set[str] = set()
     busy_lock = threading.Lock()
@@ -215,6 +304,31 @@ def create_app(
     app.state.pipeline = pipeline
     app.state.store = store
     app.state.chatgpt = chatgpt
+    allowed_hosts = {"localhost", *(name.lower() for name in settings.allowed_hosts)}
+
+    @app.middleware("http")
+    async def own_pages_only(request: Request, call_next: Callable) -> Response:
+        """The server answers only to its address, localhost or a name in ESF_ALLOWED_HOSTS, so a page
+        that rebinds its own DNS name to this computer can't reach it. A request that changes
+        something must come from the server's own page: another site may send a form post, which
+        needs no CORS preflight, but its browser marks it as cross-site or gives its own origin."""
+        host = request.headers.get("host", "")
+        name = _host_name(host)
+        if not (name in allowed_hosts or _is_address(name)):
+            return JSONResponse({"detail": "This server answers only to its address or localhost; ESF_ALLOWED_HOSTS lists other names."}, status_code=403)
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            origin = request.headers.get("origin")
+            if request.headers.get("sec-fetch-site") in ("cross-site", "same-site") or (
+                origin is not None and origin.lower() != f"{request.url.scheme}://{host}".lower()
+            ):
+                return JSONResponse({"detail": "Only this server's own page may make changes."}, status_code=403)
+        return await call_next(request)
+
+    @app.exception_handler(ChatGPTError)
+    async def chatgpt_failed(request: Request, exc: ChatGPTError) -> JSONResponse:
+        """A step of the sign-in that failed (the sign-in service unreachable, the settings not saved), with its message."""
+        status = 503 if exc.retryable else 500 if exc.code == "storage_failed" else 502
+        return JSONResponse({"detail": str(exc)}, status_code=status)
 
     def submit(key: str, fn: Callable[[], None]) -> None:
         with busy_lock:
@@ -250,8 +364,10 @@ def create_app(
             "worker_model": settings.worker_model,
             "openai_manager_model": settings.openai_manager_model,
             "openai_worker_model": settings.openai_worker_model,
+            "model_choices": {provider: list(models) for provider, models in MODEL_CHOICES.items()},
             "contact_email_set": bool(settings.contact_email),
             "server_has_key": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
+            "server_has_openai_key": bool(os.environ.get("OPENAI_API_KEY", "").strip()),
             "max_candidates": settings.max_candidates,
             "max_extractions": settings.max_extractions,
         }
@@ -260,7 +376,10 @@ def create_app(
 
     @app.get("/api/chatgpt")
     def chatgpt_state(request: Request, refresh: bool = False) -> dict:
-        """The sign-in, the plan's models and the chosen ones; never a token."""
+        """The sign-in, the plan's models and the chosen ones; never a token. Another computer learns
+        only whether someone is signed in."""
+        if _remote(request):
+            return {"status": chatgpt.state()["status"], "remote": True}
         if refresh and chatgpt.state()["status"] == "connected":
             try:
                 chatgpt.refresh_models()
@@ -285,17 +404,26 @@ def create_app(
         return _callback_page("Signed in with ChatGPT", "Return to Effect Size Finder; this tab can be closed.", 200)
 
     @app.put("/api/chatgpt/models")
-    def chatgpt_models(body: ModelChoice) -> dict:
+    def chatgpt_models(request: Request, body: ModelChoice) -> dict:
+        _loopback_only(request)
         try:
             chatgpt.set_models(body.manager_model, body.worker_model)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        return chatgpt.state()
+        return {**chatgpt.state(), "remote": False}
+
+    @app.post("/api/chatgpt/cancel")
+    def chatgpt_cancel(request: Request) -> dict:
+        """Gives up the sign-ins waiting for ChatGPT to send the browser back."""
+        _loopback_only(request)
+        chatgpt.cancel()
+        return {**chatgpt.state(), "remote": False}
 
     @app.post("/api/chatgpt/sign-out")
-    def chatgpt_sign_out() -> dict:
+    def chatgpt_sign_out(request: Request) -> dict:
+        _loopback_only(request)
         chatgpt.sign_out()
-        return chatgpt.state()
+        return {**chatgpt.state(), "remote": False}
 
     # -- projects -------------------------------------------------------------------------------
 
@@ -304,10 +432,8 @@ def create_app(
         return store.projects()
 
     @app.post("/api/projects", status_code=201)
-    def create_project(
-        body: NewProject, x_anthropic_api_key: str | None = key_header(), x_model_provider: str | None = provider_header()
-    ) -> dict:
-        job = pipeline_for(x_anthropic_api_key, x_model_provider)
+    def create_project(body: NewProject, agents: Agents = Depends(agents_headers)) -> dict:
+        job = pipeline_for(agents)
         project_id = store.create_project(body.paragraph.strip())
         store.update_project(project_id, status="reading")
         submit(project_id, lambda: job.read_spec(project_id))
@@ -330,7 +456,7 @@ def create_app(
         return {"ok": True}
 
     @app.post("/api/projects/{project_id}/run", status_code=202)
-    def run(project_id: str, x_anthropic_api_key: str | None = key_header(), x_model_provider: str | None = provider_header()) -> dict:
+    def run(project_id: str, agents: Agents = Depends(agents_headers)) -> dict:
         project = get_project(project_id)
         if not project["spec"]:
             raise HTTPException(400, "Read the problem first.")
@@ -338,19 +464,19 @@ def create_app(
             raise HTTPException(409, "This project is already running.")
         if (project.get("summary") or {}).get("status") == "running":
             raise HTTPException(409, "Wait until the summary is written.")
-        job = pipeline_for(x_anthropic_api_key, x_model_provider)
+        job = pipeline_for(agents)
         store.update_project(project_id, status="searching")
         submit(project_id, lambda: job.run(project_id))
         return {"ok": True}
 
     @app.post("/api/projects/{project_id}/summary", status_code=202)
-    def summarize(project_id: str, x_anthropic_api_key: str | None = key_header(), x_model_provider: str | None = provider_header()) -> dict:
+    def summarize(project_id: str, agents: Agents = Depends(agents_headers)) -> dict:
         project = get_project(project_id)
         if project["status"] in RUNNING:
             raise HTTPException(409, "Wait until the search finishes.")
         if (project.get("summary") or {}).get("status") == "running":
             raise HTTPException(409, "The summary is already being written.")
-        job = pipeline_for(x_anthropic_api_key, x_model_provider)
+        job = pipeline_for(agents)
         store.update_project(project_id, summary={"status": "running", "previous": previous_summary(project.get("summary"))})
         submit(f"summary-{project_id}", lambda: job.summarize(project_id))
         return {"ok": True}
@@ -367,15 +493,13 @@ def create_app(
         return out
 
     @app.post("/api/projects/{project_id}/papers/{paper_id}/extract", status_code=202)
-    def extract(
-        project_id: str, paper_id: int, x_anthropic_api_key: str | None = key_header(), x_model_provider: str | None = provider_header()
-    ) -> dict:
+    def extract(project_id: str, paper_id: int, agents: Agents = Depends(agents_headers)) -> dict:
         project = get_project(project_id)
         get_paper(project_id, paper_id)
         if project["status"] in RUNNING:
             raise HTTPException(409, "Wait until the current run finishes.")
         spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
-        job = pipeline_for(x_anthropic_api_key, x_model_provider)
+        job = pipeline_for(agents)
         store.clear_decisions(paper_id)
         store.update_paper(paper_id, status="fetching", error=None)
         submit(f"paper-{paper_id}", lambda: job.extract_paper(project_id, spec, paper_id))

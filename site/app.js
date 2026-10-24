@@ -3,9 +3,11 @@
 // server of ours.
 
 import { Activity, liveTasks, short } from './lib/activity.js';
-import { Claude, looksLikeAnthropicKey, MODELS } from './lib/claude.js';
-import { looksLikeOpenAIKey, OPENAI_MODELS, OpenAI } from './lib/openai.js';
-import { MODEL_CHOICES, modelLabel, PROVIDERS as PROVIDER_INFO, ROLE_INFO, roleNames, roleOf, whoDid } from './lib/providers.js';
+import { Claude, MODELS } from './lib/claude.js';
+import { OPENAI_MODELS, OpenAI } from './lib/openai.js';
+import {
+  keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS as PROVIDER_INFO, ROLE_INFO, roleNames, roleOf, whoDid,
+} from './lib/providers.js';
 import { csvOf, download, exportRows, LOG_COLUMNS, logRows, PAPER, toCsv } from './lib/export.js';
 import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
@@ -42,12 +44,10 @@ const LEVEL_SHORT = {
 const PROVIDERS = {
   anthropic: {
     ...PROVIDER_INFO.anthropic, defaults: MODELS, roles: ['manager', 'fetcher', 'worker'], storage: 'esf-anthropic-api-key',
-    looksLike: looksLikeAnthropicKey, wrongKey: "This doesn't look like an Anthropic API key: those start with sk-ant-.",
     canFetch: true, client: (apiKey, models) => new Claude({ apiKey, models }),
   },
   openai: {
     ...PROVIDER_INFO.openai, defaults: OPENAI_MODELS, roles: ['manager', 'worker'], storage: 'esf-openai-api-key',
-    looksLike: looksLikeOpenAIKey, wrongKey: "This doesn't look like an OpenAI API key: those start with sk-.",
     canFetch: false, client: (apiKey, models) => new OpenAI({ apiKey, models }),
   },
 };
@@ -68,11 +68,30 @@ function chosenModels(name = state.provider) {
 }
 const names = () => roleNames(chosenModels());
 const client = () => provider().client(apiKey(), chosenModels());
-// The agents of the chosen provider: key (a role, see providers.js), name, role, what it does.
+const ROLE_ORDER = ['manager', 'fetcher', 'worker', 'code'];
+
+// The roles' names for the open search: the models that served each role in it (its usage), so past
+// work is credited to the models that did it; the chosen provider's for roles it has not used yet.
+function searchNames() {
+  const n = { ...names() };
+  const seen = {};
+  for (const u of state.id ? state.usage : []) {
+    const role = STEP_AGENT[u.step];
+    if (role && u.model) (seen[role] ||= new Set()).add(modelLabel(u.model));
+  }
+  for (const [role, labels] of Object.entries(seen)) n[role] = [...labels].join(', ');
+  return n;
+}
+
+// The agents: key (a role, see providers.js), name, role, what it does. The chosen provider's roles,
+// and any other role the open search used.
 const agents = () => {
-  const n = names();
-  return [...provider().roles, 'code'].map((role) => [role, n[role], ROLE_TITLES[role], ROLE_INFO[role][1]]);
+  const n = searchNames();
+  const roles = new Set([...provider().roles, 'code', ...ROLE_ORDER.filter((role) => role !== 'code' && n[role] && n[role] !== names()[role])]);
+  return ROLE_ORDER.filter((role) => roles.has(role) && n[role]).map((role) => [role, n[role], ROLE_TITLES[role], ROLE_INFO[role][1]]);
 };
+// Whether the chosen provider has a key to send: never one that is surely another (keyProblem).
+const keyReady = () => Boolean(apiKey()) && !keyProblem(state.provider, apiKey())?.wrong;
 const ACTIVITY_OPEN = 'esf-activity-open';
 const EMAIL = 'esf-contact-email';
 const NCBI_KEY = 'esf-ncbi-api-key';
@@ -204,7 +223,7 @@ function showProvider() {
   const chosen = provider();
   const n = names();
   $('#agents-label').textContent = chosen.label;
-  $('#agents-toggle').dataset.missing = String(!apiKey());
+  $('#agents-toggle').dataset.missing = String(!keyReady());
   $('#api-key-label').textContent = chosen.keyName;
   $('#api-key').placeholder = chosen.placeholder;
   $('#provider-note').hidden = state.provider !== 'openai';
@@ -214,7 +233,7 @@ function showProvider() {
   const line = [`${n.manager} plans and reviews`, n.fetcher && `${n.fetcher} fetches`, `${n.worker} screens and reads`].filter(Boolean);
   $('#models').textContent = line.join(' · ');
   $('#agents-summary').replaceChildren(h('strong', {}, `${chosen.label}: `), `${line.join(', ')}.`,
-    apiKey() ? '' : ` No ${chosen.keyName} yet.`);
+    keyReady() ? '' : ` No ${chosen.keyName} yet.`);
   showAgentsPage();
 }
 
@@ -231,7 +250,8 @@ function showAgentsPage() {
     card.querySelector('input').checked = name === state.provider;
   }
   const models = chosenModels();
-  $('#roles').replaceChildren(...agents().map(([key, name, role, does]) => h('li', { 'data-agent': key },
+  const n = names();
+  $('#roles').replaceChildren(...[...provider().roles, 'code'].map((key) => [key, n[key], ROLE_TITLES[key], ROLE_INFO[key][1]]).map(([key, name, role, does]) => h('li', { 'data-agent': key },
     h('strong', {}, `${name} · ${role}`), does,
     key !== 'code' && h('select', {
       id: `model-${key}`, 'aria-label': `Model for the ${role}`, onchange: (event) => chooseModel(key, event.target.value),
@@ -259,12 +279,13 @@ function forgetKey() {
 
 function showKeyStatus() {
   $('.keybox').dataset.missing = 'false';
-  $('#agents-toggle').dataset.missing = String(!apiKey());
+  $('#agents-toggle').dataset.missing = String(!keyReady());
   const status = $('#key-status');
   const chosen = provider();
-  if (apiKey() && !chosen.looksLike(apiKey())) {
+  const problem = keyProblem(state.provider, apiKey());
+  if (problem) {
     $('.keybox').dataset.missing = 'true';
-    status.textContent = `${chosen.wrongKey} An NCBI key goes in the NCBI API key box below.`;
+    status.textContent = problem.text;
   } else if (apiKey()) {
     status.textContent = $('#remember-key').checked
       ? `Remembered on this browser. It is sent only to ${chosen.vendor}, straight from this page.`
@@ -297,12 +318,13 @@ async function checkKey() {
   }
 }
 
-// The jobs need a key; without one, the page opens the Agents page and says so.
+// The jobs need a key; without one, the page opens the Agents page and says so. A key that belongs to
+// the other vendor (or an NCBI key) is not sent anywhere.
 function haveKey() {
-  if (apiKey()) return true;
+  if (keyReady()) return true;
   setAgentsOpen(true);
   $('.keybox').dataset.missing = 'true';
-  $('#key-status').textContent = `Enter your ${provider().keyName} first.`;
+  $('#key-status').textContent = apiKey() ? keyProblem(state.provider, apiKey()).text : `Enter your ${provider().keyName} first.`;
   $('#api-key').focus();
   return false;
 }
@@ -626,7 +648,9 @@ function renderActivity() {
   $('#activity-empty').hidden = Boolean(state.id);
   const counts = { all: state.events.length };
   for (const e of state.events) counts[e.agent] = (counts[e.agent] || 0) + 1;
-  $('#activity-filter').replaceChildren(...(state.id ? [['all', 'All'], ...agents().map(([key, name]) => [key, name])] : [])
+  const shownAgents = agents();
+  if (!shownAgents.some(([key]) => key === state.filter)) state.filter = 'all'; // e.g. the fetcher, after choosing OpenAI
+  $('#activity-filter').replaceChildren(...(state.id ? [['all', 'All'], ...shownAgents.map(([key, name]) => [key, name])] : [])
     .map(([key, label]) => h('button', {
       type: 'button', 'aria-pressed': String(state.filter === key), 'data-agent': key === 'all' ? null : key,
       onclick: () => { state.filter = key; renderActivity(); },
@@ -655,7 +679,7 @@ async function exportLog(format) {
   const body = {
     search: { id, created_at: state.project.created_at, paragraph: state.project.paragraph },
     exported_at: new Date().toISOString(),
-    agents: names(),
+    agents: searchNames(),
     events: events.map(({ project_id: _, ...e }) => ({ ...e, paper_title: e.paper_title || titles.get(e.paper_id) || null })),
   };
   download(`${name}.json`, JSON.stringify(body, null, 2), 'application/json');
@@ -667,7 +691,7 @@ function timelineItem(e) {
   const [first, ...rest] = (e.phase === 'error' ? `Failed: ${e.detail}` : e.detail || '').split('\n');
   return h('li', { 'data-agent': e.agent, 'data-phase': e.phase },
     h('span', { class: 'when' }, new Date(e.at).toLocaleTimeString()),
-    h('span', { class: 'who' }, whoDid(e, names())),
+    h('span', { class: 'who' }, whoDid(e, searchNames())),
     e.ms != null && h('span', { class: 'when' }, ` · ${duration(e.ms)}`),
     e.usage && h('span', { class: 'when' }, ` · ${tokens(e.usage.input)} in · ${tokens(e.usage.output)} out`),
     h('span', { class: 'what' }, e.text),
@@ -774,7 +798,7 @@ function renderProgress(project) {
   state.available.progress = Boolean(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
   if (!state.available.progress) return;
 
-  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running, fetcher: provider().canFetch, names: names() }));
+  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running, fetcher: provider().canFetch || state.papers.some((p) => roleOf(p.fetched_by) === 'fetcher'), names: searchNames() }));
 
   const progress = project.progress || {};
   const bar = $('#progress');
@@ -955,8 +979,8 @@ function writeSummary() {
   refresh();
 }
 
-// The model that made a paper's extraction, or, for one saved without it, the role's current name.
-const extractor = (paper) => (paper.extracted_model ? modelLabel(paper.extracted_model) : names()[paper.extracted_by] || paper.extracted_by);
+// The model that made a paper's extraction; one saved without it was made by Claude, the only provider then.
+const extractor = (paper) => modelLabel(paper.extracted_model || LEGACY_MODELS[paper.extracted_by] || paper.extracted_by);
 
 function badge(text, kind = '') {
   return h('span', { class: `badge ${kind}`.trim() }, text);
@@ -1011,13 +1035,14 @@ function paperCard(paper, trials) {
       paper.source !== 'clinicaltrials' && LEVEL_SHORT[paper.found_in?.[0]]
         && h('span', { class: 'badge', title: (paper.found_by || []).join('\n') }, LEVEL_SHORT[paper.found_in[0]]),
       paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind),
-      roleOf(paper.fetched_by) === 'fetcher' && badge(`Fetched by ${names().fetcher || 'Claude'}`),
+      roleOf(paper.fetched_by) === 'fetcher' && badge(`Fetched by ${searchNames().fetcher || 'Claude'}`),
       paper.extracted_by === 'manager' && badge(`Reviewed by ${extractor(paper)}`, 'accent'),
       paper.extracted_by === 'worker' && badge(`Extracted by ${extractor(paper)}`),
       paper.escalation?.audit && badge('Audit sample')),
     paper.fulltext_note && h('p', { class: 'reason' }, paper.fulltext_note),
     extracted && screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
-    reasons.length > 0 && h('p', { class: 'reason' }, `Why ${paper.extracted_by === 'manager' ? extractor(paper) : names().manager} reviewed it: ${reasons.join('; ')}`),
+    reasons.length > 0 && h('p', { class: 'reason' }, paper.extracted_by === 'manager'
+      ? `Why ${extractor(paper)} reviewed it: ${reasons.join('; ')}` : `Flagged for review: ${reasons.join('; ')}`),
     differs && h('p', { class: 'reason' }, `Differs from the plan: ${paper.extraction.mismatch_reasons.join('; ')}`),
     extracted && paper.extraction.notes && h('p', { class: 'reason' }, `Notes: ${paper.extraction.notes}`),
     extracted && !busy && paper.source !== 'clinicaltrials' && h('div', { class: 'paper-actions' },
@@ -1205,7 +1230,7 @@ async function start() {
   // A link to a search opens the search (the Agents button says a key is needed).
   state.step = apiKey() ? 'problem' : 'setup';
   renderTabs();
-  if (!apiKey() && !location.hash.slice(1)) setAgentsOpen(true);
+  if (!keyReady() && !location.hash.slice(1)) setAgentsOpen(true);
   await store.interruptRunning();
   await loadProjects();
   const id = location.hash.slice(1);

@@ -173,7 +173,7 @@ function details(key, { project, papers, state, progress, log, names }) {
       ]),
       facts(
         ...kinds.map(([k, label]) => [count((p) => p.fulltext_kind === k), label]).filter(([n]) => n).map(([n, label]) => `${label}: ${number(n)}`),
-        fetched > 0 && `${plural(fetched, 'document')} downloaded by ${names.fetcher || 'Claude'}`,
+        fetched > 0 && `${plural(fetched, 'document')} downloaded by ${names.given.fetcher || 'Claude'}`,
         redone > 0 && `${plural(redone, 'paper')} re-extracted by ${names.manager}`,
       ),
     ];
@@ -205,7 +205,8 @@ const STATE_TEXT = { done: 'Done', active: 'Running', stopped: 'Stopped here', p
 // what the browser may not (the browser edition with Claude; the local server downloads by itself);
 // `names` are the roles' names, e.g. { manager: 'Opus 5.5', worker: 'Haiku 5.5', ... } (providers.js).
 export function searchMap({ project, papers, running, fetcher = false, names = {} }) {
-  names = { ...ROLE_NAMES, ...names };
+  const given = names;
+  names = { ...ROLE_NAMES, ...names, given };
   const states = stageStates(project, running);
   const progress = project.progress || {};
   const log = project.search_log || [];

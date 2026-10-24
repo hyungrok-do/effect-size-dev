@@ -8,6 +8,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# The models each key provider's roles can use, best first: the same lists as MODEL_CHOICES in
+# site/lib/providers.js (tests/test_server.py checks). A ChatGPT plan lists its own.
+MODEL_CHOICES: dict[str, list[str]] = {
+    "anthropic": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+    "openai": ["gpt-6.1-sol", "gpt-6-luna"],
+}
+
 
 def _float(name: str, default: float) -> float:
     value = os.environ.get(name)
@@ -21,14 +28,19 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    # Opus plans and adjudicates; Haiku screens and extracts.
+    # Opus plans and adjudicates; Haiku screens and extracts. These are the defaults: the page can
+    # pick others for a job.
     manager_model: str = "claude-opus-5-5"
     worker_model: str = "claude-haiku-5-5"
-    # The same roles when the work runs on a ChatGPT plan; the page can pick others from the plan's models.
+    # The same roles on OpenAI's models, with an API key or on a ChatGPT plan (whose own models the
+    # page can pick from).
     openai_manager_model: str = "gpt-6.1-sol"
     openai_worker_model: str = "gpt-6-luna"
     data_dir: Path = REPO_ROOT / "data"
     web_dir: Path = REPO_ROOT / "web"
+    # Host names the server answers to besides its addresses and localhost (ESF_ALLOWED_HOSTS,
+    # comma-separated), for serving it under a name of its own.
+    allowed_hosts: tuple[str, ...] = ()
     # NCBI and Unpaywall ask callers to identify themselves; Unpaywall requires it.
     contact_email: str | None = None
     ncbi_api_key: str | None = None
@@ -53,6 +65,7 @@ class Settings:
             openai_worker_model=os.environ.get("ESF_OPENAI_WORKER_MODEL", cls.openai_worker_model),
             data_dir=Path(os.environ.get("ESF_DATA_DIR", str(cls.data_dir))),
             web_dir=Path(os.environ.get("ESF_WEB_DIR", str(cls.web_dir))),
+            allowed_hosts=tuple(name.strip() for name in os.environ.get("ESF_ALLOWED_HOSTS", "").split(",") if name.strip()),
             contact_email=os.environ.get("ESF_CONTACT_EMAIL") or None,
             ncbi_api_key=os.environ.get("NCBI_API_KEY") or None,
             audit_fraction=_float("ESF_AUDIT_FRACTION", cls.audit_fraction),

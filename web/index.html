@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Effect Size Finder</title>
-<meta name="description" content="Describe a planned study; Claude searches PubMed, Europe PMC and ClinicalTrials.gov, extracts the statistics papers report, each with its quote, for you to include or exclude, and summarizes what the papers you kept report.">
+<meta name="description" content="Describe a planned study; AI agents, on Claude or OpenAI's models, search PubMed, Europe PMC and ClinicalTrials.gov, extract the statistics papers report, each with its quote, for you to include or exclude, and summarize what the papers you kept report.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232457c5' stroke-width='2.5' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M21 21l-4.3-4.3'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/lib/spec-panel.css">
 <link rel="stylesheet" href="/lib/review.css">
@@ -94,11 +94,19 @@
   }
 
   .top {
-    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px;
-    padding: 14px 24px; background: var(--surface); border-bottom: 1px solid var(--line);
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px;
+    padding: 12px 24px; background: var(--surface); border-bottom: 1px solid var(--line);
   }
   .brand h1 { font-size: 18px; }
+  .top-side { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 14px; min-width: 0; }
   .status { margin: 0; font-size: 13px; color: var(--muted); }
+  .agents-toggle { white-space: nowrap; }
+  .agents-toggle::before {
+    content: ""; display: inline-block; width: 8px; height: 8px; margin: 0 8px 1px 0; border-radius: 50%; background: var(--ok);
+  }
+  .agents-toggle[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent); }
+  .agents-toggle[data-missing="true"] { color: var(--error); border-color: var(--error); }
+  .agents-toggle[data-missing="true"]::before { background: var(--error); }
 
   .intro { max-width: 1240px; margin: 0 auto; padding: 28px 24px 4px; }
   .intro h2 { font-size: 24px; letter-spacing: -0.01em; }
@@ -144,13 +152,41 @@
   .keybox .hint { margin: 6px 0 0; }
   .keybox[data-missing="true"] { border-color: var(--error); }
   .keybox[data-missing="true"] .hint { color: var(--error); }
-  .provider { margin: 14px 0 0; padding: 0; border: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; }
-  .provider legend { float: left; font-size: 14px; font-weight: 600; margin-right: 4px; padding: 0; }
-  .provider .check { color: var(--ink); }
-  .provider .check .hint { color: var(--muted); font-size: 13px; }
-  .model-row { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; }
-  .model-row label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); min-width: 200px; }
-  .model-row select { width: auto; min-width: 200px; }
+
+  /* The Agents page: shown instead of the intro and the searches while it is open. */
+  #agents-page { width: min(960px, calc(100% - 48px)); margin: 24px auto 40px; }
+  #agents-title:focus { outline: none; }
+  .agents-back { margin: 0 0 14px; }
+  .provider-cards { margin: 20px 0 0; }
+  .provider-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .provider-card {
+    display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding: 14px 16px; cursor: pointer;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 12px;
+  }
+  .provider-card:hover { border-color: var(--field-line); }
+  .provider-card:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .provider-card:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .provider-card input { flex: none; margin: 4px 0 0; accent-color: var(--accent); }
+  .provider-card input:focus-visible { outline: none; }
+  .provider-body { display: grid; gap: 3px; min-width: 0; }
+  .provider-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+  .provider-label { font-size: 16px; }
+  .provider-billing { font-size: 13.5px; color: var(--ink-2); }
+  .provider-models { font-size: 13px; color: var(--muted); }
+  .provider-models span { white-space: nowrap; }
+  .part-title {
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 22px 0 8px;
+  }
+  .roles { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 12px; }
+  .role {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(200px, 260px); align-items: center; gap: 8px 18px;
+    padding: 12px 16px; border-top: 1px solid var(--line);
+  }
+  .role:first-child { border-top: 0; }
+  .role-name { display: block; font-weight: 600; }
+  .role-does { display: block; font-size: 14px; color: var(--ink-2); }
+  .role-model { font-size: 14px; color: var(--muted); }
+  #roles-note { margin: 8px 0 0; }
 
   textarea, input[type="text"], input[type="password"], select {
     width: 100%; padding: 8px 10px; border: 1px solid var(--field-line); border-radius: 8px;
@@ -244,6 +280,8 @@
 
   @media (max-width: 800px) {
     .top { padding: 12px 16px; }
+    .top-side { justify-content: flex-start; }
+    #agents-page { width: calc(100% - 32px); margin: 16px auto 32px; }
     .intro { padding: 20px 16px 0; }
     .intro h2 { font-size: 20px; }
     .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 16px; }
@@ -252,17 +290,23 @@
     .card { padding: 16px; }
     footer { padding: 0 16px 24px; }
   }
+  @media (max-width: 720px) {
+    .provider-grid, .role { grid-template-columns: minmax(0, 1fr); }
+  }
 </style>
 </head>
 <body>
 <header class="top">
   <div class="brand"><h1>Effect Size Finder</h1></div>
-  <p id="models" class="status" aria-live="polite"></p>
+  <div class="top-side">
+    <p id="models" class="status" aria-live="polite"></p>
+    <button id="agents-toggle" type="button" class="secondary small agents-toggle" aria-controls="agents-page" aria-expanded="false">Agents: Claude API</button>
+  </div>
 </header>
 
-<section class="intro" aria-labelledby="intro-title">
+<section id="intro" class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published effect sizes a study plan needs</h2>
-  <p class="lede">Describe the study you are planning. Claude, or OpenAI's models on your ChatGPT plan, searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and <span data-name="manager">Opus 5.5</span> summarizes what the papers you kept report.</p>
+  <p class="lede">Describe the study you are planning. AI agents, on Claude or on OpenAI's models as you choose under Agents, search PubMed, Europe PMC and ClinicalTrials.gov, read the papers they can open, and pull out the statistics the papers report, each with the sentence or table row it came from. You decide what to include, and <span data-name="manager">Opus 5.5</span> summarizes what the papers you kept report.</p>
   <ul class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
@@ -278,11 +322,43 @@
     </li>
   </ul>
   <p class="notice">Your paragraph and the text of the papers are sent to <span data-name="vendor">Anthropic</span>'s API to be read. Don't paste anything you can't share with it.</p>
-  <fieldset class="provider">
-    <legend>Models</legend>
-    <label class="check"><input type="radio" name="provider" value="anthropic" checked> Claude <span class="hint">Anthropic API key</span></label>
-    <label class="check"><input type="radio" name="provider" value="chatgpt"> OpenAI <span class="hint">your ChatGPT plan, no key</span></label>
+</section>
+
+<section id="agents-page" class="card" hidden aria-labelledby="agents-title">
+  <button id="agents-back" type="button" class="secondary small agents-back">← Back</button>
+  <h2 id="agents-title" tabindex="-1">Agents</h2>
+  <p class="summary">The agents do the reading: a manager model plans the search, reviews what fails a check and writes the summary; worker models screen every record and extract every paper's statistics, each with its quote; and code runs the searches and checks every quote against the paper. They can run three ways: on Claude with an Anthropic API key, on OpenAI's models with an OpenAI API key, or on OpenAI's models through your ChatGPT Plus or Pro plan, with no key.</p>
+
+  <fieldset class="provider-cards">
+    <legend>How the agents run</legend>
+    <div class="provider-grid">
+      <label class="provider-card">
+        <input type="radio" name="provider" value="anthropic">
+        <span class="provider-body">
+          <span class="provider-head"><strong class="provider-label">Claude API</strong><span class="badge ok provider-ready" hidden>Ready</span></span>
+          <span class="provider-billing"></span>
+          <span class="provider-models"></span>
+        </span>
+      </label>
+      <label class="provider-card">
+        <input type="radio" name="provider" value="openai">
+        <span class="provider-body">
+          <span class="provider-head"><strong class="provider-label">OpenAI API</strong><span class="badge ok provider-ready" hidden>Ready</span></span>
+          <span class="provider-billing"></span>
+          <span class="provider-models"></span>
+        </span>
+      </label>
+      <label class="provider-card">
+        <input type="radio" name="provider" value="chatgpt">
+        <span class="provider-body">
+          <span class="provider-head"><strong class="provider-label">OpenAI subscription</strong><span class="badge ok provider-ready" hidden>Ready</span></span>
+          <span class="provider-billing"></span>
+          <span class="provider-models"></span>
+        </span>
+      </label>
+    </div>
   </fieldset>
+
   <div class="keybox" id="anthropic-box">
     <label for="api-key">Anthropic API key</label>
     <div class="key-row">
@@ -292,21 +368,49 @@
     </div>
     <p id="key-status" class="hint" aria-live="polite"></p>
   </div>
+  <div class="keybox" id="openai-box" hidden>
+    <label for="openai-key">OpenAI API key</label>
+    <div class="key-row">
+      <input id="openai-key" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true">
+      <label class="check"><input id="remember-openai-key" type="checkbox"> Remember on this browser</label>
+      <button id="forget-openai-key" type="button" class="secondary small">Forget</button>
+    </div>
+    <p id="openai-key-status" class="hint" aria-live="polite"></p>
+  </div>
   <div class="keybox" id="chatgpt-box" hidden>
     <label>ChatGPT plan</label>
     <div class="key-row">
       <button id="chatgpt-sign-in" type="button" class="primary small">Sign in with ChatGPT</button>
+      <button id="chatgpt-cancel" type="button" class="secondary small" hidden>Cancel</button>
       <button id="chatgpt-sign-out" type="button" class="secondary small" hidden>Sign out</button>
     </div>
     <p id="chatgpt-status" class="hint" aria-live="polite"></p>
-    <div id="chatgpt-models" class="model-row" hidden>
-      <label>Manager <select id="chatgpt-manager"></select></label>
-      <label>Workers <select id="chatgpt-worker"></select></label>
-    </div>
+  </div>
+
+  <h3 class="part-title">Who does what</h3>
+  <ul class="roles">
+    <li class="role" data-role="manager">
+      <span><span class="role-name">Manager</span><span class="role-does"></span></span>
+      <select id="model-manager" aria-label="Manager model"></select>
+    </li>
+    <li class="role" data-role="worker">
+      <span><span class="role-name">Workers</span><span class="role-does"></span></span>
+      <select id="model-worker" aria-label="Workers' model"></select>
+    </li>
+    <li class="role" data-role="code">
+      <span><span class="role-name">Code</span><span class="role-does"></span></span>
+      <span class="role-model">No model: runs on this server</span>
+    </li>
+  </ul>
+  <p id="roles-note" class="hint"></p>
+
+  <p id="agents-privacy" class="notice"></p>
+  <div class="actions">
+    <button id="agents-done" type="button" class="primary">Done</button>
   </div>
 </section>
 
-<div class="layout">
+<div id="searches" class="layout">
   <aside class="projects" aria-labelledby="projects-title">
     <button id="new-project" type="button" class="secondary new">New search</button>
     <h2 id="projects-title">Your searches</h2>

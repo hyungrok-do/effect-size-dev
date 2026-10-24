@@ -279,3 +279,48 @@ def test_a_whole_search_runs_on_openai_models(tmp_path):
     pipeline.check_overlap(project_id)
     pipeline.summarize(project_id)
     assert store.project(project_id)["summary"]["status"] == "done"
+
+
+def test_a_used_up_plan_stops_the_run(tmp_path):
+    """When the plan's share runs out, the run stops and says so, instead of sending a request for every
+    remaining record and finishing as if nothing happened."""
+    settings = Settings(data_dir=tmp_path, contact_email="test@example.com", audit_fraction=0.0, worker_concurrency=1)
+    store = Store(tmp_path / "test.sqlite3")
+    api = FakeOpenAI()
+    screened = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        if body.get("text", {}).get("format", {}).get("name") == "ScreenDecision":
+            screened.append(body)
+            if len(screened) > 2:
+                return httpx.Response(429, json={"error": {"code": "subscription_sharing_usage_limit_exceeded", "message": "limit"}})
+        return api(request)
+
+    llm = OpenAILLM(settings, lambda: "plan-token", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    llm.responses.sleep = lambda seconds: None
+    pipeline = Pipeline(store, llm, Sources(settings, client=mock_client(LiteratureAPIs())), settings)
+    project_id = store.create_project("We plan a randomized trial of a mindfulness app versus waitlist for PHQ-9 at 12 weeks.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    project = store.project(project_id)
+    assert project["status"] == "error" and "ChatGPT Settings" in project["error"]
+    assert len(screened) == 3  # one refused request, then no more
+    statuses = [p["status"] for p in store.papers(project_id)]
+    assert statuses.count("candidate") == len(statuses) - 2 and "unsure" not in statuses
+
+
+def test_a_model_without_reasoning_levels_gets_no_reasoning_setting():
+    api = Scripted([answer(SCREEN)])
+    make_llm(api, reasoning_levels=lambda model: []).screen(SPEC, "x")
+    assert "reasoning" not in api.requests[0][1]
+
+
+def test_a_pdf_without_a_text_layer_is_not_sent_empty():
+    scanned = FullText(kind="oa_pdf", text="", url="https://example.org/scan.pdf", pdf=b"%PDF-1.4 scanned")
+    refused = (400, {"error": {"code": "subscription_sharing_unsupported_capability", "message": "no files"}})
+    api = Scripted([refused])
+    llm = make_llm(api)
+    with pytest.raises(OpenAIError, match="no text layer"):
+        llm.extract(SPEC, llm.document(scanned, "A scanned trial"))
+    assert len(api.requests) == 1

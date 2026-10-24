@@ -1,9 +1,10 @@
 """Claude API calls, and what the model providers share.
 
-Claude Opus 5.5 is the manager: it reads the problem, plans the search and adjudicates escalated
-extractions. Claude Haiku 5.5 is the worker: it screens every record and makes the first-pass
-extraction of every paper. openai_llm.py gives OpenAI models the same steps. Arithmetic never
-happens here; the models only read and quote.
+Claude Opus 5.5 is the manager by default: it reads the problem, plans the search and adjudicates
+escalated extractions. Claude Haiku 5.5 is the worker by default: it screens every record and makes
+the first-pass extraction of every paper. The page may pick other Claude models for either role.
+openai_llm.py gives OpenAI models the same steps. Arithmetic never happens here; the models only
+read and quote.
 """
 
 from __future__ import annotations
@@ -20,9 +21,14 @@ from .config import Settings
 from .fulltext import FullText
 from .schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec
 
-# Opus only: when a safety classifier declines a benign request, the API retries it on the
-# model Anthropic recommends for that refusal category. Haiku has no server-side fallback.
+# Opus and Sonnet only: when a safety classifier declines a benign request, the API retries it on
+# the model Anthropic recommends for that refusal category. Haiku has no server-side fallback.
 OPUS_FALLBACK: dict[str, Any] = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+
+
+def fallback_for(model: str) -> dict[str, Any]:
+    """The server-side fallback parameters for a call on this model: none for Haiku, whichever role it plays."""
+    return OPUS_FALLBACK if any(f"claude-{family}-" in model for family in ("opus", "sonnet")) else {}
 
 T = TypeVar("T", bound=BaseModel)
 UsageSink = Callable[[str, str, Any], None]
@@ -157,11 +163,17 @@ def _cached_system(text: str) -> list[dict]:
 
 
 class ClaudeLLM:
-    def __init__(self, settings: Settings, client: anthropic.Anthropic | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        client: anthropic.Anthropic | None = None,
+        manager_model: str | None = None,
+        worker_model: str | None = None,
+    ):
         self.settings = settings
         self.client = client or anthropic.Anthropic()
-        self.manager_model = settings.manager_model
-        self.worker_model = settings.worker_model
+        self.manager_model = manager_model or settings.manager_model
+        self.worker_model = worker_model or settings.worker_model
 
     # -- plumbing ---------------------------------------------------------------
 
@@ -195,16 +207,16 @@ class ClaudeLLM:
         sink: UsageSink | None,
         max_tokens: int = 64000,
     ) -> T:
+        model = self.manager_model if manager else self.worker_model
         params: dict[str, Any] = {
-            "model": self.manager_model if manager else self.worker_model,
+            "model": model,
             "max_tokens": max_tokens,
             "system": _cached_system(system),
             "messages": [{"role": "user", "content": content}],
             "output_config": {"effort": effort},
             "output_format": output_format,
+            **fallback_for(model),
         }
-        if manager:
-            params.update(OPUS_FALLBACK)
         # Streamed so long documents and high-effort thinking don't run into HTTP timeouts.
         with self.client.beta.messages.stream(**params) as stream:
             message = stream.get_final_message()
@@ -215,7 +227,7 @@ class ClaudeLLM:
         """The paper for extract() and adjudicate(): a document block, the PDF itself when there is one."""
         return fulltext.document_block(title)
 
-    # -- manager (Opus) -----------------------------------------------------------
+    # -- manager (Opus by default) ------------------------------------------------
 
     def read_spec(self, paragraph: str, sink: UsageSink | None = None) -> SearchSpec:
         return self._parse(
@@ -238,7 +250,7 @@ class ClaudeLLM:
             messages=[{"role": "user", "content": "Specification:\n" + spec.model_dump_json(indent=2)}],
             output_config={"effort": "high"},
             max_iterations=self.settings.search_max_iterations,
-            **OPUS_FALLBACK,
+            **fallback_for(self.manager_model),
         )
         for message in runner:
             self._record(sink, "search", message)
@@ -294,7 +306,7 @@ class ClaudeLLM:
             sink=sink,
         )
 
-    # -- workers (Haiku) ----------------------------------------------------------
+    # -- workers (Haiku by default) -----------------------------------------------
 
     def screen(self, spec: SearchSpec, record_text: str, sink: UsageSink | None = None) -> ScreenDecision:
         return self._parse(
@@ -325,7 +337,7 @@ def describe_error(exc: BaseException) -> str:
     if isinstance(exc, anthropic.AuthenticationError) or (
         isinstance(exc, TypeError) and "authentication method" in str(exc)
     ):
-        return "The Anthropic API key is missing or was not accepted. Enter a valid key in the API key box and try again."
+        return "The Anthropic API key is missing or was not accepted. Enter a valid key in the API key box, on the Agents page, and try again."
     if isinstance(exc, anthropic.PermissionDeniedError):
         return "This Anthropic API key may not use the model. Check the key's workspace and model access."
     if isinstance(exc, anthropic.RateLimitError):

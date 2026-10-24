@@ -2,7 +2,7 @@
 
 import { decisionsBasis } from '/lib/evidence.js';
 import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
-import { modelLabel, roleNames } from '/lib/providers.js';
+import { keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS, ROLE_INFO, roleNames } from '/lib/providers.js';
 import { searchMap } from '/lib/search-map.js';
 import { SpecPanel } from '/lib/spec-panel.js';
 
@@ -19,12 +19,32 @@ const TABS = [
 
 const $ = (selector) => document.querySelector(selector);
 const state = {
-  provider: 'anthropic', chatgpt: null, signInTimer: null,
+  provider: 'anthropic', models: {}, chatgpt: null, signInTimer: null, agentsOpen: false, scrollY: 0, namesKey: '',
   id: null, project: null, papers: [], tab: 'extracted', timer: null, specKey: '', papersKey: '', config: {},
   reviewAt: {}, // tab -> the paper id shown there
 };
-const KEY_STORAGE = 'esf-anthropic-api-key';
-const PROVIDER = 'esf-provider'; // 'anthropic' (Claude with a key) or 'chatgpt' (OpenAI on the signed-in plan)
+// How the agents run (see PROVIDERS in /lib/providers.js): 'anthropic' (Claude with an API key),
+// 'openai' (OpenAI's models with an API key) or 'chatgpt' (OpenAI's models on the signed-in plan).
+const PROVIDER = 'esf-provider';
+const MODELS = (provider) => `esf-models-${provider}`; // a key provider's models for the roles: {manager, worker}
+
+// The two API keys, each with its own box and storage, and sent only in its own vendor's header.
+const KEYS = {
+  anthropic: {
+    storage: 'esf-anthropic-api-key', box: '#anthropic-box', input: '#api-key', remember: '#remember-key', forget: '#forget-key',
+    status: '#key-status', header: 'X-Anthropic-Api-Key', serverHas: 'server_has_key', runs: 'Claude',
+  },
+  openai: {
+    storage: 'esf-openai-api-key', box: '#openai-box', input: '#openai-key', remember: '#remember-openai-key', forget: '#forget-openai-key',
+    status: '#openai-key-status', header: 'X-OpenAI-Api-Key', serverHas: 'server_has_openai_key', runs: "OpenAI's models",
+  },
+};
+// What goes where, for the privacy notice on the Agents page.
+const PRIVACY = {
+  anthropic: "Your paragraph and the text of the papers go from this server to Anthropic's API, where Claude reads them, and so does your key if you enter one; the server does not store it. Don't paste anything you can't share with Anthropic.",
+  openai: "Your paragraph and the text of the papers go from this server to OpenAI's API, where OpenAI's models read them, and so does your key if you enter one; the server does not store it. Don't paste anything you can't share with OpenAI.",
+  chatgpt: "Your paragraph and the text of the papers go from this server to OpenAI's API, where OpenAI's models read them on your ChatGPT plan. The sign-in stays in this server's memory; only the app's registration and the chosen models are saved. Don't paste anything you can't share with OpenAI.",
+};
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -41,9 +61,9 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-// -- API key ---------------------------------------------------------------------
-// Kept in this tab (sessionStorage) or, if asked, on this browser (localStorage). It is sent only
-// with the requests that start Claude work.
+// -- API keys --------------------------------------------------------------------
+// Kept in this tab (sessionStorage) or, if asked, on this browser (localStorage). Each is sent only
+// with the requests that start work on its own vendor's models.
 
 function storage(kind) {
   try {
@@ -53,103 +73,280 @@ function storage(kind) {
   }
 }
 
-function loadKey() {
-  const remembered = storage('local')?.getItem(KEY_STORAGE);
-  $('#api-key').value = remembered || storage('session')?.getItem(KEY_STORAGE) || '';
-  $('#remember-key').checked = Boolean(remembered);
+function loadKeys() {
+  for (const { storage: name, input, remember } of Object.values(KEYS)) {
+    const remembered = storage('local')?.getItem(name);
+    $(input).value = remembered || storage('session')?.getItem(name) || '';
+    $(remember).checked = Boolean(remembered);
+  }
 }
 
-function saveKey() {
-  const key = apiKey();
-  const remember = $('#remember-key').checked;
+function saveKey(provider) {
+  const { storage: name, remember } = KEYS[provider];
+  const key = keyOf(provider);
   try {
-    storage('local')?.removeItem(KEY_STORAGE);
-    storage('session')?.removeItem(KEY_STORAGE);
-    if (key) storage(remember ? 'local' : 'session')?.setItem(KEY_STORAGE, key);
+    storage('local')?.removeItem(name);
+    storage('session')?.removeItem(name);
+    if (key) storage($(remember).checked ? 'local' : 'session')?.setItem(name, key);
   } catch { /* storage unavailable: the key lives only in the field */ }
-  showKeyStatus();
+  showAgents();
 }
 
-function forgetKey() {
-  $('#api-key').value = '';
-  $('#remember-key').checked = false;
-  saveKey();
-  $('#api-key').focus();
+function forgetKey(provider) {
+  $(KEYS[provider].input).value = '';
+  $(KEYS[provider].remember).checked = false;
+  saveKey(provider);
+  $(KEYS[provider].input).focus();
 }
 
-const apiKey = () => $('#api-key').value.trim();
+const keyOf = (provider) => (KEYS[provider] ? $(KEYS[provider].input).value.trim() : '');
 
-function showKeyStatus() {
-  const box = $('#anthropic-box');
-  const status = $('#key-status');
-  box.dataset.missing = 'false';
-  if (apiKey()) {
-    status.textContent = $('#remember-key').checked
-      ? 'Remembered on this browser. Sent only with requests that run Claude; the server does not store it.'
-      : 'Kept for this tab only. Sent only with requests that run Claude; the server does not store it.';
-  } else if (state.config.server_has_key) {
-    status.textContent = 'Optional: the server has its own key.';
+// What is wrong with the key in a provider's box, if anything (see keyProblem in /lib/providers.js).
+const keyProblemOf = (provider) => keyProblem(provider, keyOf(provider));
+
+function showKeyStatus(provider) {
+  const { box, status, remember, serverHas, runs } = KEYS[provider];
+  const problem = keyProblemOf(provider);
+  $(box).dataset.missing = String(Boolean(problem));
+  if (problem) {
+    $(status).textContent = problem.text;
+  } else if (keyOf(provider)) {
+    $(status).textContent = `${$(remember).checked ? 'Remembered on this browser' : 'Kept for this tab only'}. `
+      + `Sent only with requests that run ${runs}; the server does not store it.`;
+  } else if (state.config[serverHas]) {
+    $(status).textContent = 'Optional: the server has its own key.';
   } else {
-    status.replaceChildren('Needed to read the problem, search, and extract. Create one in the ',
-      h('a', { href: 'https://console.anthropic.com/settings/keys', target: '_blank', rel: 'noopener' }, 'Anthropic Console'), '.');
+    const [href, name] = PROVIDERS[provider].console;
+    $(status).replaceChildren('Needed to read the problem, search, and extract. Create one in the ',
+      h('a', { href, target: '_blank', rel: 'noopener' }, name), '.');
   }
 }
 
-function haveKey() {
-  if (state.provider === 'chatgpt') {
-    if (state.chatgpt?.status === 'connected') return true;
-    $('#chatgpt-box').dataset.missing = 'true';
-    $('#chatgpt-status').textContent = state.chatgpt?.status === 'reauth_required'
-      ? 'Your ChatGPT sign-in has expired. Sign in with ChatGPT again first.' : 'Sign in with ChatGPT first.';
-    $('#chatgpt-sign-in').focus();
-    return false;
+// Why a provider cannot run a job yet, or '' when it can.
+function notReady(provider = state.provider) {
+  if (provider === 'chatgpt') {
+    const { status, remote } = state.chatgpt || {};
+    if (remote) return 'Your ChatGPT plan can be used only in a browser on the computer that runs the server.';
+    if (status === 'connected') return '';
+    return status === 'reauth_required' ? 'Your ChatGPT sign-in has expired. Sign in with ChatGPT again first.' : 'Sign in with ChatGPT first.';
   }
-  if (apiKey() || state.config.server_has_key) return true;
-  $('#anthropic-box').dataset.missing = 'true';
-  $('#key-status').textContent = 'Enter your Anthropic API key first.';
-  $('#api-key').focus();
+  const problem = keyProblemOf(provider);
+  if (problem?.wrong) return problem.text;
+  return keyOf(provider) || state.config[KEYS[provider].serverHas] ? '' : `Enter your ${PROVIDERS[provider].keyName} first.`;
+}
+
+// A job needs a ready provider; without one, the Agents page opens and says what is missing.
+function agentsReady() {
+  const reason = notReady();
+  if (!reason) return true;
+  openAgents();
+  const { box, status, input } = KEYS[state.provider] || { box: '#chatgpt-box', status: '#chatgpt-status', input: '#chatgpt-sign-in' };
+  $(box).dataset.missing = 'true';
+  $(status).textContent = reason;
+  $(input).focus();
   return false;
 }
 
-// -- the models: Claude with a key, or OpenAI's on a ChatGPT plan ---------------------------
+// -- the models: each role's, for the chosen provider ------------------------------------------
 
-// The names of the roles (see /lib/providers.js) for the chosen models; the plan's own names for its models.
-function names() {
-  if (state.provider === 'chatgpt') {
-    const plan = state.chatgpt || {};
-    const label = (slug) => plan.models?.find((m) => m.slug === slug)?.display_name || modelLabel(slug);
-    return { ...roleNames({}), manager: label(plan.manager_model || state.config.openai_manager_model),
-      worker: label(plan.worker_model || state.config.openai_worker_model) };
-  }
-  return roleNames({ manager: state.config.manager_model, worker: state.config.worker_model });
+const defaultModels = (provider) => (provider === 'openai'
+  ? { manager: state.config.openai_manager_model, worker: state.config.openai_worker_model }
+  : { manager: state.config.manager_model, worker: state.config.worker_model });
+
+// A key provider's models for a role, best first, with the server's default if it is another.
+function modelChoices(provider, role) {
+  const listed = MODEL_CHOICES[provider] || [];
+  const fallback = defaultModels(provider)[role];
+  return fallback && !listed.includes(fallback) ? [fallback, ...listed] : listed;
 }
 
-function showProvider() {
-  const chatgpt = state.provider === 'chatgpt';
-  for (const input of document.querySelectorAll('input[name="provider"]')) input.checked = input.value === state.provider;
-  $('#anthropic-box').hidden = chatgpt;
-  $('#chatgpt-box').hidden = !chatgpt;
+function loadModels() {
+  for (const provider of Object.keys(KEYS)) {
+    try {
+      const saved = JSON.parse(storage('local')?.getItem(MODELS(provider)) || 'null');
+      if (saved && typeof saved === 'object') state.models[provider] = saved;
+    } catch { /* unreadable: the defaults */ }
+  }
+}
+
+// The models a provider's roles run on: a key provider's as chosen on this browser, else the
+// server's defaults; on a ChatGPT plan, the ones chosen for the sign-in (kept by the server).
+function chosenModels(provider = state.provider) {
+  if (provider === 'chatgpt') {
+    const plan = state.chatgpt || {};
+    return { manager: plan.manager_model || state.config.openai_manager_model, worker: plan.worker_model || state.config.openai_worker_model };
+  }
+  const saved = state.models[provider] || {};
+  const pick = (role) => (modelChoices(provider, role).includes(saved[role]) ? saved[role] : defaultModels(provider)[role]);
+  return { manager: pick('manager'), worker: pick('worker') };
+}
+
+// A model's name as people know it: the plan's own name for its models.
+const planName = (slug) => state.chatgpt?.models?.find((m) => m.slug === slug)?.display_name || modelLabel(slug);
+const modelName = (provider, model) => (provider === 'chatgpt' ? planName(model) : modelLabel(model));
+
+// The names of the roles (see /lib/providers.js) for the chosen provider's models.
+function names() {
+  const models = chosenModels();
+  if (state.provider !== 'chatgpt') return roleNames(models);
+  return { ...roleNames({}), manager: planName(models.manager), worker: planName(models.worker) };
+}
+
+// The roles' names for a search: the models that served each role in it (its usage), so past work is
+// credited to the models that did it; the chosen ones for roles it has not used yet.
+const STEP_ROLE = { spec: 'manager', search: 'manager', adjudicate: 'manager', overlap: 'manager', summarize: 'manager', screen: 'worker', extract: 'worker' };
+function searchNames(project) {
+  const n = { ...names() };
+  const seen = {};
+  for (const u of project?.usage || []) {
+    const role = STEP_ROLE[u.step];
+    if (role && u.model) (seen[role] ||= new Set()).add(planName(u.model));
+  }
+  for (const [role, labels] of Object.entries(seen)) n[role] = [...labels].join(', ');
+  return n;
+}
+
+async function chooseModels() {
+  const manager = $('#model-manager').value;
+  const worker = $('#model-worker').value;
+  let failed = '';
+  if (state.provider === 'chatgpt') {
+    try {
+      state.chatgpt = await api('/api/chatgpt/models', { method: 'PUT', body: { manager_model: manager, worker_model: worker } });
+    } catch (error) {
+      failed = error.message;
+    }
+  } else {
+    state.models[state.provider] = { manager, worker };
+    try {
+      storage('local')?.setItem(MODELS(state.provider), JSON.stringify({ manager, worker }));
+    } catch { /* storage unavailable: the choice lasts until the page reloads */ }
+  }
+  showAgents();
+  if (failed) $('#chatgpt-status').textContent = failed;
+}
+
+// -- the Agents page -------------------------------------------------------------------
+
+function openAgents() {
+  if (!state.agentsOpen) state.scrollY = window.scrollY;
+  state.agentsOpen = true;
+  showPage();
+  window.scrollTo(0, 0);
+  $('#agents-title').focus({ preventScroll: true });
+}
+
+function closeAgents() {
+  state.agentsOpen = false;
+  showPage();
+  window.scrollTo(0, state.scrollY);
+  $('#agents-toggle').focus({ preventScroll: true });
+}
+
+// The Agents page is shown instead of the intro and the searches.
+function showPage() {
+  $('#agents-page').hidden = !state.agentsOpen;
+  $('#intro').hidden = state.agentsOpen;
+  $('#searches').hidden = state.agentsOpen;
+  $('#agents-toggle').setAttribute('aria-expanded', String(state.agentsOpen));
+}
+
+function chooseProvider(name) {
+  state.provider = PROVIDERS[name] ? name : 'anthropic';
+  try { storage('local')?.setItem(PROVIDER, state.provider); } catch { /* storage unavailable */ }
+  showAgents();
+  if (state.provider === 'chatgpt' && state.chatgpt?.status === 'connected') loadChatGPT(true);
+}
+
+// Everything on the page that depends on the provider, its key or sign-in, and its models.
+function showAgents() {
+  const chosen = PROVIDERS[state.provider];
+  for (const card of document.querySelectorAll('.provider-card')) {
+    const input = card.querySelector('input');
+    const provider = PROVIDERS[input.value];
+    const models = chosenModels(input.value);
+    input.checked = input.value === state.provider;
+    card.querySelector('.provider-label').textContent = provider.label;
+    card.querySelector('.provider-billing').textContent = provider.billing;
+    card.querySelector('.provider-models').replaceChildren(...(models.manager ? [
+      h('span', {}, `Manager ${modelName(input.value, models.manager)}`), ' · ', h('span', {}, `Workers ${modelName(input.value, models.worker)}`),
+    ] : []));
+    card.querySelector('.provider-ready').hidden = Boolean(notReady(input.value));
+  }
+  for (const name of ['anthropic', 'openai', 'chatgpt']) $(`#${name}-box`).hidden = name !== state.provider;
+  for (const provider of Object.keys(KEYS)) showKeyStatus(provider);
+  showChatGPT();
+  showRoles();
+  $('#agents-privacy').textContent = PRIVACY[state.provider];
+
+  const reason = notReady();
+  const toggle = $('#agents-toggle');
+  toggle.textContent = `Agents: ${chosen.label}`;
+  toggle.dataset.missing = String(Boolean(reason));
+  toggle.title = reason || 'How the agents run';
+
   const n = names();
   for (const el of document.querySelectorAll('[data-name]')) {
-    el.textContent = el.dataset.name === 'vendor' ? (chatgpt ? 'OpenAI' : 'Anthropic') : n[el.dataset.name] || el.textContent;
+    el.textContent = el.dataset.name === 'vendor' ? chosen.vendor : n[el.dataset.name] || el.textContent;
   }
   if (state.config.manager_model) {
     $('#models').textContent = `${n.manager} plans and reviews · ${n.worker} screens and reads`
       + (state.config.contact_email_set ? '' : ' · set ESF_CONTACT_EMAIL to fetch open-access PDFs');
   }
-  if (chatgpt) showChatGPT();
-}
-
-function chooseProvider(name) {
-  state.provider = name === 'chatgpt' ? 'chatgpt' : 'anthropic';
-  try { storage('local')?.setItem(PROVIDER, state.provider); } catch { /* storage unavailable */ }
-  showProvider();
-  if (state.project) {
-    renderProblem(state.project);
-    renderProgress(state.project);
-    renderSummary(state.project);
+  // The open search names the models too: redrawn when they change.
+  const key = JSON.stringify([state.provider, n]);
+  if (key !== state.namesKey) {
+    state.namesKey = key;
+    if (state.project) {
+      renderProblem(state.project);
+      renderProgress(state.project);
+      if (state.papers.length) {
+        state.papersKey = '';
+        state.cardKey = '';
+        renderReview();
+      }
+      renderSummary(state.project);
+    }
   }
 }
+
+// Who does what: a row per role, with the models of the manager and the workers to choose from.
+function showRoles() {
+  const plan = state.provider === 'chatgpt';
+  const signedIn = state.chatgpt?.status === 'connected' && !state.chatgpt.remote;
+  const models = chosenModels();
+  for (const row of document.querySelectorAll('.role')) {
+    const [name, does] = ROLE_INFO[row.dataset.role];
+    row.querySelector('.role-name').textContent = name;
+    row.querySelector('.role-does').textContent = does;
+  }
+  for (const role of ['manager', 'worker']) {
+    const select = $(`#model-${role}`);
+    const chosen = models[role];
+    let options;
+    if (plan) {
+      // A choice the plan doesn't list stays until the person picks another: the server keeps it as it is.
+      const listed = (state.chatgpt?.models || []).map((m) => [m.slug, m.display_name]);
+      options = !chosen || listed.some(([slug]) => slug === chosen) ? listed
+        : [[chosen, listed.length ? `${planName(chosen)} (not on your plan)` : planName(chosen)], ...listed];
+    } else {
+      options = modelChoices(state.provider, role).map((m) => [m, modelLabel(m)]);
+    }
+    // Redrawn only when the list changes, so an open list is not closed under the reader.
+    const key = JSON.stringify(options);
+    if (select.dataset.options !== key) {
+      select.dataset.options = key;
+      select.replaceChildren(...options.map(([value, label]) => h('option', { value }, label)));
+    }
+    select.value = chosen || '';
+    select.disabled = plan && !(signedIn && state.chatgpt.models?.length);
+  }
+  $('#roles-note').textContent = !plan ? 'Your choice is kept on this browser and used from the next step you start.'
+    : signedIn ? 'The models your ChatGPT plan offers. The choice is kept on this server.'
+      : "Sign in with ChatGPT to choose from your plan's models.";
+}
+
+// -- Sign in with ChatGPT: OpenAI's models on the person's plan ------------------------------
 
 // The sign-in as the server has it: who, the plan's models and the chosen ones. Never a token.
 async function loadChatGPT(refreshModels = false) {
@@ -158,8 +355,8 @@ async function loadChatGPT(refreshModels = false) {
   } catch (error) {
     state.chatgpt = { status: 'disconnected', error: error.message, models: [] };
   }
-  showProvider();
-  if (state.chatgpt.status !== 'connecting') stopWaiting();
+  showAgents();
+  if (!state.chatgpt.pending) stopWaiting();
 }
 
 function stopWaiting() {
@@ -171,28 +368,24 @@ function showChatGPT() {
   const plan = state.chatgpt || { status: 'disconnected', models: [] };
   const box = $('#chatgpt-box');
   box.dataset.missing = 'false';
-  const connected = plan.status === 'connected';
+  const connected = plan.status === 'connected' && !plan.remote;
+  const pending = Boolean(plan.pending) && !plan.remote;
   $('#chatgpt-sign-in').hidden = connected;
   $('#chatgpt-sign-in').textContent = plan.status === 'reauth_required' ? 'Sign in with ChatGPT again' : 'Sign in with ChatGPT';
   $('#chatgpt-sign-in').disabled = Boolean(plan.remote);
+  $('#chatgpt-cancel').hidden = !pending;
   $('#chatgpt-sign-out').hidden = !connected;
   const who = [plan.name, plan.email && `(${plan.email})`].filter(Boolean).join(' ');
   $('#chatgpt-status').textContent = plan.remote
     ? 'Sign in with ChatGPT works only in a browser on the computer that runs the server: ChatGPT sends you back to 127.0.0.1.'
-    : {
-      connected: `Signed in${who ? ` as ${who}` : ''}. The models run on your ChatGPT plan; set this app's share of it in ChatGPT Settings. The sign-in lasts until the server stops.`,
-      connecting: 'Finish signing in on the ChatGPT tab; this page notices when you are done.',
-      reauth_required: 'Your ChatGPT sign-in has expired or was revoked. Sign in again.',
-      disconnected: 'Opens ChatGPT in a new tab. A ChatGPT Plus or Pro plan then runs the models, with no API key; only this server holds the sign-in, in memory.',
-    }[plan.status] || '';
-  if (plan.error) $('#chatgpt-status').textContent += ` ${plan.error}`;
-  const models = plan.models || [];
-  $('#chatgpt-models').hidden = !connected;
-  for (const [id, chosen] of [['#chatgpt-manager', plan.manager_model], ['#chatgpt-worker', plan.worker_model]]) {
-    const listed = models.some((m) => m.slug === chosen) ? models : [{ slug: chosen, display_name: modelLabel(chosen) }, ...models];
-    $(id).replaceChildren(...listed.map((m) => h('option', { value: m.slug, selected: m.slug === chosen || null }, m.display_name)));
-    $(id).disabled = !models.length;
-  }
+    : pending && !connected ? 'Finish signing in on the ChatGPT tab; this page notices when you are done.'
+      : {
+        connected: `Signed in${who ? ` as ${who}` : ''}. The models run on your ChatGPT plan; set this app's share of it in ChatGPT Settings. The sign-in lasts until the server stops.`,
+        reauth_required: 'Your ChatGPT sign-in has expired or was revoked. Sign in again.',
+        disconnected: 'Opens ChatGPT in a new tab. A ChatGPT Plus or Pro plan then runs the models, with no API key; only this server holds the sign-in, in memory.',
+      }[plan.status] || '';
+  if (pending && connected) $('#chatgpt-status').textContent += ' Another sign-in is waiting on a ChatGPT tab.';
+  if (plan.error && !plan.remote) $('#chatgpt-status').textContent += ` ${plan.error}`;
 }
 
 async function signInWithChatGPT() {
@@ -216,29 +409,38 @@ async function signInWithChatGPT() {
   state.signInTimer = setInterval(() => loadChatGPT(), 1500);
 }
 
-async function chooseModels() {
+// Sign out, or give up a sign-in still waiting on the ChatGPT tab.
+async function leaveChatGPT(action) {
+  stopWaiting();
+  let failed = '';
   try {
-    state.chatgpt = await api('/api/chatgpt/models', {
-      method: 'PUT', body: { manager_model: $('#chatgpt-manager').value, worker_model: $('#chatgpt-worker').value },
-    });
+    state.chatgpt = await api(`/api/chatgpt/${action}`, { method: 'POST' });
   } catch (error) {
-    $('#chatgpt-status').textContent = error.message;
+    failed = error.message;
   }
-  showProvider();
+  showAgents();
+  if (failed) $('#chatgpt-status').textContent = failed;
 }
 
-async function signOutOfChatGPT() {
-  state.chatgpt = await api('/api/chatgpt/sign-out', { method: 'POST' });
-  showProvider();
+// What a job runs on, for the server: the provider; for a key provider its key, only in its own
+// vendor's header, and the models chosen for the roles. Nothing else carries a key.
+function agentHeaders() {
+  const headers = { 'X-Model-Provider': state.provider };
+  const key = KEYS[state.provider];
+  if (!key) return headers;
+  if (keyOf(state.provider) && !keyProblemOf(state.provider)?.wrong) headers[key.header] = keyOf(state.provider);
+  const models = chosenModels();
+  if (models.manager) headers['X-Manager-Model'] = models.manager;
+  if (models.worker) headers['X-Worker-Model'] = models.worker;
+  return headers;
 }
 
 async function api(path, options = {}) {
-  const { withKey, ...rest } = options;
-  const init = { ...rest, headers: { 'Content-Type': 'application/json' } };
-  if (withKey) init.headers['X-Model-Provider'] = state.provider;
-  if (withKey && state.provider === 'anthropic' && apiKey()) init.headers['X-Anthropic-Api-Key'] = apiKey();
+  const { withAgents, ...rest } = options;
+  const init = { ...rest, headers: { 'Content-Type': 'application/json', ...(withAgents ? agentHeaders() : {}) } };
   if (init.body !== undefined && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
   const response = await fetch(path, init);
+  if (!response.ok && withAgents && state.provider === 'chatgpt') loadChatGPT();
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
@@ -287,7 +489,7 @@ async function loadProjects() {
 
 function newSearch() {
   clearTimeout(state.timer);
-  Object.assign(state, { id: null, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', cardKey: '', reviewAt: {} });
+  Object.assign(state, { id: null, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', cardKey: '', reviewAt: {}, busy: false });
   history.replaceState(null, '', location.pathname);
   const paragraph = $('#paragraph');
   paragraph.value = '';
@@ -302,7 +504,7 @@ function newSearch() {
 
 async function openProject(id) {
   clearTimeout(state.timer);
-  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', cardKey: '', reviewAt: {} });
+  Object.assign(state, { id, project: null, papers: [], specKey: '', papersKey: '', summaryKey: '', cardKey: '', reviewAt: {}, busy: false });
   history.replaceState(null, '', `#${id}`);
   try {
     await refresh();
@@ -329,12 +531,16 @@ async function refresh() {
   else $('#review').hidden = true;
   renderSummary(project);
   const extracting = state.papers.some((p) => p.status === 'fetching' || p.status === 'extracting');
-  if (RUNNING.has(project.status) || extracting || project.summary?.status === 'running') {
+  const busy = RUNNING.has(project.status) || extracting || project.summary?.status === 'running';
+  if (busy) {
     clearTimeout(state.timer);
     state.timer = setTimeout(() => refresh().catch(() => {}), 2500);
   } else if (wasRunning) {
     loadProjects();
   }
+  // A job on the plan has ended: the sign-in may have expired or hit the plan's limit meanwhile.
+  if (state.busy && !busy && state.provider === 'chatgpt') loadChatGPT();
+  state.busy = busy;
 }
 
 // -- step 1 ----------------------------------------------------------------------
@@ -354,10 +560,10 @@ async function readProblem() {
     showError($('#problem-error'), 'Describe the study in a sentence or two first.');
     return;
   }
-  if (!haveKey()) return;
+  if (!agentsReady()) return;
   $('#read').disabled = true;
   try {
-    const { id } = await api('/api/projects', { method: 'POST', body: { paragraph: text }, withKey: true });
+    const { id } = await api('/api/projects', { method: 'POST', body: { paragraph: text }, withAgents: true });
     await openProject(id);
   } catch (error) {
     showError($('#problem-error'), error.message);
@@ -408,14 +614,14 @@ function renderSpec(project) {
 async function runSearch(event) {
   event.preventDefault();
   const hasPapers = Object.keys(state.project.counts || {}).length > 0;
-  if (!haveKey() || state.project.summary?.status === 'running') return;
+  if (!agentsReady() || state.project.summary?.status === 'running') return;
   const spec = specPanel.collect();
   if (!spec) return; // an open edit has a value to fix; the panel says which
   if (hasPapers && !confirm('Search again? This replaces the papers and your decisions for this search.')) return;
   $('#run').disabled = true;
   try {
     await api(`/api/projects/${state.id}/spec`, { method: 'PUT', body: spec });
-    await api(`/api/projects/${state.id}/run`, { method: 'POST', withKey: true });
+    await api(`/api/projects/${state.id}/run`, { method: 'POST', withAgents: true });
     state.papersKey = '';
     await refresh();
     $('#progress-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -435,7 +641,7 @@ function renderProgress(project) {
   card.hidden = !(started || Object.keys(counts).length || project.search_plan || (project.spec && project.error));
   if (card.hidden) return;
 
-  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running: RUNNING.has(project.status), fetcher: false, names: names() }));
+  $('#map-body').replaceChildren(searchMap({ project, papers: state.papers, running: RUNNING.has(project.status), fetcher: false, names: searchNames(project) }));
 
   const progress = project.progress || {};
   const bar = $('#progress');
@@ -551,8 +757,9 @@ function showPaper(paperId) {
   $('#papers .paper h3')?.scrollIntoView({ block: 'nearest' });
 }
 
-// The model that made a paper's extraction, or, for one saved without it, the role's current name.
-const extractor = (paper) => (paper.extracted_model ? modelLabel(paper.extracted_model) : names()[paper.extracted_by] || paper.extracted_by);
+// The model that made a paper's extraction. One saved without it was made before OpenAI's models were
+// offered, so by Claude's (the defaults then), whichever provider is chosen now.
+const extractor = (paper) => modelLabel(paper.extracted_model || LEGACY_MODELS[paper.extracted_by] || paper.extracted_by);
 
 function badge(text, kind = '') {
   return h('span', { class: `badge ${kind}`.trim() }, text);
@@ -599,7 +806,7 @@ function paperCard(paper, trials) {
       paper.extracted_by === 'worker' && badge(`Extracted by ${extractor(paper)}`),
       paper.escalation?.audit && badge('Audit sample')),
     extracted && screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
-    reasons.length > 0 && h('p', { class: 'reason' }, `Why ${paper.extracted_by === 'manager' ? extractor(paper) : names().manager} reviewed it: ${reasons.join('; ')}`),
+    reasons.length > 0 && h('p', { class: 'reason' }, `Flagged for review: ${reasons.join('; ')}`),
     differs && h('p', { class: 'reason' }, `Differs from the plan: ${paper.extraction.mismatch_reasons.join('; ')}`),
     extracted && paper.extraction.notes && h('p', { class: 'reason' }, `Notes: ${paper.extraction.notes}`));
 
@@ -644,9 +851,9 @@ async function decide(paper, resultIndex, decision, reason) {
 }
 
 async function extractAnyway(paper) {
-  if (!haveKey()) return;
+  if (!agentsReady()) return;
   try {
-    await api(`/api/projects/${state.id}/papers/${paper.id}/extract`, { method: 'POST', withKey: true });
+    await api(`/api/projects/${state.id}/papers/${paper.id}/extract`, { method: 'POST', withAgents: true });
     state.tab = 'pending';
     state.papersKey = '';
     await refresh();
@@ -728,11 +935,11 @@ function renderSummary(project) {
 }
 
 async function writeSummary() {
-  if (!haveKey() || !state.id) return;
+  if (!state.id || !agentsReady()) return;
   showError($('#summary-error'), '');
   $('#summarize').disabled = true;
   try {
-    await api(`/api/projects/${state.id}/summary`, { method: 'POST', withKey: true });
+    await api(`/api/projects/${state.id}/summary`, { method: 'POST', withAgents: true });
   } catch (error) {
     showError($('#summary-error'), error.message);
   }
@@ -746,23 +953,32 @@ async function start() {
   $('#spec-form').addEventListener('submit', runSearch);
   $('#new-project').addEventListener('click', newSearch);
   $('#source-close').addEventListener('click', () => $('#source-dialog').close());
-  $('#api-key').addEventListener('input', saveKey);
-  $('#remember-key').addEventListener('change', saveKey);
-  $('#forget-key').addEventListener('click', forgetKey);
   $('#summarize').addEventListener('click', writeSummary);
-  document.addEventListener('keydown', reviewKeys);
+  // The review's arrow keys, only while the review is on screen.
+  document.addEventListener('keydown', (event) => { if (!state.agentsOpen) reviewKeys(event); });
+  $('#agents-toggle').addEventListener('click', () => (state.agentsOpen ? closeAgents() : openAgents()));
+  $('#agents-back').addEventListener('click', closeAgents);
+  $('#agents-done').addEventListener('click', closeAgents);
   for (const input of document.querySelectorAll('input[name="provider"]')) {
     input.addEventListener('change', () => chooseProvider(input.value));
   }
+  for (const [provider, { input, remember, forget }] of Object.entries(KEYS)) {
+    $(input).addEventListener('input', () => saveKey(provider));
+    $(remember).addEventListener('change', () => saveKey(provider));
+    $(forget).addEventListener('click', () => forgetKey(provider));
+  }
+  $('#model-manager').addEventListener('change', chooseModels);
+  $('#model-worker').addEventListener('change', chooseModels);
   $('#chatgpt-sign-in').addEventListener('click', signInWithChatGPT);
-  $('#chatgpt-sign-out').addEventListener('click', signOutOfChatGPT);
-  $('#chatgpt-manager').addEventListener('change', chooseModels);
-  $('#chatgpt-worker').addEventListener('change', chooseModels);
+  $('#chatgpt-cancel').addEventListener('click', () => leaveChatGPT('cancel'));
+  $('#chatgpt-sign-out').addEventListener('click', () => leaveChatGPT('sign-out'));
   // Back from the ChatGPT tab: the sign-in may have finished there.
   window.addEventListener('focus', () => { if (state.provider === 'chatgpt') loadChatGPT(); });
-  loadKey();
+  loadKeys();
+  loadModels();
   try {
-    state.provider = storage('local')?.getItem(PROVIDER) === 'chatgpt' ? 'chatgpt' : 'anthropic';
+    const saved = storage('local')?.getItem(PROVIDER);
+    if (PROVIDERS[saved]) state.provider = saved;
   } catch { /* storage unavailable */ }
   try {
     const config = await api('/api/config');
@@ -770,9 +986,12 @@ async function start() {
   } catch {
     $('#models').textContent = 'The server is not responding.';
   }
-  showProvider();
-  await loadChatGPT(true);
-  showKeyStatus();
+  showAgents();
+  await loadChatGPT();
+  // The page opens on the Agents page until the chosen provider can run the agents.
+  if (notReady()) openAgents();
+  // The plan's models, asked of OpenAI, need not hold up the page.
+  if (state.provider === 'chatgpt' && state.chatgpt.status === 'connected') loadChatGPT(true);
   await loadProjects();
   const id = location.hash.slice(1);
   if (id) await openProject(id);

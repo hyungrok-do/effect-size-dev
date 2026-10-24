@@ -28,7 +28,7 @@ export class OpenAIError extends Error {
   }
 }
 
-export const looksLikeOpenAIKey = (key) => /^sk-[A-Za-z0-9_-]{20,}$/.test(key) && !key.startsWith('sk-ant-');
+export { looksLikeOpenAIKey } from './providers.js';
 
 // -- what goes into a request (mirrors python/esf/openai_llm.py) -----------------------------
 

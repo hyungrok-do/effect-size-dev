@@ -36,6 +36,7 @@ CALLBACK_PATH = "/auth/callback"
 REGISTRATION_ENTRY = "dynamic_agent_client"
 APP_NAME = "Effect Size Finder"
 PENDING_SECONDS = 600  # how long a started sign-in waits for its callback
+MAX_PENDING = 3  # sign-ins started again (another click, a closed tab) that stay valid alongside
 
 MODELS_URL = f"{RESOURCE}/models"
 REFRESH_MARGIN = 120  # seconds of validity left when an access token is renewed
@@ -60,6 +61,10 @@ PLAN_NOT_GRANTED = (
     "must be allowed when you sign in. Check your plan, then sign in with ChatGPT again."
 )
 SIGN_IN_EXPIRED = "This sign-in took longer than ten minutes. Sign in with ChatGPT again."
+REGISTRATION_REJECTED = (
+    f"ChatGPT no longer accepts this app's registration. Sign in with ChatGPT again to register {APP_NAME} anew."
+)
+REJECTED_REGISTRATION_CODES = frozenset({"invalid_client", "unauthorized_client"})
 REVOCATION_UNCONFIRMED = (
     "You are signed out here, but ChatGPT did not confirm that this app's access was revoked. "
     f"To be sure, disconnect {APP_NAME} in ChatGPT Settings."
@@ -168,6 +173,7 @@ class _Rotation:
 
     tokens: _Tokens
     id_token: str
+    received_at: float  # real time: the id_token is checked as of when it arrived
 
 
 def _challenge(verifier: str) -> str:
@@ -277,6 +283,7 @@ class ChatGPTSession:
         self._client_id: str | None = None
         self._manager_model = manager_model
         self._worker_model = worker_model
+        self._models_chosen = False  # saved only once chosen, so until then the settings' defaults apply
         self._status = "disconnected"
         self._name: str | None = None
         self._email: str | None = None
@@ -285,7 +292,9 @@ class ChatGPTSession:
         self._models: list[dict] = []
         self._tokens: _Tokens | None = None
         self._rotation: _Rotation | None = None
-        self._attempt: _Attempt | None = None
+        self._attempts: list[_Attempt] = []
+        # Bumped by sign-out and cancel, so a code exchange already under way can't sign the person back in.
+        self._generation = 0
         self._load()
 
     # -- settings file ------------------------------------------------------------
@@ -300,14 +309,15 @@ class ChatGPTSession:
         client_id = saved.get("client_id")
         if isinstance(client_id, str) and CLIENT_ID.fullmatch(client_id) and client_id != REGISTRATION_ENTRY:
             self._client_id = client_id
-        if isinstance(saved.get("manager_model"), str) and saved["manager_model"].strip():
-            self._manager_model = saved["manager_model"]
-        if isinstance(saved.get("worker_model"), str) and saved["worker_model"].strip():
-            self._worker_model = saved["worker_model"]
+        manager, worker = saved.get("manager_model"), saved.get("worker_model")
+        if isinstance(manager, str) and manager.strip() and isinstance(worker, str) and worker.strip():
+            self._manager_model, self._worker_model, self._models_chosen = manager, worker, True
 
     def _save(self) -> None:
         """Write the settings file atomically. Called with _lock held."""
-        data = {"client_id": self._client_id, "manager_model": self._manager_model, "worker_model": self._worker_model}
+        data: dict[str, Any] = {"client_id": self._client_id}
+        if self._models_chosen:
+            data.update(manager_model=self._manager_model, worker_model=self._worker_model)
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             # mkstemp creates the file readable and writable by its owner only (0o600).
@@ -333,10 +343,12 @@ class ChatGPTSession:
         return self._clock() - attempt.started_at > PENDING_SECONDS
 
     def state(self) -> dict:
+        """The sign-in ("status": disconnected, connected or reauth_required, from whether tokens are held)
+        and whether a sign-in waits for its callback ("pending"); never a token."""
         with self._lock:
-            pending = self._attempt is not None and not self._expired(self._attempt)
             return {
-                "status": "connecting" if pending else self._status,
+                "status": self._status,
+                "pending": any(not self._expired(a) for a in self._attempts),
                 "name": self._name,
                 "email": self._email,
                 "error": self._error,
@@ -411,7 +423,7 @@ class ChatGPTSession:
         # token signed with a listed key but not by it fails the signature check instead.
         raise unavailable
 
-    def _verify(self, id_token: str, client_id: str, nonce: str | None) -> dict:
+    def _verify(self, id_token: str, client_id: str, nonce: str | None, leeway: float = 5) -> dict:
         """The id_token's claims once its signature, issuer, audience, times and nonce check out."""
         try:
             jwks_uri = self._discovery()["jwks_uri"]
@@ -427,7 +439,7 @@ class ChatGPTSession:
         key = self._signing_key(jwks_uri, kid)
         try:
             claims = jwt.decode(
-                id_token, key.key, algorithms=["RS256"], audience=client_id, issuer=ISSUER, leeway=5,
+                id_token, key.key, algorithms=["RS256"], audience=client_id, issuer=ISSUER, leeway=leeway,
                 options={"require": ["exp", "iat", "sub", "aud", "iss"]},
             )
         except jwt.PyJWTError as exc:
@@ -474,7 +486,8 @@ class ChatGPTSession:
         )
         with self._lock:
             client_id = self._client_id
-            self._attempt = attempt
+            # Earlier attempts stay valid (a second click, a closed tab): whichever finishes first wins.
+            self._attempts = [a for a in self._attempts if not self._expired(a)][-(MAX_PENDING - 1):] + [attempt]
             self._error = None
         params = {
             "client_id": client_id or REGISTRATION_ENTRY,
@@ -497,43 +510,52 @@ class ChatGPTSession:
             params = parse_qs(query, keep_blank_values=True, max_num_fields=32)
         except ValueError:
             params = {}
+        states = params.get("state", [])
         with self._lock:
-            attempt = self._attempt
+            # A request that doesn't belong to a sign-in in progress must not cancel it, so these leave it pending.
+            given = states[0].encode() if len(states) == 1 else b""
+            attempt = next((a for a in self._attempts if hmac.compare_digest(given, a.state.encode())), None)
             if attempt is None:
-                raise ChatGPTError(
-                    "no_sign_in",
-                    f"No ChatGPT sign-in is waiting for this callback. If you already signed in, return to {APP_NAME}; "
-                    "otherwise start sign-in again.",
-                )
-            if self._expired(attempt):
-                self._attempt = None
-                self._error = SIGN_IN_EXPIRED
-                raise ChatGPTError("sign_in_expired", SIGN_IN_EXPIRED)
-            # A request that doesn't belong to this sign-in must not cancel it, so these leave it pending.
-            if host != f"127.0.0.1:{attempt.port}":
-                raise ChatGPTError(
-                    "wrong_host",
-                    f"This callback did not come to {redirect_uri(attempt.port)}. Return to the browser tab that started sign-in.",
-                )
-            states = params.get("state", [])
-            if len(states) != 1 or not hmac.compare_digest(states[0].encode(), attempt.state.encode()):
+                if not any(not self._expired(a) for a in self._attempts):
+                    raise ChatGPTError(
+                        "no_sign_in",
+                        f"No ChatGPT sign-in is waiting for this callback. If you already signed in, return to {APP_NAME}; "
+                        "otherwise start sign-in again.",
+                    )
                 raise ChatGPTError(
                     "wrong_state",
                     "This callback does not belong to the sign-in in progress. Return to the browser tab that started "
                     "sign-in, or start sign-in again.",
                 )
-            self._attempt = None  # one use
-            saved = self._client_id
+            if self._expired(attempt):
+                self._attempts.remove(attempt)
+                self._error = SIGN_IN_EXPIRED
+                raise ChatGPTError("sign_in_expired", SIGN_IN_EXPIRED)
+            # A browser leaves the default port out of Host.
+            if host not in (f"127.0.0.1:{attempt.port}", *(("127.0.0.1",) if attempt.port == 80 else ())):
+                raise ChatGPTError(
+                    "wrong_host",
+                    f"This callback did not come to {redirect_uri(attempt.port)}. Return to the browser tab that started sign-in.",
+                )
+            self._attempts = []  # one use, and the other tabs' sign-ins are no longer needed
+            saved, generation = self._client_id, self._generation
         try:
-            self._complete(attempt, params, saved)
+            self._complete(attempt, params, saved, generation)
         except ChatGPTError as exc:
             with self._lock:
                 self._error = str(exc)
             raise
 
-    def _complete(self, attempt: _Attempt, params: dict[str, list[str]], saved: str | None) -> None:
+    def cancel(self) -> None:
+        """Drop the sign-ins waiting for their callback; a code exchange already under way is discarded."""
+        with self._lock:
+            self._attempts = []
+            self._generation += 1
+
+    def _complete(self, attempt: _Attempt, params: dict[str, list[str]], saved: str | None, generation: int) -> None:
         if "error" in params:
-            raise api_error({"error": params["error"][0]})
+            error = api_error({"error": params["error"][0]})
+            raise self._registration_rejected() if error.code in REJECTED_REGISTRATION_CODES else error
         codes, returned = params.get("code", []), params.get("client_id", [])
         if len(codes) != 1 or not codes[0]:
             raise ChatGPTError("invalid_callback", f"ChatGPT's sign-in callback had no authorization code. {AGAIN}")
@@ -551,26 +573,38 @@ class ChatGPTSession:
                 self._client_id = client_id
                 self._save()
         sent = self._clock()
-        body = self._token_request({
-            "grant_type": "authorization_code",
-            "client_id": client_id,
-            "code": codes[0],
-            "code_verifier": attempt.verifier,
-            "redirect_uri": redirect_uri(attempt.port),
-            "resource": RESOURCE,
-        })
+        try:
+            body = self._token_request({
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "code": codes[0],
+                "code_verifier": attempt.verifier,
+                "redirect_uri": redirect_uri(attempt.port),
+                "resource": RESOURCE,
+            })
+        except ChatGPTError as exc:
+            if exc.code in REJECTED_REGISTRATION_CODES:
+                raise self._registration_rejected() from None
+            raise
         tokens = _token_fields(body, sent)
         id_token = body.get("id_token")
         if not isinstance(id_token, str) or not id_token:
             raise ChatGPTError("invalid_id_token", INVALID_IDENTITY)
         claims = self._verify(id_token, client_id, attempt.nonce)
-        with self._refresh_lock, self._lock:
-            self._tokens, self._rotation = tokens, None
-            self._status, self._error = "connected", None
-            self._subject = claims["sub"]
-            self._name = claims["name"] if isinstance(claims.get("name"), str) else None
-            self._email = claims["email"] if isinstance(claims.get("email"), str) else None
-            self._models = []
+        with self._refresh_lock:
+            with self._lock:
+                discarded = generation != self._generation
+                if not discarded:
+                    self._tokens, self._rotation = tokens, None
+                    self._status, self._error = "connected", None
+                    self._subject = claims["sub"]
+                    self._name = claims["name"] if isinstance(claims.get("name"), str) else None
+                    self._email = claims["email"] if isinstance(claims.get("email"), str) else None
+                    self._models = []
+            if discarded:
+                # Signed out (or canceled) while the code was being exchanged: that wins.
+                self._revoke(tokens.refresh_token, client_id)
+                raise ChatGPTError("canceled", f"Sign-in was canceled in {APP_NAME} before it finished.")
         try:
             models = self._fetch_models(tokens.access_token)
         except ChatGPTError as exc:
@@ -619,6 +653,8 @@ class ChatGPTSession:
             except ChatGPTError as exc:
                 if exc.code in REAUTH_CODES:
                     raise self._sign_in_again(ChatGPTError(exc.code, SIGN_IN_AGAIN, False, exc.status)) from None
+                if exc.code in REJECTED_REGISTRATION_CODES:
+                    raise self._sign_in_again(self._registration_rejected()) from None
                 raise self._note(exc)
             try:
                 fresh = _token_fields(body, sent, previous_scopes=tokens.scopes)
@@ -630,11 +666,12 @@ class ChatGPTSession:
                 raise self._sign_in_again(exc) from None
             if id_token is None:
                 return self._install(fresh, None)
-            rotation = _Rotation(fresh, id_token)
+            rotation = _Rotation(fresh, id_token, time.time())
             with self._lock:
                 self._rotation = rotation
         try:
-            claims = self._verify(rotation.id_token, client_id, None)
+            # As of when it arrived (as the DevKit does): a key-service outage may outlast the id_token.
+            claims = self._verify(rotation.id_token, client_id, None, leeway=5 + max(0.0, time.time() - rotation.received_at))
             if claims["sub"] != subject:
                 raise ChatGPTError(
                     "account_mismatch", "ChatGPT renewed the sign-in for a different account. Sign in with ChatGPT again."
@@ -654,6 +691,16 @@ class ChatGPTSession:
                 if isinstance(claims.get("email"), str):
                     self._email = claims["email"]
             return tokens.access_token
+
+    def _registration_rejected(self) -> ChatGPTError:
+        """Forget a registration ChatGPT rejects for good, so the next sign-in registers the app again."""
+        with self._lock:
+            self._client_id = None
+            try:
+                self._save()
+            except ChatGPTError:
+                pass  # forgotten in memory; the file is rewritten at the next registration
+        return ChatGPTError("registration_rejected", REGISTRATION_REJECTED)
 
     def _note(self, error: ChatGPTError) -> ChatGPTError:
         with self._lock:
@@ -685,14 +732,20 @@ class ChatGPTSession:
     def set_models(self, manager: str, worker: str) -> None:
         with self._lock:
             slugs = [m["slug"] for m in self._models]
-            for role, slug in (("manager", manager), ("worker", worker)):
+            for role, slug, current in (("manager", manager, self._manager_model), ("worker", worker, self._worker_model)):
                 if not isinstance(slug, str) or not slug.strip():
                     raise ValueError(f"Choose a {role} model.")
-                if slugs and slug not in slugs:
+                # Only a change is checked: a default the plan doesn't list may stay while the other role changes.
+                if slugs and slug != current and slug not in slugs:
                     offered = ", ".join(slugs)
                     raise ValueError(f"{slug!r} is not one of the models your ChatGPT plan offers. Choose the {role} model from: {offered}.")
-            self._manager_model, self._worker_model = manager, worker
-            self._save()
+            previous = self._manager_model, self._worker_model, self._models_chosen
+            self._manager_model, self._worker_model, self._models_chosen = manager, worker, True
+            try:
+                self._save()
+            except ChatGPTError:
+                self._manager_model, self._worker_model, self._models_chosen = previous
+                raise
 
     # -- sign-out -----------------------------------------------------------------
 
@@ -701,7 +754,9 @@ class ChatGPTSession:
             with self._lock:
                 held = self._rotation.tokens if self._rotation is not None else self._tokens
                 client_id = self._client_id
-                self._tokens = self._rotation = self._attempt = None
+                self._tokens = self._rotation = None
+                self._attempts = []
+                self._generation += 1
                 self._status = "disconnected"
                 self._name = self._email = self._subject = None
                 self._models, self._error = [], None

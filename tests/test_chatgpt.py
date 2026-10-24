@@ -185,7 +185,7 @@ def saved(tmp_path) -> dict:
 def test_the_first_sign_in_registers_the_app_and_later_ones_reuse_its_client_id(tmp_path):
     session, api, _ = new_session(tmp_path)
     url = session.start(PORT)
-    assert session.state()["status"] == "connecting"
+    assert session.state()["status"] == "disconnected" and session.state()["pending"] is True
     params = dict(httpx.URL(url).params)
     assert params["client_id"] == REGISTRATION_ENTRY and params["agent_name_hint"] == APP_NAME
     assert params["redirect_uri"] == redirect_uri(PORT) == "http://127.0.0.1:8765/auth/callback"
@@ -241,7 +241,7 @@ def test_sign_in_connects_and_keeps_no_token_on_disk(tmp_path):
     state = session.state()
     assert state["status"] == "connected" and state["error"] is None
     assert (state["name"], state["email"]) == ("Ada Lovelace", "ada@example.com")
-    assert saved(tmp_path) == {"client_id": api.client_id, "manager_model": "gpt-6.1-sol", "worker_model": "gpt-6-luna"}
+    assert saved(tmp_path) == {"client_id": api.client_id}  # the models are saved only once chosen
     path = tmp_path / "settings" / "chatgpt.json"
     if os.name == "posix":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -294,7 +294,7 @@ def test_a_callback_from_elsewhere_leaves_the_sign_in_pending(tmp_path):
     ):
         with pytest.raises(ChatGPTError):
             session.finish(bad_query, host)
-        assert session.state()["status"] == "connecting" and session.state()["error"] is None
+        assert session.state()["pending"] is True and session.state()["error"] is None
     session.finish(query, HOST)
     assert session.state()["status"] == "connected"
 
@@ -319,14 +319,85 @@ def test_a_sign_in_expires(tmp_path):
 def test_a_new_sign_in_keeps_the_old_one_usable_until_it_succeeds(tmp_path):
     session, api, clock = signed_in(tmp_path)
     first = api.authorize(session.start(PORT))
-    second_url = session.start(PORT)  # replaces the first attempt
-    assert session.state()["status"] == "connecting" and session.access_token() == "at-1"
-    with pytest.raises(ChatGPTError):
-        session.finish(first, HOST)
+    second_url = session.start(PORT)  # started again (another click, a closed tab): the first stays valid
+    assert session.state()["status"] == "connected" and session.state()["pending"] is True and session.access_token() == "at-1"
+    session.finish(first, HOST)  # whichever finishes first wins...
+    assert session.state()["pending"] is False
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(second_url), HOST)  # ...and the other is no longer waiting
+    assert caught.value.code == "no_sign_in"
+    # A sign-in that never finishes leaves the old one usable.
+    third = session.start(PORT)
     clock.now += PENDING_SECONDS + 1
-    assert session.state()["status"] == "connected" and session.access_token() == "at-1"
+    assert session.state()["status"] == "connected" and session.state()["pending"] is False and session.access_token() == "at-1"
     with pytest.raises(ChatGPTError):
-        session.finish(api.authorize(second_url), HOST)
+        session.finish(api.authorize(third), HOST)
+    assert session.state()["status"] == "connected"
+
+
+def test_at_most_a_few_sign_ins_wait_at_once(tmp_path):
+    session, api, _ = new_session(tmp_path)
+    urls = [session.start(PORT) for _ in range(4)]
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(urls[0]), HOST)  # the oldest of four was dropped
+    assert caught.value.code == "wrong_state"
+    session.finish(api.authorize(urls[1]), HOST)
+    assert session.state()["status"] == "connected"
+
+
+def test_cancel_drops_waiting_sign_ins(tmp_path):
+    session, api, _ = new_session(tmp_path)
+    url = session.start(PORT)
+    session.cancel()
+    assert session.state()["pending"] is False
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(url), HOST)
+    assert caught.value.code == "no_sign_in" and session.state()["status"] == "disconnected"
+
+
+def test_signing_out_during_the_code_exchange_wins(tmp_path):
+    session, api, _ = new_session(tmp_path)
+    query = api.authorize(session.start(PORT))
+    exchange = api._token
+
+    def slow_exchange(form):
+        session.sign_out()  # the person signs out while the code is being exchanged
+        return exchange(form)
+
+    api._token = slow_exchange
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(query, HOST)
+    assert caught.value.code == "canceled"
+    assert session.state()["status"] == "disconnected"
+    with pytest.raises(ChatGPTError):
+        session.access_token()
+    assert api.revocations and api.revocations[-1]["token"] == "rt-1"  # the tokens it got were revoked
+
+
+def test_a_rejected_registration_is_forgotten(tmp_path):
+    session, api, _ = signed_in(tmp_path)
+    api.token_reply = (401, {"error": "invalid_client"})
+    with pytest.raises(ChatGPTError) as caught:
+        session.finish(api.authorize(session.start(PORT)), HOST)
+    assert caught.value.code == "registration_rejected" and "register" in str(caught.value)
+    assert saved(tmp_path)["client_id"] is None
+    params = dict(httpx.URL(session.start(PORT)).params)
+    assert params["client_id"] == REGISTRATION_ENTRY and params["agent_name_hint"] == APP_NAME
+
+    session, api, clock = signed_in(tmp_path / "refresh")
+    api.refresh_reply = (401, {"error": "invalid_client"})
+    clock.now += 3600
+    with pytest.raises(ChatGPTError) as caught:
+        session.access_token()
+    assert caught.value.code == "registration_rejected" and session.state()["status"] == "reauth_required"
+    assert dict(httpx.URL(session.start(PORT)).params)["client_id"] == REGISTRATION_ENTRY
+
+
+def test_a_server_on_port_80_can_finish_sign_in(tmp_path):
+    session, api, _ = new_session(tmp_path)
+    url = session.start(80)
+    assert dict(httpx.URL(url).params)["redirect_uri"] == "http://127.0.0.1:80/auth/callback"
+    session.finish(api.authorize(url), "127.0.0.1")  # a browser leaves the default port out of Host
     assert session.state()["status"] == "connected"
 
 
@@ -551,6 +622,25 @@ def test_a_key_service_outage_during_refresh_keeps_the_rotated_tokens(tmp_path):
     assert session.access_token() == "at-2" and api.refreshes == 1
 
 
+def test_a_kept_rotation_is_checked_as_of_when_it_arrived(tmp_path):
+    session, api, clock = signed_in(tmp_path)
+    api.refresh_id_token = {"exp_in": -300}  # expired five minutes ago...
+    api.jwks_status = 503
+    clock.now += 3600
+    with pytest.raises(ChatGPTError):
+        session.access_token()
+    session._rotation.received_at -= 600  # ...but it arrived ten minutes ago, during the outage
+    api.jwks_status = 200
+    assert session.access_token() == "at-2"
+
+    session, api, clock = signed_in(tmp_path / "fresh")
+    api.refresh_id_token = {"exp_in": -300}  # expired before it arrived: refused
+    clock.now += 3600
+    with pytest.raises(ChatGPTError) as caught:
+        session.access_token()
+    assert caught.value.code == "invalid_id_token" and session.state()["status"] == "reauth_required"
+
+
 def test_a_refresh_without_a_new_refresh_token_is_refused(tmp_path):
     session, api, clock = signed_in(tmp_path)
     clock.now += 3600
@@ -618,6 +708,25 @@ def test_set_models_checks_the_catalog_and_persists(tmp_path):
     assert (state["manager_model"], state["worker_model"]) == ("gpt-6-luna", "gpt-6-mini")
     later.set_models("anything", "goes")  # no catalog loaded yet
     assert saved(tmp_path) == {"client_id": api.client_id, "manager_model": "anything", "worker_model": "goes"}
+
+
+def test_the_default_models_apply_until_a_choice_is_made(tmp_path):
+    session, api, _ = new_session(tmp_path)
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    assert "manager_model" not in saved(tmp_path)
+    later = ChatGPTSession(tmp_path / "settings" / "chatgpt.json", manager_model="gpt-6-mini", worker_model="gpt-6-luna")
+    assert later.state()["manager_model"] == "gpt-6-mini"  # the settings' default, not one saved at registration
+
+
+def test_a_default_the_plan_does_not_list_can_stay_while_the_other_role_changes(tmp_path):
+    api = FakeOpenAI()
+    session = ChatGPTSession(tmp_path / "settings" / "chatgpt.json", client=httpx.Client(transport=httpx.MockTransport(api)),
+                             manager_model="gpt-7-preview")
+    session.finish(api.authorize(session.start(PORT)), HOST)
+    session.set_models("gpt-7-preview", "gpt-6-mini")
+    assert (session.state()["manager_model"], session.state()["worker_model"]) == ("gpt-7-preview", "gpt-6-mini")
+    with pytest.raises(ValueError):
+        session.set_models("gpt-7-preview", "gpt-8")
 
 
 def test_a_corrupt_settings_file_is_ignored(tmp_path):

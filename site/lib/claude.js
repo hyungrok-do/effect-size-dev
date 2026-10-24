@@ -47,7 +47,7 @@ export function describeError(error) {
   return message;
 }
 
-export const looksLikeAnthropicKey = (key) => /^sk-ant-[A-Za-z0-9_-]{8,}$/.test(key);
+export { looksLikeAnthropicKey } from './providers.js';
 
 // What the search agent's tools do, by name, for either provider; `plan()` is the plan it submitted.
 // A null max_results (OpenAI's strict mode sends null for "the default") takes the default.

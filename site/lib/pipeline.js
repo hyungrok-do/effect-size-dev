@@ -45,6 +45,15 @@ const found = (x) => [
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const PROCESSED = new Set(['extracted', 'needs_manual', 'no_fulltext', 'error']);
 
+// Errors after which every later model call fails the same way (a refused key, a model the key may
+// not use, no credit left): the run stops and says why, instead of sending a request for every
+// remaining record and paper. Mirrors stops_the_run in python/esf/pipeline.py.
+const STOPPING_CODES = new Set(['invalid_api_key', 'insufficient_quota', 'model_not_found']);
+export function stopsTheRun(error) {
+  if (error?.name === 'OpenAIError') return STOPPING_CODES.has(error.code) || [401, 403].includes(error.status);
+  return [401, 403, 404].includes(error?.status); // the Anthropic SDK's errors carry the HTTP status
+}
+
 async function pool(items, limit, fn, onEach) {
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -362,7 +371,9 @@ export class Pipeline {
     const sink = this.sink(projectId);
     let done = 0;
     await this.progress(projectId, 'screening', 0, papers.length);
+    const stop = { error: null };
     await pool(papers, this.settings.concurrency, async (paper) => {
+      if (stop.error) return; // left as a candidate: the run stops, and Continue screens it
       try {
         const decision = await this.activity.track(
           { agent: 'worker', step: 'screen', text: `Screening “${short(paper.title)}”`, paperId: paper.id },
@@ -372,12 +383,17 @@ export class Pipeline {
         const status = { include: 'screened_in', exclude: 'screened_out', unsure: 'unsure' }[decision.decision];
         await this.store.updatePaper(paper.id, { status, screen: decision });
       } catch (error) {
+        if (stopsTheRun(error)) {
+          stop.error ||= error;
+          return;
+        }
         // Never drop a record silently: an unscreened record goes forward as "unsure".
         await this.store.updatePaper(paper.id, {
           status: 'unsure', screen: { decision: 'unsure', reason: `Screening failed (${describeError(error)}); review by hand.` },
         });
       }
     }, () => this.progress(projectId, 'screening', ++done, papers.length));
+    if (stop.error) throw stop.error;
   }
 
   async extractAll(projectId, spec) {
@@ -390,8 +406,10 @@ export class Pipeline {
     }
     let done = 0;
     await this.progress(projectId, 'extracting', 0, queue.length);
-    await pool(queue, this.settings.concurrency, (paper) => this.extractPaper(projectId, spec, paper.id),
+    const stop = { error: null };
+    await pool(queue, this.settings.concurrency, (paper) => (stop.error ? null : this.extractPaper(projectId, spec, paper.id, { stop })),
       () => this.progress(projectId, 'extracting', ++done, queue.length));
+    if (stop.error) throw stop.error;
   }
 
   // -- across papers: overlap and the summary ---------------------------------------
@@ -527,11 +545,13 @@ export class Pipeline {
   }
 
   // upload: the bytes of a PDF the user supplied, used instead of searching for the text.
-  async extractPaper(projectId, spec, paperId, { upload = null, uploadName = '' } = {}) {
+  // stop: in a run, where an error that would fail every paper stops the run.
+  async extractPaper(projectId, spec, paperId, { upload = null, uploadName = '', stop = null } = {}) {
     try {
       await this.extractOne(projectId, spec, paperId, upload, uploadName);
     } catch (error) {
       await this.store.updatePaper(paperId, { status: 'error', error: `Extraction failed. ${describeError(error)}` });
+      if (stop && stopsTheRun(error)) stop.error ||= error;
     }
   }
 
@@ -579,6 +599,7 @@ export class Pipeline {
       );
       report = verify(worker, doc.text, quotesReliable);
     } catch (error) {
+      if (stopsTheRun(error)) throw error;
       if (error instanceof ModelDeclined) workerError = `the worker ${error.message}`;
       else if (error instanceof ModelTruncated) workerError = "the worker's extraction was cut off before it finished";
       else workerError = `the worker failed: ${describeError(error)}`;
@@ -609,6 +630,7 @@ export class Pipeline {
         finalReport = verify(final, doc.text, quotesReliable);
         extractedBy = 'manager';
       } catch (error) {
+        if (stopsTheRun(error)) throw error;
         if (!worker) {
           await this.store.updatePaper(paperId, {
             status: 'needs_manual', escalation: { reasons, audit: audited },

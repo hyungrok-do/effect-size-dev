@@ -10,16 +10,21 @@ from __future__ import annotations
 import copy
 import logging
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
+import anthropic
+
 from . import prompts
+from .chatgpt import ChatGPTError
 from .config import Settings
 from .evidence import build_evidence, decisions_basis, overlap_records
 from .fulltext import FullText, get_fulltext
 from .llm import LLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
+from .openai_llm import OpenAIError
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
 from .sources import Record, SourceError, Sources, europepmc_pmid, europepmc_record, trial_record
 from .store import Store
@@ -33,6 +38,25 @@ NOT_STUDIES = {
     "Review", "Systematic Review", "Meta-Analysis", "Editorial", "Comment", "Letter", "News",
     "Guideline", "Practice Guideline", "Published Erratum", "Retraction of Publication",
 }
+
+
+# Errors after which every later model call fails the same way: a refused key or sign-in, a model the
+# account may not use, a plan's share used up. The run stops and says why, instead of sending a
+# request for every remaining record and paper.
+STOPPING_CODES = frozenset({
+    "signed_out", "reauth_required", "registration_rejected", "invalid_api_key", "insufficient_quota", "model_not_found",
+    "subscription_sharing_usage_limit_exceeded", "subscription_sharing_user_not_eligible", "subscription_sharing_invalid_user",
+    "chatpass_v2_scope_not_authorized", "chatpass_v2_invalid_authorization_context",
+})
+
+
+def stops_the_run(exc: BaseException) -> bool:
+    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError)):
+        return True
+    if isinstance(exc, (OpenAIError, ChatGPTError)):
+        code = exc.code.replace("subscription_sharing_v2_", "subscription_sharing_")
+        return code in STOPPING_CODES or (isinstance(exc, OpenAIError) and exc.status in (401, 403))
+    return False
 
 
 class Toolbox:
@@ -358,13 +382,19 @@ class Pipeline:
         sink = self._sink(project_id)
         done = 0
         self._progress(project_id, "screening", 0, len(papers))
+        stop = _Stop()
 
         def screen(paper: dict) -> None:
+            if stop.error is not None:
+                return  # left as a candidate: the run stops
             try:
                 decision = self.llm.screen(spec, _record_text(paper), sink)
                 status = {"include": "screened_in", "exclude": "screened_out", "unsure": "unsure"}[decision.decision]
                 self.store.update_paper(paper["id"], status=status, screen=decision.model_dump())
             except Exception as exc:
+                if stops_the_run(exc):
+                    stop.set(exc)
+                    return
                 # Never drop a record silently: an unscreened record goes forward as "unsure".
                 self.store.update_paper(
                     paper["id"],
@@ -376,6 +406,7 @@ class Pipeline:
             for _ in pool.map(screen, papers):
                 done += 1
                 self._progress(project_id, "screening", done, len(papers))
+        stop.raise_if_set()
 
     def _extract_all(self, project_id: str, spec: SearchSpec) -> None:
         queue = self.store.papers(project_id, status="screened_in") + self.store.papers(project_id, status="unsure")
@@ -385,10 +416,17 @@ class Pipeline:
             self.store.update_paper(paper["id"], error="Not extracted: over the per-project limit; use Extract.")
         done = 0
         self._progress(project_id, "extracting", 0, len(queue))
+        stop = _Stop()
+
+        def extract(paper: dict) -> None:
+            if stop.error is None:
+                self.extract_paper(project_id, spec, paper["id"], stop=stop)
+
         with ThreadPoolExecutor(self.settings.worker_concurrency) as pool:
-            for _ in pool.map(lambda p: self.extract_paper(project_id, spec, p["id"]), queue):
+            for _ in pool.map(extract, queue):
                 done += 1
                 self._progress(project_id, "extracting", done, len(queue))
+        stop.raise_if_set()
 
     # -- across papers: overlap and the summary ---------------------------------
 
@@ -460,12 +498,15 @@ class Pipeline:
         self.store.update_paper(paper_id, author_list=record.author_list, authors=paper.get("authors") or record.authors)
         return record.author_list
 
-    def extract_paper(self, project_id: str, spec: SearchSpec, paper_id: int) -> None:
+    def extract_paper(self, project_id: str, spec: SearchSpec, paper_id: int, stop: "_Stop | None" = None) -> None:
+        """Extract one paper. In a run (`stop` given), an error that would fail every paper stops the run."""
         try:
             self._extract_paper(project_id, spec, paper_id)
         except Exception as exc:
             log.exception("extracting paper %s failed", paper_id)
             self.store.update_paper(paper_id, status="error", error=f"Extraction failed. {describe_error(exc)}")
+            if stop is not None and stops_the_run(exc):
+                stop.set(exc)
 
     def _extract_paper(self, project_id: str, spec: SearchSpec, paper_id: int) -> None:
         paper = self.store.paper(paper_id)
@@ -502,6 +543,8 @@ class Pipeline:
                 final_report = verify(final, fulltext.text, quotes_reliable)
                 extracted_by = "manager"
             except Exception as exc:
+                if stops_the_run(exc):
+                    raise
                 if worker is None:
                     self.store.update_paper(
                         paper_id,
@@ -533,5 +576,24 @@ class Pipeline:
         except ModelTruncated:
             return None, None, "the worker's extraction was cut off before it finished"
         except Exception as exc:
+            if stops_the_run(exc):
+                raise
             return None, None, f"the worker failed: {describe_error(exc)}"
         return worker, verify(worker, fulltext.text, quotes_reliable), None
+
+
+class _Stop:
+    """The first error that stops a batch of model calls; the calls not yet started are skipped."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.error: BaseException | None = None
+
+    def set(self, error: BaseException) -> None:
+        with self._lock:
+            if self.error is None:
+                self.error = error
+
+    def raise_if_set(self) -> None:
+        if self.error is not None:
+            raise self.error

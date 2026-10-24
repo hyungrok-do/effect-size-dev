@@ -346,14 +346,11 @@ class OpenAILLM:
             sink(step, response.get("model") or model, usage_of(response["usage"]))
 
     def _body(self, model: str, system: str, input_items: list, effort: str) -> dict:
-        return {
-            "model": model,
-            "instructions": system,
-            "input": input_items,
-            "reasoning": {"effort": effort_for(effort, self.reasoning_levels(model))},
-            "store": False,
-            "stream": True,
-        }
+        body = {"model": model, "instructions": system, "input": input_items, "store": False, "stream": True}
+        levels = self.reasoning_levels(model)
+        if levels != []:  # a catalog entry that lists no levels: a model that takes no reasoning setting
+            body["reasoning"] = {"effort": effort_for(effort, levels)}
+        return body
 
     def _parse(
         self,
@@ -369,6 +366,12 @@ class OpenAILLM:
         model = self.manager_model if manager else self.worker_model
         while True:
             files = self.files
+            if not files and _has_pdf(content) and not _pdf_text(content).strip():
+                raise OpenAIError(
+                    "pdf_not_readable",
+                    "ChatGPT plan usage does not take PDF files, and this PDF has no text layer to send instead. "
+                    "Upload a PDF with selectable text, or use the Claude API or the OpenAI API for it.",
+                )
             body = self._body(model, system, [{"role": "user", "content": input_content(content, files)}], effort)
             body["text"] = {"format": {"type": "json_schema", "name": output_format.__name__, "schema": output_schema(output_format), "strict": True}}
             try:
@@ -489,6 +492,10 @@ class OpenAILLM:
             effort="medium",
             sink=sink,
         )
+
+
+def _pdf_text(content: Any) -> str:
+    return "".join(block.get("text", "") for block in content if block.get("type") == "document")
 
 
 def _has_pdf(content: Any) -> bool:
