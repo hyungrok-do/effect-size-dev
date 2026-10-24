@@ -596,6 +596,7 @@ export class Pipeline {
     });
 
     const document = documentBlock(doc, paper.title || paper.ext_id);
+    if (doc.pdf && this.llm.pdfTextFallback) document.text = doc.text;
     const quotesReliable = !doc.pdf && Boolean(doc.text.trim());
     let worker = null;
     let report = null;

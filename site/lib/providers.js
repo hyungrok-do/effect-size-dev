@@ -42,8 +42,8 @@ export function whoDid(event, names) {
 }
 
 // The three ways to run the agents, as the Agents page offers them. `credential` is what the person
-// gives: an API key, or a ChatGPT sign-in (the local edition only: OpenAI allows it for apps that run
-// on the person's own computer).
+// gives: an API key, or a ChatGPT sign-in held by the local runtime (also used by the hosted page's
+// companion connection).
 export const PROVIDERS = {
   anthropic: {
     label: 'Claude API', vendor: 'Anthropic', credential: 'key', billing: 'Anthropic API key · billed per use',

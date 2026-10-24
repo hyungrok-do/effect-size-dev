@@ -1,10 +1,10 @@
-// Effect Size Finder, browser edition: the whole app runs in this page. Searches are kept in
-// IndexedDB; the models (Claude, or OpenAI's) are called with the user's own key; nothing goes to a
-// server of ours.
+// Effect Size Finder, browser edition. Searches stay in IndexedDB. Model calls use the user's API
+// key or their ChatGPT subscription through the local companion; nothing goes to a server of ours.
 
 import { Activity, liveTasks, short } from './lib/activity.js';
 import { Claude, MODELS } from './lib/claude.js';
 import { OPENAI_MODELS, OpenAI } from './lib/openai.js';
+import { ChatGPT, ChatGPTConnection } from './lib/chatgpt.js';
 import {
   keyKind, keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS as PROVIDER_INFO, ROLE_INFO, roleNames, roleOf, whoDid,
 } from './lib/providers.js';
@@ -37,11 +37,7 @@ const LEVEL_SHORT = {
   reviews: 'Reviews search', primary: 'Target-population search', full_text: 'Full-text search',
   wider: 'Related-populations search', outcome_data: 'Outcome-data search', cited: 'Cited by a review', named: 'Named in the search plan',
 };
-// How the agents run, as the Agents page offers it (PROVIDER_INFO in providers.js): Claude's or
-// OpenAI's models with the person's own key. The third way, OpenAI's models on a ChatGPT
-// subscription, is in the local edition only: OpenAI allows that sign-in only for apps that run on
-// the person's own computer, and this page is served from the web. It can still be chosen here,
-// so the page can say how to run the local edition; it has no client, so nothing runs on it.
+// API keys call the provider directly; subscription calls go through the user's local companion.
 const PROVIDERS = {
   anthropic: {
     ...PROVIDER_INFO.anthropic, defaults: MODELS, roles: ['manager', 'fetcher', 'worker'], storage: 'esf-anthropic-api-key',
@@ -53,16 +49,17 @@ const PROVIDERS = {
     canFetch: false, client: (apiKey, models) => new OpenAI({ apiKey, models }),
     limit: 'Safest is a key from an OpenAI project with a budget of its own.',
   },
-  // The OpenAI API's defaults name its roles where a line needs a name; the header and the Agents page
-  // name no model for it, since none runs here. The local edition offers the plan's own.
   chatgpt: {
     ...PROVIDER_INFO.chatgpt, defaults: OPENAI_MODELS, roles: ['manager', 'worker'], storage: null,
-    canFetch: false, client: null, localOnly: true,
+    canFetch: false, client: (_, models) => new ChatGPT({ connection: chatgpt, models }),
   },
 };
 const PROVIDER = 'esf-provider';
 const modelsSetting = (name) => `esf-models-${name}`;
 const provider = () => PROVIDERS[state.provider] || PROVIDERS.anthropic;
+const subscription = () => state.provider === 'chatgpt';
+const modelChoices = (name = state.provider) => name === 'chatgpt'
+  ? (chatgpt.state?.models || []).map((model) => model.slug) : MODEL_CHOICES[name];
 // What each role is called on its card.
 const ROLE_TITLES = { manager: 'manager', fetcher: 'fetcher', worker: 'workers', code: 'search and checks' };
 
@@ -73,8 +70,11 @@ function chosenModels(name = state.provider) {
   try {
     saved = JSON.parse(readSetting(modelsSetting(name)) || '{}') || {};
   } catch { /* a damaged setting: the defaults */ }
-  const choices = MODEL_CHOICES[name] || []; // none to choose from for the subscription here
-  return Object.fromEntries(chosen.roles.map((role) => [role, choices.includes(saved[role]) ? saved[role] : chosen.defaults[role]]));
+  const choices = modelChoices(name) || [];
+  return Object.fromEntries(chosen.roles.map((role) => {
+    const fallback = name === 'chatgpt' ? chatgpt.state?.[`${role}_model`] : chosen.defaults[role];
+    return [role, choices.includes(saved[role]) ? saved[role] : choices.includes(fallback) ? fallback : choices[0] || chosen.defaults[role]];
+  }));
 }
 const names = () => roleNames(chosenModels());
 // The model that did a step of the open search (the last that served it), for the lines about past
@@ -83,19 +83,14 @@ function didBy(step) {
   const rows = (state.id ? state.runUsage : []).filter((u) => u.step === step && u.model);
   return rows.length ? modelLabel(rows.at(-1).model) : null;
 }
-// With the subscription chosen no model runs here, so a line about what a role will do names the role
-// ("the manager"), capitalized where it starts a sentence.
+// Before connecting the subscription, name the role until its model list is available.
 function roleWord(el, role) {
   const word = role === 'worker' ? 'the workers' : `the ${role}`;
   const before = (el.previousSibling?.textContent || '').trimEnd();
   return !before || /[.!?]$/.test(before) ? word[0].toUpperCase() + word.slice(1) : word;
 }
-// The chosen provider's models, for a job. Every job asks haveKey() first, which stops it for the
-// subscription (no client here); the error is a last guard, so no model is ever called with it.
 function client() {
-  const chosen = provider();
-  if (!chosen.client) throw new Error(`${chosen.label} runs in the local edition only.`);
-  return chosen.client(apiKey(), chosenModels());
+  return provider().client(apiKey(), chosenModels());
 }
 const ROLE_ORDER = ['manager', 'fetcher', 'worker', 'code'];
 // The roles' names for a job running in this tab: the models it started with, whatever is chosen since.
@@ -122,9 +117,7 @@ const agents = () => {
   const roles = new Set([...provider().roles, 'code', ...ROLE_ORDER.filter((role) => role !== 'code' && n[role] && n[role] !== names()[role])]);
   return ROLE_ORDER.filter((role) => roles.has(role) && n[role]).map((role) => [role, n[role], ROLE_TITLES[role], ROLE_INFO[role][1]]);
 };
-// Whether the chosen provider can run here with a key to send: never one that is surely another
-// (keyProblem), and never the subscription, which runs in the local edition only.
-const keyReady = () => Boolean(provider().client) && Boolean(apiKey()) && !keyProblem(state.provider, apiKey())?.wrong;
+const keyReady = () => subscription() ? chatgpt.ready : Boolean(apiKey()) && !keyProblem(state.provider, apiKey())?.wrong;
 const ACTIVITY_OPEN = 'esf-activity-open';
 const EMAIL = 'esf-contact-email';
 const NCBI_KEY = 'esf-ncbi-api-key';
@@ -139,6 +132,7 @@ const state = {
   available: { setup: true, problem: true, spec: false, progress: false, review: false, summary: false },
   reviewAt: {}, // `${source}:${tab}` -> the paper id shown there
 };
+const chatgpt = new ChatGPTConnection(() => { showProvider(); namesChanged(); });
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -320,25 +314,25 @@ function namesChanged() {
   renderActivity();
 }
 
-// The Agents button is flagged until the agents can run here: a key for the API chosen, and never
-// the subscription.
+// A usable API key or a connected, signed-in companion makes the agents ready.
 function showReady() {
   const ready = keyReady();
   $('#agents-toggle').dataset.missing = String(!ready);
   $('#agents-flag').hidden = ready;
 }
 
-// Everything on the page that names the provider or its models. The subscription shows how to run
-// the local edition where the key box would be.
 function showProvider() {
   const chosen = provider();
   const n = names();
-  const local = Boolean(chosen.localOnly);
+  const local = subscription();
+  const unknownModels = local && !chatgpt.ready;
   $('#agents-label').textContent = chosen.label;
   showReady();
   $('#key-box').hidden = local;
   $('#local-box').hidden = !local;
-  $('#agents-notice').hidden = local; // what is sent where: nothing is, on the subscription here
+  $('#agents-notice').hidden = local;
+  $('#chatgpt-privacy').hidden = !local;
+  showChatGPT();
   if (!local) {
     $('#api-key-label').textContent = chosen.keyName;
     $('#api-key').placeholder = chosen.placeholder;
@@ -347,40 +341,36 @@ function showProvider() {
   $('#provider-note').hidden = state.provider !== 'openai';
   for (const el of document.querySelectorAll('[data-name]')) {
     const role = el.dataset.name;
-    el.textContent = role === 'vendor' ? chosen.vendor : local && role !== 'code' ? roleWord(el, role) : n[role] || el.textContent;
+    el.textContent = role === 'vendor' ? chosen.vendor : unknownModels && role !== 'code' ? roleWord(el, role) : n[role] || el.textContent;
   }
   showDoers();
   const line = [`${n.manager} plans and reviews`, n.fetcher && `${n.fetcher} fetches`, `${n.worker} screens and reads`].filter(Boolean);
-  // The subscription's models run in the local edition, not here: the header names none.
-  $('#models').textContent = local ? 'Agents run in the local edition only' : line.join(' · ');
-  $('#agents-summary').replaceChildren(h('strong', {}, `${chosen.label}: `), local
-    ? 'runs in the local edition only, on your own computer. To search here, choose the Claude API or the OpenAI API.'
+  $('#models').textContent = unknownModels ? 'Connect ChatGPT to run the agents' : line.join(' · ');
+  $('#agents-summary').replaceChildren(h('strong', {}, `${chosen.label}: `), unknownModels
+    ? 'connect the local companion and sign in to use your plan here.'
     : `${line.join(', ')}.${keyReady() ? '' : ` No ${chosen.keyName} yet.`}`);
   showAgentsPage();
 }
 
-// The Agents page: the three ways to run the agents, the key, and the model of each role. The
-// subscription's models are chosen in the local edition, from the plan's own list, so here its roles
-// are listed by what they do, without a model.
 function showAgentsPage() {
   for (const card of document.querySelectorAll('.provider-card')) {
     const name = card.dataset.provider;
     card.querySelector('.pc-title').textContent = PROVIDER_INFO[name].label;
     card.querySelector('.pc-sub').textContent = PROVIDER_INFO[name].billing;
-    if (PROVIDERS[name] && !PROVIDERS[name].localOnly) {
+    if (name !== 'chatgpt' || chatgpt.ready) {
       const n = roleNames(chosenModels(name));
       card.querySelector('.pc-models').textContent = [n.manager, n.fetcher, n.worker].filter(Boolean).join(' · ');
-    }
+    } else card.querySelector('.pc-models').textContent = 'Connect through the local helper · no API key';
     card.querySelector('input').checked = name === state.provider;
   }
   const models = chosenModels();
   const n = names();
-  const local = Boolean(provider().localOnly);
+  const local = subscription() && !chatgpt.ready;
   $('#roles').replaceChildren(...[...provider().roles, 'code'].map((key) => [key, n[key], ROLE_TITLES[key], ROLE_INFO[key][1]]).map(([key, name, role, does]) => h('li', { 'data-agent': key },
     h('strong', {}, local ? ROLE_INFO[key][0] : `${name} · ${role}`), does,
     key !== 'code' && !local && h('select', {
       id: `model-${key}`, 'aria-label': `Model for the ${role}`, onchange: (event) => chooseModel(key, event.target.value),
-    }, MODEL_CHOICES[state.provider].map((model) => h('option', { value: model, selected: model === models[key] || null }, modelLabel(model)))))));
+    }, modelChoices().map((model) => h('option', { value: model, selected: model === models[key] || null }, modelLabel(model)))))));
   $('#roles-note').hidden = !local;
 }
 
@@ -388,8 +378,29 @@ function showAgentsPage() {
 // the chosen manager, or its role on the subscription.
 function showDoers() {
   for (const el of document.querySelectorAll('[data-did]')) {
-    el.textContent = didBy(el.dataset.did) || (provider().localOnly ? roleWord(el, 'manager') : names().manager);
+    el.textContent = didBy(el.dataset.did) || (subscription() && !chatgpt.ready ? roleWord(el, 'manager') : names().manager);
   }
+}
+
+function showChatGPT() {
+  const linked = chatgpt.phase === 'ready';
+  $('#connect-chatgpt').textContent = linked ? 'Open companion' : 'Connect ChatGPT';
+  $('#disconnect-chatgpt').hidden = chatgpt.phase === 'disconnected';
+  $('#helper-address').disabled = chatgpt.phase !== 'disconnected';
+  const who = [chatgpt.state?.name, chatgpt.state?.email].filter(Boolean).join(' · ');
+  $('#chatgpt-status').textContent = chatgpt.error || chatgpt.state?.error || (chatgpt.ready
+    ? `Connected${who ? ` as ${who}` : ''}. Keep the companion window and helper open while searching.`
+    : linked ? chatgpt.state?.status === 'connected' ? 'Refresh the model list in the companion window.'
+      : 'Sign in with ChatGPT in the companion window.'
+      : chatgpt.phase === 'waiting' ? 'Allow this website in the companion window, then sign in.'
+        : chatgpt.phase === 'connecting' ? 'Opening the local companion…'
+          : 'Start the helper once, then connect to use your ChatGPT plan in this page.');
+  if (chatgpt.ready) { $('#local-box').dataset.missing = 'false'; $('#local-status').textContent = ''; }
+}
+
+function connectChatGPT() {
+  try { chatgpt.connect($('#helper-address').value.trim()); }
+  catch (error) { $('#chatgpt-status').textContent = error.message; }
 }
 
 // A step's commands to the clipboard; where the browser doesn't allow that, they are selected to copy by hand.
@@ -449,7 +460,7 @@ function showKeyStatus() {
   showReady();
   const status = $('#key-status');
   const chosen = provider();
-  if (chosen.localOnly) {
+  if (subscription()) {
     status.textContent = ''; // its box is hidden; switching back shows the key's own status again
     return;
   }
@@ -489,17 +500,14 @@ async function checkKey() {
   }
 }
 
-// The jobs need a key; without one, the page opens the Agents page and says so. A key that belongs to
-// the other vendor (or an NCBI key) is not sent anywhere. The subscription stops every job the same
-// way, on the box that says how to run the local edition.
+// Stop before creating work when the selected provider needs credentials or a companion connection.
 function haveKey() {
   if (keyReady()) return true;
   setAgentsOpen(true);
-  if (provider().localOnly) {
+  if (subscription()) {
     $('#local-box').dataset.missing = 'true';
-    $('#local-status').textContent = "This page can't run the agents on your ChatGPT plan, so nothing was started. "
-      + 'Run the local edition as above, or choose the Claude API or the OpenAI API.';
-    $('#local-title').focus();
+    $('#local-status').textContent = 'Connect ChatGPT and sign in through the companion window first. Nothing was started.';
+    $('#connect-chatgpt').focus();
     return false;
   }
   $('#key-box').dataset.missing = 'true';
@@ -1385,6 +1393,8 @@ async function start() {
   $('#remember-key').addEventListener('change', rememberChanged);
   $('#forget-key').addEventListener('click', forgetKey);
   $('#forget-saved').addEventListener('click', forgetSavedKeys);
+  $('#connect-chatgpt').addEventListener('click', connectChatGPT);
+  $('#disconnect-chatgpt').addEventListener('click', () => chatgpt.disconnect());
   $('#check-key').addEventListener('click', checkKey);
   $('#contact-email').addEventListener('change', (e) => writeSetting(EMAIL, e.target.value.trim()));
   $('#ncbi-key').addEventListener('input', showNcbiStatus);

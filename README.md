@@ -7,7 +7,7 @@ row it came from. You review the papers one at a time, including or excluding ea
 model checks the studies for overlap and summarizes, for each effect size your plan needs, what the
 studies you kept report. The agents run three ways, chosen on the **Agents** page: the **Claude
 API** (an Anthropic key), the **OpenAI API** (an OpenAI key), or an **OpenAI subscription** (your
-ChatGPT Plus or Pro plan, no key; local edition only).
+ChatGPT Plus or Pro plan, no key; the browser edition connects through a local helper).
 
 It **searches for relevant papers**, **extracts the reported numbers** and **summarizes them**. It
 does not combine studies into an effect size or compute a sample size: those choices are yours.
@@ -18,9 +18,9 @@ This project was largely generated with Claude Code and is under validation.
 
 | | Browser edition (`site/`) | Local server (`python/`, `web/`) |
 |---|---|---|
-| Runs | Entirely in the page; published on GitHub Pages | A Python server on your computer |
-| Install | None: open the page | `pip install -e .` and `esf serve` |
-| Agents | Claude API or OpenAI API, with your own key (the OpenAI subscription card says how to run the local edition) | Claude API, OpenAI API, or OpenAI subscription (Sign in with ChatGPT, no key) |
+| Runs | Searches in the page, published on GitHub Pages; ChatGPT calls use a local helper | A Python server on your computer |
+| Install | None for API keys; install and start the helper for a ChatGPT subscription | `pip install -e .` and `esf serve` |
+| Agents | Claude API, OpenAI API, or OpenAI subscription through the companion window | Claude API, OpenAI API, or OpenAI subscription (Sign in with ChatGPT, no key) |
 | API key | Each person pastes their own; it goes only to Anthropic or OpenAI | Pasted in the page, or set on the server; none with a subscription |
 | Searches stored | In that person's browser (IndexedDB) | In `data/` on the server |
 | PDFs the browser can't download | Fetched by Claude Sonnet 5.5 (web fetch); with OpenAI, the abstract is read and the PDF can be uploaded | Downloaded by the server |
@@ -135,10 +135,10 @@ which model plays each role. It has three choices:
 |---|---|---|---|
 | You give | An Anthropic API key | An OpenAI API key | A ChatGPT sign-in (Plus or Pro) |
 | Billed | Per use, to your Anthropic account | Per use, to your OpenAI account | Against your ChatGPT plan's usage |
-| Editions | Both | Both | Local only |
+| Editions | Both | Both | Both; browser edition needs the local helper |
 | Manager | Opus 5.5 | GPT-6.1 Sol (`gpt-6.1-sol`) | GPT-6.1 Sol, or another model your plan offers |
 | Workers | Haiku 5.5 | GPT-6 Luna (`gpt-6-luna`) | GPT-6 Luna, or another model your plan offers |
-| Fetcher (browser edition) | Sonnet 5.5, web fetch | None | (local edition: the server downloads) |
+| Fetcher (browser edition) | Sonnet 5.5, web fetch | None | None; upload PDFs the browser cannot download |
 
 Under **Who does what** each role has its model: Opus, Sonnet or Haiku 5.5 with the Claude API;
 GPT-6.1 Sol or GPT-6 Luna with the OpenAI API; the models your plan lists with a subscription. Each
@@ -158,7 +158,24 @@ it. A PDF is sent as a file; if ChatGPT plan usage refuses files, its text layer
 There is no server-side refusal fallback: a paper the worker declines goes to the manager, as with
 Haiku.
 
-### Sign in with ChatGPT (local edition)
+### Sign in with ChatGPT
+
+In the **browser edition**, choose the third card, **OpenAI subscription**. Install this project and
+start `esf serve` on the same computer. Open the address it prints in this same browser once, so the
+local page receives its server access key. Return to the hosted page and click **Connect ChatGPT**
+(the helper defaults to `http://127.0.0.1:8000`; change it if you chose another port). In the companion
+window, check the website address, click **Allow this website**, and **Sign in with ChatGPT**. Then
+choose models and run searches in the hosted page. Keep the helper and companion window open.
+An existing installation needs `git pull --ff-only` and a restart to add the companion endpoint.
+
+The companion makes same-origin requests to the helper, which holds the OAuth credentials and calls
+OpenAI. Only the account display information, model list, prompts and model responses cross the
+approved popup connection. The hosted page never receives the server access key or OAuth tokens.
+The connection checks the exact website origin, window and a fresh per-connection nonce; approving
+one tab does not authorize another. It does not enable CORS on the local API. Your projects remain in
+the hosted page's IndexedDB. Closing the companion disconnects that page; use **Sign out** in the
+companion to revoke the helper's ChatGPT session too. Reconnect after reloading the hosted page.
+If the browser blocks popups, allow them for this page and connect again.
 
 In the local edition, choose **OpenAI subscription** on the Agents page and click **Sign in with ChatGPT**. ChatGPT opens in a new
 tab; after you sign in and allow plan usage it returns to the server (`/auth/callback`), and the
@@ -168,10 +185,9 @@ page then lists the models your plan offers, to pick the manager and the workers
 
 OpenAI offers this self-serve to open-source apps that run on your own computer: ChatGPT returns to
 `http://127.0.0.1:<port>/auth/callback` only (it refuses a callback on a web address such as GitHub
-Pages), and its terms ask that plan usage come from the user's own computer. So the GitHub Pages
-edition can't sign in with ChatGPT. Choosing **OpenAI subscription** there shows how to install and
-start the local edition instead, and nothing runs on it there; to search in the hosted page, use the
-Claude API or the OpenAI API with a key. Open the local page on the computer that runs the server
+Pages). The companion lets the GitHub Pages edition use this local sign-in and runtime; this is not
+a pure-browser, no-install subscription mode. API-key providers still work without the helper.
+Open the local page on the computer that runs the server
 (the server refuses a sign-in started from another machine). The sign-in uses OAuth with PKCE and an OIDC nonce,
 and the identity token is verified against OpenAI's signing keys (`python/esf/chatgpt.py`). Only the
 app's stable host ID, registration (its issued client ID and verified account subject), and your choice of models are saved, in
@@ -476,4 +492,7 @@ API key. `tests/test_site.py` drives the browser edition in Chromium with every 
 the same fixtures, including a PDF host that refuses web pages so the download goes through Sonnet,
 and a search run on OpenAI's models; it is skipped if Playwright or the built `site/vendor/` is
 missing. `tests/test_web.py` drives the local page against the server: signing in with ChatGPT (the
-browser's trip to ChatGPT answered with its redirect back) and searching on the plan. Set `ESF_CHROMIUM` to use a particular Chromium binary.
+browser's trip to ChatGPT answered with its redirect back) and searching on the plan.
+`tests/test_companion.py` runs a hosted HTTPS page through the local companion, including consent,
+sign-in, search, extraction, summary, reconnecting, credential isolation and the endpoint's access
+checks. All OpenAI calls in these tests are mocked. Set `ESF_CHROMIUM` to use a particular Chromium binary.

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>ChatGPT companion · Effect Size Finder</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #173b3c; background: #f4f8f6; }
+    body { margin: 0; padding: 28px; }
+    main { max-width: 540px; margin: auto; }
+    .eyebrow { font-size: 13px; letter-spacing: .05em; text-transform: uppercase; color: #527576; }
+    h1 { font-size: 28px; line-height: 1.2; }
+    p { line-height: 1.6; overflow-wrap: anywhere; }
+    #website { display: block; padding: 14px; background: white; border: 1px solid #b7cfca; border-radius: 8px; overflow-wrap: anywhere; }
+    button { font: inherit; cursor: pointer; padding: 10px 14px; margin: 4px 5px 4px 0; border-radius: 8px; border: 1px solid #729c95; background: white; color: #173b3c; }
+    button.primary { background: #17695e; color: white; border-color: #17695e; }
+    button:disabled { opacity: .5; cursor: default; }
+    [hidden] { display: none !important; }
+    #error { color: #9b3027; background: #fff0ed; padding: 12px; border-radius: 8px; }
+    .hint { font-size: 14px; color: #527576; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Effect Size Finder · Local companion</p>
+  <h1>Connect your ChatGPT plan</h1>
+  <p id="intro">This website is asking to run its agents on your ChatGPT plan:</p>
+  <strong id="website"></strong>
+  <p id="consent">Allowing it lets this website send prompts and receive model responses while this window stays open. Your ChatGPT credentials stay in the local helper.</p>
+  <div id="approval">
+    <button id="allow" class="primary" type="button" disabled>Allow this website</button>
+    <button id="decline" type="button">Decline</button>
+  </div>
+  <section id="account" hidden>
+    <p id="status" role="status"></p>
+    <button id="sign-in" class="primary" type="button">Sign in with ChatGPT</button>
+    <button id="cancel" type="button" hidden>Cancel sign-in</button>
+    <button id="another" type="button" hidden>Use another ChatGPT account</button>
+    <button id="refresh" type="button" hidden>Refresh models</button>
+    <button id="sign-out" type="button" hidden>Sign out</button>
+    <button id="disconnect" type="button">Disconnect website</button>
+    <p class="hint">Return to the website to choose models and run your search. Keep this window and the helper running.</p>
+  </section>
+  <p id="error" role="alert" hidden></p>
+  <p class="hint">If the helper needs its access key, open the address printed by <code>esf serve</code> in this same browser first, then connect again.</p>
+</main>
+<script type="module" src="./companion.js"></script>
+</body>
+</html>

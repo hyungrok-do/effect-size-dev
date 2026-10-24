@@ -159,11 +159,15 @@
   .keybox[data-missing="true"] .hint { color: var(--error); }
   .keybox #provider-note { color: var(--ink-2); }
   .keybox #remember-note, .keybox #limit-note { color: var(--muted); }
-  /* The OpenAI subscription, chosen here: how to run the local edition, which can use the plan. */
+  /* Connect the OpenAI subscription through the local companion. */
   .local-box { margin: 16px 0 0; padding: 14px 16px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; font-size: 14.5px; color: var(--ink-2); }
   .local-box[data-missing="true"] { border-color: var(--error); }
   #agents-page .local-box h3 { margin-top: 0; color: var(--ink); }
   .local-box p { margin: 8px 0 0; max-width: 80ch; }
+  #helper-address { max-width: 400px; }
+  .local-box > label { display: block; margin: 14px 0 6px; font-weight: 600; color: var(--ink); }
+  #helper-setup { margin-top: 16px; }
+  #helper-setup > summary { cursor: pointer; font-weight: 600; }
   .local-steps { margin: 8px 0 0; padding-left: 22px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .local-steps .cmd { display: flex; align-items: flex-start; gap: 8px; margin-top: 4px; }
   .local-steps .os { display: block; margin-top: 8px; }
@@ -205,7 +209,7 @@
   #setup h3 { font-size: 15px; margin-top: 20px; }
   .file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
-  textarea, input[type="text"], input[type="password"], select {
+  textarea, input[type="text"], input[type="password"], input[type="url"], select {
     width: 100%; padding: 8px 10px; border: 1px solid var(--field-line); border-radius: 8px;
     background: var(--bg); color: var(--ink); font: inherit; font-size: 16px;
   }
@@ -437,7 +441,7 @@
 
 <section class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published effect sizes a study plan needs</h2>
-  <p class="lede">Describe the study you are planning. Claude, or an OpenAI model if you prefer, searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and <span data-name="manager">Opus 5.5</span> summarizes what the papers you kept report. Everything runs in this page, with your own Anthropic or OpenAI API key.</p>
+  <p class="lede">Describe the study you are planning. Claude, or an OpenAI model if you prefer, searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and <span data-name="manager">Opus 5.5</span> summarizes what the papers you kept report. Use your own Anthropic or OpenAI API key, or connect your ChatGPT subscription through a local helper.</p>
   <ul id="points" class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
@@ -461,12 +465,12 @@
     <h2 id="agents-title">Agents</h2>
     <button id="agents-back" type="button" class="secondary small">Back to your searches</button>
   </div>
-  <p class="summary">The agents read your problem, plan and run the search, screen the records and extract what the papers report. Choose how they run: on Anthropic's or OpenAI's API with your own key, or, in the local edition, on your ChatGPT subscription.</p>
+  <p class="summary">The agents read your problem, plan and run the search, screen the records and extract what the papers report. Choose how they run: on Anthropic's or OpenAI's API with your own key, or on your ChatGPT subscription through a local helper.</p>
   <fieldset class="provider-cards">
     <legend class="sr-only">How the agents run</legend>
     <label class="provider-card" data-provider="anthropic"><input type="radio" name="provider" value="anthropic" checked><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models"></span></label>
     <label class="provider-card" data-provider="openai"><input type="radio" name="provider" value="openai"><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models"></span></label>
-    <label class="provider-card" data-provider="chatgpt"><input type="radio" name="provider" value="chatgpt"><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models">In the local edition only, which runs on your own computer</span></label>
+    <label class="provider-card" data-provider="chatgpt"><input type="radio" name="provider" value="chatgpt"><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models">Connect through the local helper · no API key</span></label>
   </fieldset>
   <div id="key-box" class="keybox">
     <label id="api-key-label" for="api-key">Anthropic API key</label>
@@ -482,8 +486,13 @@
     <p id="provider-note" class="hint" hidden>OpenAI has nothing like Claude's web fetch, so a PDF this page may not download is not fetched: the abstract is read instead, and you can upload the PDF.</p>
   </div>
   <div id="local-box" class="local-box" data-missing="false" hidden>
-    <h3 id="local-title" tabindex="-1">Your ChatGPT plan runs in the local edition</h3>
-    <p>Your ChatGPT plan can run the agents in the local edition, which runs on your own computer. OpenAI allows plan use only for apps on your own computer: its sign-in returns to <code>http://127.0.0.1</code>, which a page served from the web cannot receive.</p>
+    <h3 id="local-title" tabindex="-1">Use your ChatGPT subscription here</h3>
+    <p>The local helper handles ChatGPT sign-in and model calls on your computer. Your searches and results stay in this browser. Start the helper, connect below, then allow this website and sign in in the companion window. Usage counts against your ChatGPT plan.</p>
+    <label for="helper-address">Local helper address</label>
+    <input id="helper-address" type="url" value="http://127.0.0.1:8000" spellcheck="false" aria-describedby="chatgpt-status">
+    <div class="actions"><button id="connect-chatgpt" type="button" class="primary">Connect ChatGPT</button><button id="disconnect-chatgpt" type="button" class="secondary" hidden>Disconnect</button></div>
+    <p id="chatgpt-status" class="hint" role="status"></p>
+    <details id="helper-setup"><summary>First time? Install and start the helper</summary>
     <ol class="local-steps">
       <li>Get the code:<div class="cmd"><pre><code>git clone https://github.com/hyungrok-do/effect-size-dev.git
 cd effect-size-dev</code></pre><button type="button" class="secondary small copy" aria-label="Copy the commands of step 1">Copy</button></div></li>
@@ -494,14 +503,16 @@ cd effect-size-dev</code></pre><button type="button" class="secondary small copy
       <li>Start it, on macOS or Linux:<div class="cmd"><pre><code>.venv/bin/esf serve</code></pre><button type="button" class="secondary small copy" aria-label="Copy the macOS and Linux command of step 3">Copy</button></div>
         <span class="os">or on Windows:</span><div class="cmd"><pre><code>.venv\Scripts\esf serve</code></pre><button type="button" class="secondary small copy" aria-label="Copy the Windows command of step 3">Copy</button></div></li>
     </ol>
-    <p><code>esf serve</code> opens the local edition in your browser. If it doesn't, open the address it prints; it carries the server's access key. There, choose OpenAI subscription and click Sign in with ChatGPT.</p>
-    <p>To search here instead, choose the Claude API or the OpenAI API above. Searches stay in this browser either way.</p>
+    <p><code>esf serve</code> opens a local page in your browser. If it doesn't, open the address it prints; it carries the server's access key. Use this same browser, return here, and click Connect ChatGPT. Keep the helper and companion window open while searching.</p>
+    <p>Already installed? Run <code>git pull --ff-only</code> in its folder, then restart the helper to get the companion connection.</p>
+    </details>
     <p><button id="forget-saved" type="button" class="secondary small">Forget saved keys</button> Removes any Anthropic, OpenAI or NCBI API key this page keeps, in this tab and on this browser.</p>
     <p id="local-status" class="hint" aria-live="polite"></p>
   </div>
   <h3>Who does what</h3>
   <ul id="roles" class="roles"></ul>
-  <p id="roles-note" class="hint" hidden>In the local edition you choose the model of each from your plan's own list.</p>
+  <p id="roles-note" class="hint" hidden>Connect and sign in to choose each role's model from your plan's own list.</p>
+  <p id="chatgpt-privacy" class="notice" hidden>Your searches and decisions stay in this browser. Your paragraph and papers' text go through the local helper to OpenAI. Searches go to PubMed, ClinicalTrials.gov, Europe PMC and Unpaywall. ChatGPT credentials stay in the helper; this page receives your account name, email, model list and model responses after you allow the connection.</p>
   <p id="agents-notice" class="notice">Your key, searches and decisions stay in this browser. Your paragraph and the papers' text are sent to <span data-name="vendor">Anthropic</span>'s API to be read, and searches go to PubMed, ClinicalTrials.gov, Europe PMC and Unpaywall. Don't paste anything you can't share with them.</p>
   <div class="actions"><button id="agents-done" type="button" class="primary">Done</button></div>
 </section>
@@ -526,7 +537,7 @@ cd effect-size-dev</code></pre><button type="button" class="secondary small copy
 
     <section id="setup" class="card" role="tabpanel" aria-labelledby="tab-setup" hidden>
       <h2 id="setup-title">Set up</h2>
-      <p class="summary">Everything runs in this page. The agents, and the key they run with, are set on the Agents page; the contact email and NCBI key here are optional, but they help the search.</p>
+      <p class="summary">Your searches stay in this browser. Choose an API key or connect your ChatGPT plan on the Agents page; the contact email and NCBI key here are optional, but they help the search.</p>
       <div class="agents-line"><span id="agents-summary"></span><button id="open-agents" type="button" class="secondary small">Change agents</button></div>
       <div class="settings-grid">
         <div><label for="contact-email">Contact email <span class="hint">NCBI asks for one; Unpaywall needs it to find open-access PDFs.</span></label><input id="contact-email" type="text" inputmode="email" autocomplete="email" placeholder="you@university.edu"></div>

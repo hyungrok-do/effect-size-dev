@@ -18,12 +18,12 @@ import anthropic
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .chatgpt import CALLBACK_PATH, JOB_REFRESH_WAIT, ChatGPTError, ChatGPTSession
 from .config import MODEL_CHOICES, Settings
 from .llm import LLM, NO_KEY, ClaudeLLM, server_credentials
-from .openai_llm import OpenAILLM
+from .openai_llm import OpenAIError, OpenAILLM
 from .pipeline import Pipeline, previous_summary
 from .schemas import LEVEL_NAMES, SearchSpec, upgrade_spec
 from .sources import Sources, europepmc_url
@@ -94,6 +94,26 @@ def agents_headers(
 class ModelChoice(BaseModel):
     manager_model: str = Field(min_length=1, max_length=200)
     worker_model: str = Field(min_length=1, max_length=200)
+
+
+class PlanReasoning(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] = "low"
+
+
+class PlanRequest(BaseModel):
+    """Only the Responses fields the browser's literature agents use; no arbitrary proxy URL."""
+
+    model_config = ConfigDict(extra="forbid")
+    model: str = Field(min_length=1, max_length=200)
+    instructions: str
+    input: list
+    reasoning: PlanReasoning | None = None
+    text: dict | None = None
+    tools: list[dict] | None = None
+    include: list[str] | None = None
+    store: Literal[False] = False
+    stream: Literal[True] = True
 
 
 # Headers a reverse proxy adds; behind one, every visitor reaches the server from 127.0.0.1.
@@ -478,6 +498,42 @@ def create_app(
             except ChatGPTError:
                 pass  # the session records what went wrong
         return {**chatgpt.state(), "remote": _remote(request)}
+
+    companion_agent = None
+    companion_lock = threading.Lock()
+
+    @app.post("/api/chatgpt/responses")
+    def chatgpt_response(request: Request, body: PlanRequest) -> Response:
+        """The approved local companion calls this on its own origin. OAuth tokens never go to the
+        hosted page. The normal access-key, origin and loopback checks also apply to this endpoint."""
+        _loopback_only(request)
+        chosen = chatgpt.state()
+        if chosen["status"] != "connected":
+            return JSONResponse({"error": {"code": "reauth_required", "message": "Sign in with ChatGPT in the companion window.",
+                                           "retryable": False}}, status_code=401)
+        if body.model not in {model["slug"] for model in chosen["models"]}:
+            return JSONResponse({"error": {"code": "model_not_found", "message": "Choose a model from your ChatGPT plan's list.",
+                                           "retryable": False}}, status_code=403)
+        if body.tools and any(tool.get("type") != "namespace" for tool in body.tools):
+            raise HTTPException(400, "ChatGPT plan tools must be in a namespace.")
+        # Reuse the HTTP pool across browser calls. Its token provider and catalog read the current
+        # session on every call, including after sign-out or switching accounts.
+        nonlocal companion_agent
+        with companion_lock:
+            if companion_agent is None:
+                companion_agent = llm_for_chatgpt(chatgpt)
+            agent = companion_agent
+        # Use the same reasoning-effort selection and token-refresh handling as the local pipeline.
+        prepared = agent._body(body.model, body.instructions, body.input, body.reasoning.effort if body.reasoning else "low")
+        prepared.update(body.model_dump(exclude_none=True, exclude={"model", "instructions", "input", "reasoning"}))
+        try:
+            result = agent.responses.create(prepared)
+        except (OpenAIError, ChatGPTError) as exc:
+            status = 401 if chatgpt.state()["status"] != "connected" else exc.status or 502
+            message = "Sign in with ChatGPT again in the companion window." if status == 401 else str(exc)
+            return JSONResponse({"error": {"code": exc.code, "message": message, "retryable": exc.retryable}},
+                                status_code=status, headers={"Cache-Control": "no-store"})
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     def sign_in_url(request: Request, new_registration: bool = False) -> dict:
         if _remote(request):

@@ -510,9 +510,9 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert page.get_attribute("#agents-toggle", "data-missing") == "true"
     assert page.locator(".provider-card .pc-title").all_inner_texts() == ["Claude API", "OpenAI API", "OpenAI subscription"]
     assert page.is_checked("input[name='provider'][value='anthropic']")
-    # The subscription runs only in the local edition; its card says so (choosing it says how to run that).
+    # The subscription connects through the local helper.
     assert page.is_enabled("input[name='provider'][value='chatgpt']")
-    assert "local edition only" in page.inner_text(".provider-card[data-provider='chatgpt']")
+    assert "local helper" in page.inner_text(".provider-card[data-provider='chatgpt']")
     page.click("#agents-back")
     assert page.is_hidden("#agents-page") and page.get_attribute("#tab-setup", "aria-selected") == "true"
     page.click("#tab-problem")
@@ -1033,7 +1033,7 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     assert page.inner_text("#key-status") == "The key works, and it may use GPT-6.1 Sol, GPT-6 Luna."
     assert page.locator("#roles li strong").all_inner_texts() == ["GPT-6.1 Sol · manager", "GPT-6 Luna · workers", "Code · search and checks"]
     assert page.inner_text("#models") == "GPT-6.1 Sol plans and reviews · GPT-6 Luna screens and reads"
-    assert "sent to OpenAI's API" in page.inner_text("#agents-page .notice")
+    assert "sent to OpenAI's API" in page.inner_text("#agents-notice")
     assert page.locator("#model-worker option").all_inner_texts() == ["GPT-6.1 Sol", "GPT-6 Luna"]
     page.check("input[name='provider'][value='anthropic']")
     assert page.input_value("#api-key") == KEY and page.inner_text("#models").startswith("Opus 5.5 plans")
@@ -1276,9 +1276,8 @@ def stored_search(page, papers, **fields):
     return page.evaluate(STORE_SEARCH, [papers, SPEC.model_dump(), fields])
 
 
-def test_the_openai_subscription_says_how_to_run_the_local_edition(browser, site_url):
-    """A ChatGPT plan can run the agents only in the local edition. Chosen here, the subscription shows
-    how to run that edition where the key box was, and every job comes back to it: no model is called."""
+def test_the_subscription_requires_a_companion_before_starting_work(browser, site_url):
+    """Until the helper is connected and signed in, jobs open the connection box without starting."""
     network = Network()
     context = browser.new_context(viewport={"width": 1280, "height": 900}, permissions=["clipboard-read", "clipboard-write"])
     context.route("**/*", network)
@@ -1291,16 +1290,11 @@ def test_the_openai_subscription_says_how_to_run_the_local_edition(browser, site
     page.fill("#api-key", KEY)
     page.check("input[name='provider'][value='chatgpt']")
     assert page.is_hidden("#key-box") and page.is_visible("#local-box")
-    box = " ".join(page.inner_text("#local-box").split())
-    for said in ("Your ChatGPT plan can run the agents in the local edition, which runs on your own computer.",
-                 "OpenAI allows plan use only for apps on your own computer: its sign-in returns to http://127.0.0.1, "
-                 "which a page served from the web cannot receive.",
-                 # esf serve opens the local edition itself, with its access key in the address: no bare link to it here.
-                 "esf serve opens the local edition in your browser. If it doesn't, open the address it prints; "
-                 "it carries the server's access key. There, choose OpenAI subscription and click Sign in with ChatGPT.",
-                 "To search here instead, choose the Claude API or the OpenAI API above. Searches stay in this browser either way."):
-        assert said in box, said
-    assert page.locator("#local-box a").count() == 0 and "127.0.0.1:8000" not in box
+    assert "Use your ChatGPT subscription here" in page.inner_text("#local-box")
+    assert page.input_value("#helper-address") == "http://127.0.0.1:8000"
+    assert page.is_visible("#connect-chatgpt")
+    page.click("#helper-setup summary")
+    assert "it carries the server's access key" in page.inner_text("#helper-setup")
     # [dev] only adds the test tools, so the steps install without it. They call the environment's own
     # programs, with no activation, which Windows PowerShell's default policy refuses.
     steps = ["git clone https://github.com/hyungrok-do/effect-size-dev.git\ncd effect-size-dev",
@@ -1312,9 +1306,8 @@ def test_the_openai_subscription_says_how_to_run_the_local_edition(browser, site
         page.locator("#local-box .copy").nth(n).click()
         page.wait_for_function(f"() => document.querySelectorAll('#local-box .copy')[{n}].textContent === 'Copied'")
         assert page.evaluate("navigator.clipboard.readText()") == steps[n]
-    # No model runs here on the plan: the header says so, and the roles are listed by what they do, without
-    # a model or a choice of one (those come from the plan's own list).
-    assert page.inner_text("#models") == "Agents run in the local edition only"
+    # Until the companion supplies the plan's catalog, the page names roles without guessing models.
+    assert page.inner_text("#models") == "Connect ChatGPT to run the agents"
     # Nor do the lines about what a role will do name a model: they name the role.
     assert "and the manager summarizes what the papers you kept report" in page.inner_text(".lede")
     assert page.inner_text("#summary .summary").startswith("The manager describes what the papers you kept report")
@@ -1324,7 +1317,7 @@ def test_the_openai_subscription_says_how_to_run_the_local_edition(browser, site
         "Reads the problem, plans the search, reviews flagged extractions, checks overlap, writes the summary",
         "Screen every record and extract every paper", "Runs the searches, gets the text, checks every quote"]
     assert page.locator("#roles select").count() == 0 and "plan's own list" in page.inner_text("#roles-note")
-    assert page.is_hidden("#agents-notice")  # it says what is sent where; nothing is, here
+    assert page.is_hidden("#agents-notice") and page.is_visible("#chatgpt-privacy")
     # The commands fit a phone's width: a long line scrolls in its own box, not the page.
     page.set_viewport_size({"width": 390, "height": 844})
     assert page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") == 0
@@ -1338,14 +1331,13 @@ def test_the_openai_subscription_says_how_to_run_the_local_edition(browser, site
     assert page.is_checked("input[name='provider'][value='chatgpt']") and page.is_visible("#local-box")
     page.click("#agents-done")
     page.click("#tab-setup")
-    assert page.inner_text("#agents-summary") == ("OpenAI subscription: runs in the local edition only, on your own computer. "
-                                                  "To search here, choose the Claude API or the OpenAI API.")
+    assert page.inner_text("#agents-summary") == "OpenAI subscription: connect the local companion and sign in to use your plan here."
 
     # Every job (reading a problem, Continue, Search again, extracting, the summary) opens that box instead.
     def stopped():
         assert page.is_visible("#agents-page") and page.get_attribute("#local-box", "data-missing") == "true"
-        assert "so nothing was started" in page.inner_text("#local-status")
-        assert page.evaluate("document.activeElement.id") == "local-title"
+        assert "Nothing was started" in page.inner_text("#local-status")
+        assert page.evaluate("document.activeElement.id") == "connect-chatgpt"
         page.click("#agents-done")
 
     page.click("#tab-problem")
