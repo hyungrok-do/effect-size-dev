@@ -85,9 +85,11 @@ class ValueCheck:
 class Verification:
     values: list[list[ValueCheck]] = field(default_factory=list)  # per result, per value
     flags: list[str] = field(default_factory=list)
+    appraisal: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"values": [[asdict(v) for v in result] for result in self.values], "flags": self.flags}
+        return {"values": [[asdict(v) for v in result] for result in self.values], "flags": self.flags,
+                "appraisal": self.appraisal}
 
 
 def plausibility(result: OutcomeResult) -> list[str]:
@@ -131,6 +133,11 @@ def plausibility(result: OutcomeResult) -> list[str]:
 def verify(extraction: PaperExtraction, source_text: str, quotes_reliable: bool = True) -> Verification:
     source = Source(source_text)
     report = Verification()
+    for index, item in enumerate(extraction.appraisal):
+        found = source.find_quote(item.quote)
+        report.appraisal.append(found)
+        if found == "missing":
+            report.flags.append(f"appraisal {index + 1}: supporting quote not found in the source")
     for index, result in enumerate(extraction.results):
         checks = []
         for v in result.values:

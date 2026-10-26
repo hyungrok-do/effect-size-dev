@@ -6,6 +6,7 @@
 import { cleanAffiliations } from './affiliations.js';
 import { decisionsBasis } from './evidence.js';
 import { STATISTICS } from './spec-panel.js';
+import { PLANNING_VERSION } from './planning.js';
 
 const PAPER = -1; // result_index of a decision about the whole paper
 
@@ -500,19 +501,52 @@ function valueTable(list, study) {
         v.same_participants_as && [' ', badge(`same participants as ${v.same_participants_as}`, 'warn')]))))));
 }
 
-// The summary: an overview, then for each effect size the plan needs the values that bear on it side by
-// side with how they compare, then overlap, caveats and gaps. Nothing is combined or recommended.
+// The head agent's recommendation, with code-resolved arithmetic and the source evidence below it.
 // Each study is linked to its page through `linksOf(paper)`, {label: url}. `decisions` is
 // {paperId: {resultIndex: {decision}}}, to tell when the summary is out of date.
-export function summaryView({ summary, overlap, papers, decisions, linksOf }) {
+export function summaryView({ summary, spec, overlap, papers, decisions, linksOf }) {
   const { result, evidence } = summary;
   const values = new Map(evidence.values.map((v) => [v.key, v]));
   const study = studies(papers, linksOf);
-  const stale = JSON.stringify(decisionsBasis(papers, decisions)) !== JSON.stringify(summary.basis);
+  const stale = JSON.stringify(decisionsBasis(papers, decisions)) !== JSON.stringify(summary.basis)
+    || (spec && summary.spec_basis && JSON.stringify(spec) !== JSON.stringify(summary.spec_basis));
   const text = (t) => withValues(t, values, study);
   const groups = overlap?.groups || [];
   return [
-    stale && h('p', { class: 'notice stale' }, 'Your decisions have changed since this was written. Write it again to use them.'),
+    stale && h('p', { class: 'notice stale' }, 'Your decisions have changed since this was written, or the study specification or evidence has changed. Write it again before using the recommendation.'),
+    result.planning_version !== PLANNING_VERSION && h('p', { class: 'notice' },
+      'This saved summary predates planning recommendations. Write it again to ask the head agent for a final effect size and justification.'),
+    ...(result.recommendations || []).map((rec) => {
+      const effect = rec.resolved;
+      const label = { recommended: 'Recommended planning effect', provisional: 'Provisional planning effect',
+        insufficient_evidence: 'Insufficient evidence for a numerical choice' }[rec.status] || rec.status;
+      const number = (n) => String(Number(n.toPrecision(6)));
+      const calc = (e) => h('div', { class: 'effect-calculation' },
+        h('p', {}, e.contrast, ' · ', e.outcome, e.timepoint ? ` · ${e.timepoint}` : '', ' · ', e.scale),
+        e.origin === 'planning_assumption' && h('p', {}, `Evidence estimate: ${number(e.basis_value)}. Planning target: ${number(e.value)}. The target is an explicit head-agent judgment, not a reported estimate.`),
+        h('p', {}, 'Source: ', study.link(e.record), '. Inputs: ', ...text(e.inputs.map((k) => `[${k}]`).join(', '))),
+        h('code', {}, e.formula));
+      return h('section', { class: 'summary-block planning-recommendation', 'data-status': rec.status },
+        h('h3', {}, rec.outcome), badge(label, rec.status === 'recommended' ? 'ok' : 'warn'),
+        effect && h('p', { class: 'planning-effect' }, h('strong', {},
+          `${effect.metric === 'cohen_d' ? 'Cohen d' : (STATISTICS[effect.metric] || effect.metric)} = ${number(effect.value)}`)),
+        effect && calc(effect),
+        rec.estimand && h('p', {}, h('strong', {}, 'Target effect: '), text(rec.estimand)),
+        h('p', {}, h('strong', {}, 'Justification: '), text(rec.justification)),
+        rec.choice?.rationale && h('p', {}, text(rec.choice.rationale)),
+        rec.importance_basis && h('p', {}, h('strong', {}, 'Clinical importance: '), text(rec.importance_basis)),
+        rec.realism && h('p', {}, h('strong', {}, 'Realism: '), text(rec.realism)),
+        rec.evidence_quality && h('p', {}, h('strong', {}, 'Evidence quality: '), text(rec.evidence_quality)),
+        ...[['Assumptions', rec.assumptions], ['Other inputs for sample-size planning', rec.nuisance_parameters],
+          ['Unresolved information', [...(rec.gaps || []), ...(rec.validation_notes || [])]]]
+          .filter(([, items]) => items?.length).map(([title, items]) => h('div', {}, h('h4', {}, title),
+            h('ul', {}, items.map((item) => h('li', {}, text(item)))))),
+        rec.sensitivity?.length > 0 && h('div', {}, h('h4', {}, 'Sensitivity scenarios'),
+          h('p', { class: 'muted small' }, 'Alternative planning assumptions; these are not confidence limits.'),
+          ...rec.sensitivity.map((scenario) => h('div', { class: 'summary-block' },
+            h('strong', {}, `${scenario.label}: ${number(scenario.resolved.value)}`), calc(scenario.resolved),
+            h('p', {}, text(scenario.choice.rationale))))));
+    }),
     h('div', { class: 'summary-overview' }, text(result.overview)),
     ...result.needs.map((need) => {
       const list = need.values.map((k) => values.get(k)).filter(Boolean);
@@ -533,5 +567,18 @@ export function summaryView({ summary, overlap, papers, decisions, linksOf }) {
     foldable('summary:every-value', { class: 'summary-block' },
       `Every value kept (${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')})`,
       valueTable(evidence.values, study)),
+    foldable('summary:appraisal', { class: 'summary-block' }, 'Methodological evidence used by the head agent',
+      ...evidence.records.map((record) => h('div', { class: 'summary-block' }, study.link(record.key),
+        h('p', { class: 'muted small' }, record.fulltext_kind || 'Source type unknown'),
+        record.appraisal?.length ? h('ul', {}, record.appraisal.map((a) => h('li', {},
+          h('strong', {}, `${a.domain.replaceAll('_', ' ')}: `), a.assessment,
+          h('blockquote', {}, a.quote), h('span', { class: 'muted small' }, a.location), ' ',
+          badge(a.quote_found ? 'quote found' : 'quote not found', a.quote_found ? 'ok' : 'warn'))))
+          : h('p', {}, 'No structured appraisal was extracted. Re-extract the report to collect supporting text.')))),
+    h('p', { class: 'muted small' }, 'Methodological basis: ',
+      h('a', { href: 'https://doi.org/10.1186/s13063-018-2884-0', target: '_blank', rel: 'noopener' }, 'DELTA²'), ', ',
+      h('a', { href: 'https://www.cochrane.org/authors/handbooks-and-manuals/handbook/current/chapter-05', target: '_blank', rel: 'noopener' }, 'Cochrane Handbook'), ', ',
+      h('a', { href: 'https://database.ich.org/sites/default/files/E9-R1_Step4_Guideline_2019_1203.pdf', target: '_blank', rel: 'noopener' }, 'ICH E9(R1)'),
+      '. Recommendations apply selected principles; they do not constitute a complete systematic review or formal risk-of-bias assessment.'),
   ].filter(Boolean);
 }

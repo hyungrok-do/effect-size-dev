@@ -23,6 +23,7 @@ from .chatgpt import ChatGPTError
 from .config import Settings
 from .evidence import build_evidence, decisions_basis, overlap_records
 from .fulltext import FullText, get_fulltext
+from .planning import finalize_summary
 from .llm import LLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
 from .openai_llm import OpenAIError
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
@@ -455,9 +456,8 @@ class Pipeline:
         self.store.update_project(project_id, overlap={"report": report, "records": [r["key"] for r in records], "input": records})
 
     def summarize(self, project_id: str) -> None:
-        """Opus describes, for each effect size the plan needs, the values the investigator kept: how they
-        compare and where they share participants. It does not combine them or recommend one. If writing
-        it again fails, the previous summary stays, with the error."""
+        """The head agent recommends planning effects; code verifies inputs and resolves arithmetic.
+        If writing again fails, the previous summary stays, with the error."""
         previous = previous_summary((self.store.project(project_id) or {}).get("summary"))
         self.store.update_project(project_id, summary={"status": "running", "previous": previous})
         try:
@@ -475,7 +475,8 @@ class Pipeline:
                 raise ValueError("There is nothing to summarize: no extracted result is kept.")
             result = self.llm.summarize(spec, overlap["report"], evidence, self._sink(project_id))
             self.store.update_project(project_id, summary={
-                "status": "done", "result": result.model_dump(), "evidence": evidence,
+                "status": "done", "result": finalize_summary(result.model_dump(), evidence, spec.model_dump()), "evidence": evidence,
+                "spec_basis": spec.model_dump(),
                 "basis": decisions_basis(papers, decisions),
             })
         except Exception as exc:

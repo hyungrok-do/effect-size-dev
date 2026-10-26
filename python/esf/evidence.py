@@ -16,6 +16,7 @@ Mirrors site/lib/evidence.js; the tests require identical output.
 from __future__ import annotations
 
 from typing import Any
+from copy import deepcopy
 
 PAPER = -1  # result_index of a decision about the whole paper
 
@@ -85,6 +86,7 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                 values.append({
                     "key": f"V{len(values) + 1}",
                     "record": record_key(p),
+                    "result": f"{record_key(p)}:{i}",
                     "outcome": r["outcome_measure"],
                     "timepoint": r["timepoint"],
                     "group": v["group"],
@@ -95,18 +97,50 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                     "n": None if v["statistic"] == "n" else sizes.get(v["group"]),
                     "relevance": r["relevance"],
                     "confidence": r["confidence"],
+                    "decision": _decision(decisions, p["id"], i),
+                    "analysis_population": r["analysis_population"],
+                    "adjusted": r["adjusted"],
+                    "outcome_type": r.get("outcome_type", "unclear"),
+                    "independent_groups": r.get("independent_groups"),
+                    "concerns": r.get("concerns") or [],
+                    "flags": (p.get("verification") or {}).get("flags") or [],
+                    "quote": v["quote"],
+                    "location": v["location"],
                     "quote_found": bool(check and check["quote"] != "missing" and check["number_in_quote"]
                                         and check["number_in_source"]),
                     "same_participants_as": use_instead.get(record_key(p)),
                 })
     kept = {v["record"] for v in values}
-    return {"records": [r for r in overlap_records(papers) if r["key"] in kept], "values": values}
+    # Importance/anchor studies can contribute methodological evidence without a usable effect.
+    for p in _extracted(papers):
+        if p["extraction"].get("appraisal") and (
+            any(_decision(decisions, p["id"], i) != "exclude" for i in range(len(p["extraction"]["results"])))
+            or (not p["extraction"]["results"] and _decision(decisions, p["id"], PAPER) != "exclude")
+        ):
+            kept.add(record_key(p))
+    records = [r for r in overlap_records(papers) if r["key"] in kept]
+    by_key = {record_key(p): p for p in papers}
+    for record in records:
+        paper = by_key[record["key"]]
+        extraction = paper["extraction"]
+        checks = (paper.get("verification") or {}).get("appraisal") or []
+        record.update({
+            "fulltext_kind": paper.get("fulltext_kind"),
+            "study_type": (paper.get("screen") or {}).get("study_type"),
+            "matches_spec": extraction.get("matches_spec", False),
+            "mismatch_reasons": extraction.get("mismatch_reasons") or [],
+            "notes": extraction.get("notes") or "",
+            "appraisal": [{**a, "quote_found": i < len(checks) and checks[i] in ("exact", "approximate")}
+                          for i, a in enumerate(extraction.get("appraisal") or [])],
+        })
+    return {"records": records, "values": values}
 
 
 def decisions_basis(papers: list[dict], decisions: dict) -> list:
     """What a summary was based on, to tell when it is out of date: each extracted record, its
     decisions, and the values it reports (a re-extraction changes them)."""
-    return [[p["id"], p["status"], _decision_list(decisions, p["id"]), _values_of(p)] for p in _extracted(papers)]
+    return deepcopy([[p["id"], p["status"], _decision_list(decisions, p["id"]), _values_of(p), p["extraction"],
+                      p.get("verification"), p.get("fulltext_kind"), p.get("screen")] for p in _extracted(papers)])
 
 
 def _values_of(paper: dict) -> list:

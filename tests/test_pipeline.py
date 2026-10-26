@@ -247,6 +247,10 @@ def test_overlap_is_checked_and_the_summary_describes_what_was_kept(tmp_path):
     pipeline.summarize(project_id)
     summary = store.project(project_id)["summary"]
     assert summary["status"] == "done", summary
+    rec = summary["result"]["recommendations"][0]
+    assert rec["status"] == "provisional" and rec["resolved"]["value"] == .3
+    assert rec["resolved"]["basis_value"] == .35
+    assert summary["spec_basis"] == store.project(project_id)["spec"]
     evidence = summary["evidence"]
     # The pilot's only result was excluded, so neither it nor its values are described.
     assert keys["44444444"] not in {v["record"] for v in evidence["values"]} | {r["key"] for r in evidence["records"]}

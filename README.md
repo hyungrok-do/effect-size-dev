@@ -4,13 +4,15 @@ Describe a study you are planning in a short paragraph. Effect Size Finder searc
 PMC and ClinicalTrials.gov, reads the papers it can open, and extracts the statistics they report (group
 sizes, means, SDs, event counts, CIs, hazard ratios, and so on), each with the sentence or table
 row it came from. You review the papers one at a time, including or excluding each result; the lead
-model checks the studies for overlap and summarizes, for each effect size your plan needs, what the
-studies you kept report. The agents run three ways, chosen on the **Agents** page: the **Claude
+model checks overlap, summarizes the evidence, and recommends a final planning effect for each
+outcome with its justification, assumptions and sensitivity scenarios. The agents run three ways, chosen on the **Agents** page: the **Claude
 API** (an Anthropic key), the **OpenAI API** (an OpenAI key), or an **OpenAI subscription** (your
 ChatGPT Plus or Pro plan, no key; the browser edition connects through a local helper).
 
-It **searches for relevant papers**, **extracts the reported numbers** and **summarizes them**. It
-does not combine studies into an effect size or compute a sample size: those choices are yours.
+It **searches for relevant papers**, **extracts reported numbers**, and asks the **head agent to
+recommend a planning effect size with justification**. It applies selected DELTA², Cochrane and
+ICH E9(R1) principles. Numerical transformations are performed by fixed code. It does not run a
+meta-analysis or calculate sample size.
 
 This project was largely generated with Claude Code and is under validation.
 
@@ -47,13 +49,15 @@ CODE    Check each quote is in the source and each number is in its quote; plaus
 OPUS    Re-extract anything that failed a check, was flagged, or fell in the random audit sample
 OPUS    Check the extracted records for overlap: one study reported twice, reviews pooling studies in the set
 YOU     Review one paper at a time: include or exclude each result; export CSV or JSON
-OPUS    Summarize: for each effect size the plan needs, the values that bear on it and how they compare
+OPUS    Recommend: a planning effect for each outcome, its justification and sensitivity scenarios
+CODE    Validate the chosen inputs and calculate supported within-study contrasts
 ```
 
 The steps above name Claude's models; with OpenAI, GPT-6.1 Sol is the manager and GPT-6 Luna the
-worker (see [Claude or OpenAI](#claude-or-openai)). The models read and quote; they never compute or
-convert a number. Every value is checked by code against the text it was read from, and in the
-summary the manager refers to values by key rather than typing them.
+worker (see [Claude or OpenAI](#claude-or-openai)). Extraction models read and quote without changing numbers. The head agent selects evidence and
+may propose a distinct planning assumption, explicitly labeled as its judgment. Fixed code checks
+source values and computes supported transformations; every numerical choice retains its inputs.
+Narrative references to empirical values use keys rather than model-retyped numbers.
 
 ### The search, from the top down
 
@@ -439,26 +443,60 @@ the paper shows the note. When a study is reported more than once, the summary m
 reports' values as the same participants as the record to use; a review and the studies it pools
 are separate studies and are not marked.
 
-### The summary
+### The summary and final planning effect
 
-**Write the summary** gives Opus the specification, the overlap check, the records you kept
-something from, and every value of the results you included or left undecided (none you
-excluded), each with a key (V1, V2, ...), its group size, how relevant it is and whether its quote
-was found. Opus is told to describe, not decide: it does not combine studies, average or pool
-values, convert between statistics, or recommend a value.
+**Write the summary** asks the head agent for a recommendation for every outcome, primary first.
+The result starts with the final effect, its metric, direction, timepoint, source inputs and calculation.
+It separately explains clinical importance, realism, evidence quality, assumptions, alternatives, and
+other inputs such as SD, control risk, ICC or attrition. The descriptive evidence tables remain below.
 
-The summary has an overview of what was found and how close it is to the planned study; then, for
-each effect size the plan needs, the values that bear on it side by side, one row per study arm with a
-column per statistic (n, mean, SD, ...), whether each quote was found and which arms share
-participants, with Opus's note on how they compare: which match the planned measure, timepoint and population, how widely they vary, and
-which come from larger or better reported studies. Overlap, what to check before using the values,
-and what the sources don't give come last, with a table of every value kept. Each study, in the
-tables and wherever the text names it by key (R12), links to its PubMed, Europe PMC or
-ClinicalTrials.gov page. Opus writes values'
-keys rather than numbers (the SDs run from [V4] to [V9]), and the page shows the numbers as the
-papers print them. If you change a decision afterwards, the page says the summary is out of date
-until you write it again; so does re-extracting a paper. If writing it again fails, the previous
-summary stays, with the error.
+The head agent can select a reported estimate or request a mean difference, Cohen's d, risk difference,
+risk ratio or odds ratio from compatible arm-level data. Code performs those calculations. Derived
+contrasts require unadjusted independent-group data from one outcome/visit/analysis result, with
+verified source quotations and no unresolved verification flags. Paired, clustered and crossover
+data need a reported design-appropriate estimate. Binary conversions require participants with an
+event and their denominators, not recurrent-event counts or censored survival data. No continuity
+correction, sign inversion, across-study pooling or confidence interval is silently introduced.
+
+A proposed target can differ from its evidence estimate. Both numbers are displayed: the former is
+an explicitly justified planning assumption, the latter is reported or calculated evidence. The agent
+must explain that choice; generic effect-size conventions, an automatic discount or a convenient
+sample size do not establish clinical importance. Sensitivity scenarios are labeled as assumptions,
+not confidence limits. They must use the same metric, outcome and timepoint.
+
+Recommendations are **recommended**, **provisional**, or **insufficient evidence**. A supported
+numerical choice with unresolved importance, an incomplete estimand, indirect evidence, limited
+appraisal or undecided review decisions is provisional. Missing or invalid numerical inputs yield
+no final number, with an explanation. A published effect is not used as an unsubstantiated
+noninferiority/equivalence margin. No automated status substitutes for scientific review.
+
+**Validate → Planning the primary effect** records the objective, contrast, primary analysis,
+analysis population, handling of intercurrent events, and investigator-supplied importance rationale.
+Unknowns stay visible. Extraction includes source-quoted methodological and importance notes;
+quote checking verifies transcription, not the scientific validity of a study. These notes are not a
+formal RoB 2 assessment. The head agent sees analysis populations, adjustment, concerns, source
+availability and overlap alongside each value. Duplicate reports and overlapping reviews are not
+independent corroboration.
+
+Saved extractions still open. Re-extract older papers to obtain the new methodological fields, then
+write the summary again. A summary becomes stale when the specification, decisions, extraction,
+verification or source metadata changes. A failed rewrite preserves the earlier result with an error.
+The JSON export includes recommendations, resolved numbers, justifications, provenance and the
+specification they were based on. CSV exports remain the reported evidence values.
+
+Methodological references and scope:
+
+- [DELTA², Cook et al. (2018)](https://doi.org/10.1186/s13063-018-2884-0): target-difference selection,
+  clinical importance versus realism, assumptions and sensitivity analysis.
+- [Cochrane Handbook, chapter 5](https://www.cochrane.org/authors/handbooks-and-manuals/handbook/current/chapter-05)
+  and [chapter 6](https://www.cochrane.org/authors/handbooks-and-manuals/handbook/current/chapter-06):
+  data provenance, multiple reports, appraisal and compatible effect measures.
+- [ICH E9(R1)](https://database.ich.org/sites/default/files/E9-R1_Step4_Guideline_2019_1203.pdf):
+  alignment of the clinical question, estimand and planned analysis.
+
+This implements selected principles, not certification or a complete systematic-review workflow.
+Search caps, inaccessible reports and remaining appraisal gaps are still limitations. Arithmetic and
+provenance rules have deterministic tests in both editions; model judgments need real-study evaluation.
 
 ## Privacy and security
 
@@ -504,10 +542,9 @@ server you share; use API keys there.
 
 ## Not yet
 
-- Combining studies: converting values to a common effect size (a standardized mean difference from
-  means and SDs, a risk ratio from event counts), pooling SDs or effects across studies, and
-  handing the result to [Sample Size Calculator](https://github.com/hyungrok-do/sample-size-calc).
-  The summary lays the values side by side for you to decide.
+- Across-study meta-analysis, advanced paired/clustered conversions, and automatic transfer to
+  [Sample Size Calculator](https://github.com/hyungrok-do/sample-size-calc). Supported within-study
+  conversions and head-agent recommendations are available in the summary.
 - Paywalled full text: only open-access text, abstracts, and registry results are read.
 - Numbers shown only in figures: figure captions are kept, figure images are not read.
 - The Message Batches API (half price, slower) for screening large searches; screening uses direct

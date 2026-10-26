@@ -71,3 +71,7 @@
 .authors-table { font-size: 13.5px; }
 .authors-table td.num { width: 2.5em; color: var(--muted); }
 .authors-table td:nth-child(2) { min-width: 11em; }
+
+.planning-recommendation { border-left: 3px solid var(--accent, #27605d); padding-left: 1rem; }
+.planning-effect { font-size: 1.45rem; margin: .8rem 0; }
+.effect-calculation code { white-space: normal; overflow-wrap: anywhere; }

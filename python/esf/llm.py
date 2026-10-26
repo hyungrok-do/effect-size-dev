@@ -4,7 +4,7 @@ Claude Opus 5.5 is the manager by default: it reads the problem, plans the searc
 escalated extractions. Claude Haiku 5.5 is the worker by default: it screens every record and makes
 the first-pass extraction of every paper. The page may pick other Claude models for either role.
 openai_llm.py gives OpenAI models the same steps. Arithmetic never happens here; the models only
-read and quote.
+read, quote and select justified planning assumptions.
 """
 
 from __future__ import annotations

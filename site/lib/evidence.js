@@ -68,6 +68,7 @@ export function buildEvidence(papers, decisions, overlap) {
         values.push({
           key: `V${values.length + 1}`,
           record: recordKey(p),
+          result: `${recordKey(p)}:${i}`,
           outcome: r.outcome_measure,
           timepoint: r.timepoint,
           group: v.group,
@@ -78,6 +79,15 @@ export function buildEvidence(papers, decisions, overlap) {
           n: v.statistic === 'n' || !sizes.has(v.group) ? null : sizes.get(v.group),
           relevance: r.relevance,
           confidence: r.confidence,
+          decision: decisionOf(decisions, p.id, i),
+          analysis_population: r.analysis_population,
+          adjusted: r.adjusted,
+          outcome_type: r.outcome_type ?? 'unclear',
+          independent_groups: r.independent_groups ?? null,
+          concerns: r.concerns || [],
+          flags: p.verification?.flags || [],
+          quote: v.quote,
+          location: v.location,
           quote_found: Boolean(check && check.quote !== 'missing' && check.number_in_quote && check.number_in_source),
           same_participants_as: useInstead.get(recordKey(p)) ?? null,
         });
@@ -85,13 +95,29 @@ export function buildEvidence(papers, decisions, overlap) {
     });
   }
   const kept = new Set(values.map((v) => v.record));
-  return { records: overlapRecords(papers).filter((r) => kept.has(r.key)), values };
+  for (const p of extracted(papers)) {
+    if (p.extraction.appraisal?.length && (p.extraction.results.some((_, i) => decisionOf(decisions, p.id, i) !== 'exclude')
+      || (!p.extraction.results.length && decisionOf(decisions, p.id, PAPER) !== 'exclude'))) kept.add(recordKey(p));
+  }
+  const records = overlapRecords(papers).filter((r) => kept.has(r.key));
+  const byKey = new Map(papers.map((p) => [recordKey(p), p]));
+  for (const record of records) {
+    const paper = byKey.get(record.key);
+    const x = paper.extraction;
+    Object.assign(record, {
+      fulltext_kind: paper.fulltext_kind ?? null, study_type: paper.screen?.study_type ?? null,
+      matches_spec: x.matches_spec ?? false, mismatch_reasons: x.mismatch_reasons || [], notes: x.notes || '',
+      appraisal: (x.appraisal || []).map((a, i) => ({ ...a, quote_found: ['exact', 'approximate'].includes(paper.verification?.appraisal?.[i]) })),
+    });
+  }
+  return { records, values };
 }
 
 // What a summary was based on, to tell when it is out of date: each extracted record, its decisions,
 // and the values it reports (a re-extraction changes them).
 export function decisionsBasis(papers, decisions) {
-  return extracted(papers).map((p) => [p.id, p.status,
+  return structuredClone(extracted(papers).map((p) => [p.id, p.status,
     Object.entries(decisions[p.id] || {}).map(([k, d]) => [Number(k), d.decision]).sort((a, b) => a[0] - b[0]),
-    p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value, v.ci_level ?? null])])]);
+    p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value, v.ci_level ?? null])]),
+    p.extraction, p.verification ?? null, p.fulltext_kind ?? null, p.screen ?? null]));
 }

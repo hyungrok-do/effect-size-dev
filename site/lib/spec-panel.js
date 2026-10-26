@@ -65,13 +65,14 @@ const splitList = (text) => text.split(/[,;\n]/).map((s) => s.trim()).filter(Boo
 // A specification saved before the structured fields, in the current shape. Mirrors upgrade_spec in
 // python/esf/schemas.py.
 export function upgradeSpec(spec) {
-  if (spec.population && typeof spec.population === 'object') return spec;
+  if (spec.population && typeof spec.population === 'object') return { planning: null, ...spec };
   const timepoint = spec.timepoint || '';
   const outcomes = (spec.outcomes || []).map((name, i) => ({
     name, measure: '', role: i ? 'secondary' : 'primary', type: spec.outcome_type || 'unclear', timepoint,
   }));
   const first = outcomes.length ? outcomes[0].name : '';
   return {
+    planning: null,
     question: spec.question || '',
     design: spec.design || 'other',
     population: { description: spec.population || '', condition: '', age: '', setting: '' },
@@ -193,6 +194,23 @@ const PARTS = {
         { key: 'purpose', ...text('Purpose') },
       ], { noun: 'effect size', empty: 'Nothing listed yet.' }),
     ],
+  },
+  planning: {
+    title: 'Planning the primary effect',
+    hint: 'State what is known. The head agent will identify any assumptions that remain.',
+    view: (spec, panel) => {
+      const fields = [['objective', 'Objective'], ['effect_measure', 'Effect measure and direction'],
+        ['analysis', 'Primary analysis'], ['analysis_population', 'Analysis population'],
+        ['intercurrent_events', 'Treatment changes and other intercurrent events'],
+        ['clinical_importance', 'Clinically important difference and rationale'],
+        ['clinical_importance_source', 'Source of the importance judgment']];
+      return h('table', { class: 'spec-table kv' }, h('tbody', {}, fields.map(([key, label]) =>
+        h('tr', {}, h('th', { scope: 'row' }, label), h('td', {}, panel.edit(`planning.${key}`, text(label),
+          spec.planning?.[key] || '', (value) => {
+            spec.planning ||= Object.fromEntries(fields.map(([k]) => [k, '']));
+            spec.planning[key] = value;
+          }, 'Not specified'))))));
+    },
   },
   stated: {
     title: 'Values your paragraph states',

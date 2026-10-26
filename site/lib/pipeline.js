@@ -13,6 +13,7 @@ import { describeError, ModelDeclined, ModelTruncated, outOfCredit } from './cla
 import { buildEvidence, decisionsBasis, overlapRecords } from './evidence.js';
 import { LEVEL_NAMES, LEVELS, PROMPTS } from './generated.js';
 import { jatsToText } from './jats.js';
+import { finalizeSummary } from './planning.js';
 import { pdfText } from './pdf.js';
 import {
   bytesToBase64, europepmcPmid, europepmcRecord, europepmcUrl, SourceError, trialRecord, trialResultsText,
@@ -433,8 +434,7 @@ export class Pipeline {
     await this.store.updateProject(projectId, { overlap: { report, records: records.map((r) => r.key), input: records } });
   }
 
-  // The manager describes, for each effect size the plan needs, the values the investigator kept: how they
-  // compare and where they share participants. It does not combine them or recommend one.
+  // The head agent selects planning effects; fixed code verifies and calculates the chosen contrasts.
   async summarize(projectId) {
     const previous = previousSummary((await this.store.project(projectId)).summary);
     await this.store.updateProject(projectId, { summary: { status: 'running', previous } });
@@ -463,7 +463,8 @@ export class Pipeline {
         },
       );
       await this.store.updateProject(projectId, {
-        summary: { status: 'done', result, evidence, basis: decisionsBasis(papers, decisions) },
+        summary: { status: 'done', result: finalizeSummary(result, evidence, project.spec), evidence,
+          spec_basis: project.spec, basis: decisionsBasis(papers, decisions) },
       });
     } catch (error) {
       const message = describeError(error);

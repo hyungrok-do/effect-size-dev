@@ -113,6 +113,16 @@ class TermGroup(BaseModel):
     terms: list[str] = Field(description="Synonyms, MeSH headings and instrument names for this concept.")
 
 
+class PlanningContext(BaseModel):
+    objective: str = Field(description="Superiority, noninferiority, equivalence, estimation, or unknown.")
+    effect_measure: str = Field(description="Primary contrast, scale, units and direction, if specified.")
+    analysis: str = Field(description="Planned primary analysis, including adjustment, if specified.")
+    analysis_population: str = Field(description="Target analysis population, if specified.")
+    intercurrent_events: str = Field(description="How discontinuation, rescue treatment or death are handled. Do not infer a strategy.")
+    clinical_importance: str = Field(description="Investigator-supplied important difference and stakeholder rationale, or empty.")
+    clinical_importance_source: str = Field(description="Exact supporting sentence from the paragraph, or empty. Never invent stakeholder agreement.")
+
+
 class SearchSpec(BaseModel):
     """What the planned study is and what the literature should supply."""
 
@@ -131,13 +141,21 @@ class SearchSpec(BaseModel):
     exclusion_criteria: list[Criterion]
     search_terms: list[TermGroup] = Field(description="One group per concept.")
     open_questions: list[str] = Field(description="Ambiguities the investigator should resolve.")
+    planning: PlanningContext | None = Field(description="Clinical planning context. Null for a legacy specification.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_planning(cls, data):
+        if isinstance(data, dict) and "planning" not in data:
+            return {**data, "planning": None}
+        return data
 
 
 def upgrade_spec(spec: dict) -> dict:
     """A specification saved before the structured fields, in the current shape. Mirrors upgradeSpec
     in site/lib/spec-panel.js."""
     if isinstance(spec.get("population"), dict):
-        return spec
+        return {"planning": None, **spec}
     timepoint = spec.get("timepoint") or ""
     outcomes = [
         {"name": name, "measure": "", "role": "secondary" if i else "primary",
@@ -146,6 +164,7 @@ def upgrade_spec(spec: dict) -> dict:
     ]
     first = outcomes[0]["name"] if outcomes else ""
     return {
+        "planning": None,
         "question": spec.get("question") or "",
         "design": spec.get("design") or "other",
         "population": {"description": spec.get("population") or "", "condition": "", "age": "", "setting": ""},
@@ -255,6 +274,23 @@ class OutcomeResult(BaseModel):
     concerns: list[str] = Field(
         description="e.g. 'SD may be SE', 'values read from a figure', 'multi-arm trial', 'change-score SD'."
     )
+    outcome_type: OutcomeType = Field(description="Type of the extracted outcome, not merely the planned outcome.")
+    independent_groups: bool | None = Field(description="True only for independent parallel participant groups; false for clustered, paired or crossover groups; null if unclear.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_design(cls, data):
+        if isinstance(data, dict):
+            return {"outcome_type": "unclear", "independent_groups": None, **data}
+        return data
+
+
+class AppraisalItem(BaseModel):
+    domain: Literal["randomization", "deviations", "missing_outcomes", "measurement", "selective_reporting",
+                    "confounding", "clinical_importance", "estimand"]
+    assessment: str = Field(description="What the quoted information implies, including limitations. Not a formal risk-of-bias score.")
+    quote: str = Field(description="Verbatim supporting text. Omit the item when no supporting text is available.")
+    location: str
 
 
 class PaperExtraction(BaseModel):
@@ -265,6 +301,14 @@ class PaperExtraction(BaseModel):
     mismatch_reasons: list[str]
     results: list[OutcomeResult]
     notes: str
+    appraisal: list[AppraisalItem] = Field(description="Source-supported methodological and clinical-importance information; empty if unavailable.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_appraisal(cls, data):
+        if isinstance(data, dict) and "appraisal" not in data:
+            return {**data, "appraisal": []}
+        return data
 
 
 class OverlapGroup(BaseModel):
@@ -297,9 +341,54 @@ class NeedSummary(BaseModel):
     )
 
 
+class EffectChoice(BaseModel):
+    method: Literal["reported", "mean_difference", "cohen_d", "risk_difference", "risk_ratio", "odds_ratio"]
+    inputs: list[str] = Field(description="Value keys in exact order. reported: [effect]. mean_difference: [mean_A, mean_B]. "
+                             "cohen_d: [mean_A, mean_B, sd_A, sd_B, n_A, n_B]. Binary methods: [events_A, n_A, events_B, n_B]. "
+                             "A is the intervention, B the comparator. Values must be from one result. Code calculates the number.")
+    rationale: str = Field(description="Why this particular estimate and these inputs are appropriate, including units, direction and any limitations.")
+    target_value: float | None = Field(description="Null to use the evidence estimate. Otherwise an explicit proposed planning assumption on the SAME scale and direction, justified separately from the observed estimate. Not a reported number or calculated pooled effect.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_target(cls, data):
+        if isinstance(data, dict) and "target_value" not in data:
+            return {**data, "target_value": None}
+        return data
+
+
+class EffectScenario(BaseModel):
+    label: str
+    choice: EffectChoice
+
+
+class PlanningRecommendation(BaseModel):
+    outcome: str = Field(description="Exact outcome name from the specification. One recommendation per outcome, primary first.")
+    status: Literal["recommended", "provisional", "insufficient_evidence"]
+    estimand: str = Field(description="Population, treatment contrast, outcome/scale, timepoint, summary measure and intercurrent-event strategy; identify unknowns.")
+    choice: EffectChoice | None = Field(description="The final selected planning effect, or null if no defensible number is available.")
+    justification: str = Field(description="Explain the selection against the alternatives, using R and [V] references.")
+    clinical_importance: Literal["supported", "unknown"]
+    importance_basis: str = Field(description="Source-supported clinical/stakeholder rationale, distinguishing group differences from individual change thresholds.")
+    realism: str = Field(description="How relevant studies support a realistic effect in the planned setting.")
+    evidence_quality: str = Field(description="Directness, risk-of-bias information, uncertainty, pilot limitations and overlap. Quote verification is not study quality.")
+    assumptions: list[str]
+    sensitivity: list[EffectScenario] = Field(description="Alternative evidence-supported effects on the SAME metric and direction; no invented CI or automatic percentage discount.")
+    nuisance_parameters: list[str] = Field(description="Needed SDs, control risks, ICCs, correlations or dropout, with [V] references where available; keep separate from the target effect.")
+    gaps: list[str]
+
+
 class EvidenceSummary(BaseModel):
     overview: str = Field(description="Two to four sentences on what was found and how close it is to the planned study.")
     needs: list[NeedSummary] = Field(description="One per effect size to find, in the specification's order.")
     overlap: str = Field(description="Which values come from the same participants, and why; empty if none.")
     caveats: list[str] = Field(description="What to check before using the values.")
     gaps: list[str] = Field(description="Effect sizes the plan needs that the sources don't give, and where to look next.")
+    recommendations: list[PlanningRecommendation] = Field(description="Head agent's final planning effects and justifications, primary outcomes first.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_recommendations(cls, data):
+        if isinstance(data, dict) and "recommendations" not in data:
+            return {**data, "recommendations": []}
+        return data

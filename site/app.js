@@ -1171,12 +1171,12 @@ function renderSummary(project) {
     : jobs.has(project.id) ? 'Wait until the search finishes.' : '';
   showError($('#summary-error'), summary?.status === 'error' ? summary.error
     : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
-  const key = JSON.stringify([summary, running, project.overlap?.report, decisionsBasis(state.papers, state.decisions),
+  const key = JSON.stringify([summary, project.spec, running, project.overlap?.report, decisionsBasis(state.papers, state.decisions),
     state.papers.map((p) => [p.id, p.title, p.authors, p.year, p.pmid, p.pmcid])]);
   if (key === state.summaryKey) return;
   state.summaryKey = key;
   $('#summary-body').replaceChildren(...(summary?.status === 'done'
-    ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions: state.decisions, linksOf: links })
+    ? summaryView({ summary, spec: project.spec, overlap: project.overlap?.report, papers: state.papers, decisions: state.decisions, linksOf: links })
     : running ? [] : [h('p', { class: 'muted' },
       'Review the papers first: the summary uses every result you included or left undecided, and none you excluded.')]));
 }

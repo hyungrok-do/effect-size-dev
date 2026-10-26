@@ -109,7 +109,12 @@ export function plausibility(result) {
 
 export function verify(extraction, sourceText, quotesReliable = true) {
   const source = new Source(sourceText);
-  const report = { values: [], flags: [] };
+  const report = { values: [], flags: [], appraisal: [] };
+  (extraction.appraisal || []).forEach((item, index) => {
+    const found = source.findQuote(item.quote);
+    report.appraisal.push(found);
+    if (found === 'missing') report.flags.push(`appraisal ${index + 1}: supporting quote not found in the source`);
+  });
   extraction.results.forEach((result, index) => {
     const checks = [];
     for (const v of result.values) {

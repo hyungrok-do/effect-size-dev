@@ -16,6 +16,7 @@ from esf.schemas import (
     Intervention,
     NeededStatistic,
     NeedSummary,
+    PlanningRecommendation,
     Outcome,
     OverlapGroup,
     OverlapReport,
@@ -552,7 +553,23 @@ class FakeLLM:
             sds = sorted((v for v in evidence["values"] if v["key"] in keys and v["statistic"] == "sd"), key=lambda v: v["value"])
             comparison = f"The SDs run from [{sds[0]['key']}] to [{sds[-1]['key']}]." if sds else "No SD is reported."
             needs.append(NeedSummary(need=need.purpose, values=keys, comparison=comparison))
+        effects = [v for v in evidence["values"] if v["statistic"] == "standardized_mean_difference" and v["quote_found"]]
+        recommendations = []
+        for outcome in spec.outcomes:
+            if not effects:
+                continue
+            selected = effects[0]
+            recommendations.append(PlanningRecommendation(
+                outcome=outcome.name, status="provisional", estimand="App versus control for depressive symptoms; confirm timepoint and analysis.",
+                choice={"method": "reported", "inputs": [selected["key"]], "target_value": .3,
+                        "rationale": "A smaller planning assumption than the review estimate; clinical importance remains to be established."},
+                justification=f"{selected['record']} supplies the quantitative basis; the target is a provisional planning judgment.",
+                clinical_importance="unknown", importance_basis="No supported clinical-importance threshold was found.",
+                realism="The review provides indirect evidence for planning.", evidence_quality="Applicability and underlying trial bias need assessment.",
+                assumptions=["The review's direction and contrast are applicable."], sensitivity=[],
+                nuisance_parameters=[], gaps=["Clinical importance and target-population applicability."]))
         return EvidenceSummary(
+            recommendations=recommendations,
             overview=f"{len(evidence['records'])} records report PHQ-9 in students; the largest SD is [{direct_sds[-1]['key']}], "
             f"in {direct_sds[-1]['record']}."
             if direct_sds else f"{len(evidence['records'])} records report PHQ-9 in students.",

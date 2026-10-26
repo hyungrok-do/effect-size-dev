@@ -792,12 +792,16 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.click("#source-close")
 
     # The summary: for each effect size to find, the values side by side, described by Opus by key and
-    # shown as printed. Nothing is pooled or recommended.
+    # shown as printed, with a separate provisional planning target.
     page.click("#tab-summary")
     page.click("#summarize")
     page.wait_for_selector("#summary-body .summary-overview", timeout=15000)
     body = page.inner_text("#summary-body")
-    assert "Pooled" not in body and "Recommended" not in body
+    assert "Provisional planning effect" in body
+    recommendation = page.locator('.planning-recommendation').first
+    assert '0.3' in recommendation.locator('.planning-effect').inner_text()
+    assert 'Evidence estimate: 0.35' in recommendation.inner_text()
+    assert 'head-agent judgment' in recommendation.inner_text()
     need = page.locator("#summary-body .summary-block.need").first
     assert need.locator("h3").inner_text() == "The difference and its SD"
     # The SDs as printed, smallest and largest, each with the record it came from.
@@ -829,7 +833,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert named.count() == 1 and named.inner_text().startswith("R") and named.get_attribute("href").startswith("https://")
     assert page.locator("#summary-body .summary-block li a").count() >= 5
     assert "one study reported more than once" in body and "No dropout rates." in body
-    assert page.locator("#summary-body details summary").inner_text().startswith("Every value kept (")
+    assert page.locator("#summary-body details summary").first.inner_text().startswith("Every value kept (")
     # The agent panel shows the number with its key, not the bare key.
     assert "the largest SD is 4.5 [V" in page.inner_text("#activity")
 
@@ -1082,7 +1086,7 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     assert [x.inner_text() for x in page.locator("#map-body [data-stage='extract'] .map-agent").all()] == ["Code", "GPT-6 Luna", "GPT-6.1 Sol"]
 
     page.click("#tab-summary")
-    assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol describes what the papers you kept report")
+    assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol recommends a planning effect size")
     page.click("#summarize")
     page.wait_for_selector("#summary-body .summary-overview", timeout=15000)
 
@@ -1178,7 +1182,7 @@ def test_a_search_saved_before_openai_keeps_its_credits(browser, site_url):
     page.click("#tab-spec")
     assert page.inner_text("#spec .summary").startswith("How Opus 5.5 read your paragraph")
     page.click("#tab-summary")
-    assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol describes")  # not written yet: the chosen manager will
+    assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol recommends")  # not written yet: the chosen manager will
 
     # After Search again (here, one started after every call above), the earlier search's models are not
     # credited; reading the problem still is.
@@ -1310,7 +1314,7 @@ def test_the_subscription_requires_a_companion_before_starting_work(browser, sit
     assert page.inner_text("#models") == "Connect ChatGPT to run the agents"
     # Nor do the lines about what a role will do name a model: they name the role.
     assert "and the manager summarizes what the papers you kept report" in page.inner_text(".lede")
-    assert page.inner_text("#summary .summary").startswith("The manager describes what the papers you kept report")
+    assert page.inner_text("#summary .summary").startswith("The manager recommends a planning effect size")
     assert page.locator("#roles li strong").all_inner_texts() == ["Manager", "Workers", "Code"]
     roles = page.locator("#roles li").all_inner_texts()
     assert [role.split("\n", 1)[1] for role in roles] == [
@@ -1772,4 +1776,38 @@ def test_csv_exports_keep_spreadsheets_from_running_formulas(browser, site_url):
         "'=cmd|\"/c calc\"!A1", "'-PHQ-9", "'@App", "-2.2", "'-2.2 (95% CI -3.4 to -1.0)")
     step = next(csv.DictReader(io.StringIO(out["log"], newline="")))
     assert (step["text"], step["detail"]) == ("'=1+1", "-2.2")
+    page.close()
+
+
+def test_planning_recommendation_rendering_and_spec_staleness(browser, site_url):
+    from esf.planning import finalize_summary
+    from test_planning import example, summary as make_summary, spec as make_spec, choice
+    page = browser.new_page(viewport={"width": 900, "height": 1000})
+    page.goto(site_url)
+    evidence, plan = example(), make_spec()
+    raw = make_summary(choice(target=-1.5))
+    paper = _paper(1, [])
+    data = {"status": "done", "result": finalize_summary(raw, evidence, plan), "evidence": evidence,
+            "basis": decisions_basis([paper], {}), "spec_basis": plan}
+    page.evaluate("""async ({summary, spec, papers}) => {
+        const {summaryView} = await import('/lib/review-view.js');
+        const root = document.createElement('main'); root.id = 'planning-test';
+        document.body.replaceChildren(root);
+        root.append(...summaryView({summary, spec, papers, decisions: {}, overlap: null,
+            linksOf: () => ({PubMed: 'https://pubmed.ncbi.nlm.nih.gov/1001/'})}));
+    }""", {"summary": data, "spec": plan, "papers": [paper]})
+    card = page.locator('.planning-recommendation')
+    assert card.get_attribute('data-status') == 'recommended'
+    assert 'Mean difference = -1.5' in card.inner_text()
+    assert 'Evidence estimate: -2' in card.inner_text()
+    assert 'head-agent judgment' in card.inner_text()
+    assert card.locator('a').count() >= 1 and 'Clinical importance' in card.inner_text()
+    assert page.locator('.stale').count() == 0
+    plan = json.loads(json.dumps(plan)); plan['planning']['analysis'] = 'Different analysis'
+    page.evaluate("""async ({summary, spec, papers}) => {
+        const {summaryView} = await import('/lib/review-view.js');
+        document.querySelector('#planning-test').replaceChildren(...summaryView({summary, spec, papers,
+            decisions: {}, overlap: null, linksOf: () => ({})}));
+    }""", {"summary": data, "spec": plan, "papers": [paper]})
+    assert page.locator('.stale').count() == 1
     page.close()

@@ -1058,12 +1058,12 @@ function renderSummary(project) {
   showError($('#summary-error'), summary?.status === 'error' ? summary.error
     : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
   const decisions = Object.fromEntries(state.papers.map((p) => [p.id, p.decisions || {}]));
-  const key = JSON.stringify([summary, project.overlap?.report, decisionsBasis(state.papers, decisions),
+  const key = JSON.stringify([summary, project.spec, project.overlap?.report, decisionsBasis(state.papers, decisions),
     state.papers.map((p) => [p.id, p.title, p.authors, p.year, p.pmid, p.pmcid])]);
   if (key === state.summaryKey) return;
   state.summaryKey = key;
   $('#summary-body').replaceChildren(...(summary?.status === 'done'
-    ? summaryView({ summary, overlap: project.overlap?.report, papers: state.papers, decisions, linksOf: (p) => p.links })
+    ? summaryView({ summary, spec: project.spec, overlap: project.overlap?.report, papers: state.papers, decisions, linksOf: (p) => p.links })
     : running ? [] : [h('p', { class: 'muted' },
       'Review the papers first: the summary uses every result you included or left undecided, and none you excluded.')]));
 }
