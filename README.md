@@ -47,6 +47,8 @@ SONNET  (browser edition) Download what the browser may not: PDFs, and any site 
 HAIKU   Extract every reported number with its verbatim quote and location
 CODE    Check each quote is in the source and each number is in its quote; plausibility checks
 OPUS    Re-extract anything that failed a check, was flagged, or fell in the random audit sample
+OPUS    Read each paper as a statistician: for each result, its estimand and the model behind its
+        numbers, and how they compare with the plan; the paper's own sample-size calculation, quoted
 OPUS    Check the extracted records for overlap: one study reported twice, reviews pooling studies in the set
 YOU     Review one paper at a time: include or exclude each result; export CSV or JSON
 OPUS    Recommend: a planning effect for each outcome, its justification and sensitivity scenarios
@@ -129,6 +131,42 @@ Haiku has no server-side fallback; a paper Haiku declines goes to Opus.
 
 Nothing is dropped silently: a record that cannot be screened goes forward as "unsure", and a paper
 neither model could extract shows up under **Needs attention**.
+
+### The estimand and the model of each result
+
+A reported number helps a sample-size calculation only if it estimates the quantity the planned
+analysis needs, so after a paper's numbers are extracted and checked the manager reads the paper
+again with them (the step `context`) and states, for each result:
+
+- its estimand, by the attributes of ICH E9(R1): who was analyzed (all randomized, completers, per
+  protocol), the treatments, the variable and its timepoint (the value at follow-up or the change
+  from baseline), how stopping treatment or rescue medication was handled and the strategy that
+  amounts to, and the summary measure;
+- the model behind the numbers (an MMRM with its covariates and covariance structure, an ANCOVA, a
+  t-test, a Cox model, a random-effects meta-analysis), how missing outcomes were handled, and the
+  sentences of the methods that say so, quoted and checked against the paper;
+- what the printed numbers are in terms of that model: observed means and SDs, or least-squares
+  means with model-based SEs, which are not SDs;
+- whether its estimand is the same as the planned one, close, or different, and how;
+- what the numbers can and cannot supply for the planned calculation: the SD of a change is not the
+  SD at follow-up, and an ANCOVA also needs the baseline–follow-up correlation; a standardized mean
+  difference gives no SD on the instrument's scale; an SD among completers tends to be smaller than
+  among all randomized.
+
+It also states the design as a statistician would and quotes the paper's own sample-size
+calculation, whose assumptions are planning values someone has already argued for. It never
+computes or converts a number. A paper with no results is not read again; if the step fails, the
+extraction stands with **Read the estimand and model again** on its card, and a paper extracted
+before this step existed has **Read the estimand and model**. It adds one manager call per extracted
+paper, reading the paper's text again.
+
+The specification step reasons the same way: it derives the statistics to find from the planned
+analysis (for an ANCOVA, the SD at follow-up and the baseline–follow-up correlation; for a cluster
+trial, the ICC and cluster sizes; for a time-to-event outcome, the control arm's event rate and the
+follow-up), or from the usual analysis for the design when your paragraph names none, and says
+which it assumed under the questions worth deciding. Extraction records what such a calculation
+draws on when a paper prints it: baseline values, the baseline–follow-up correlation, the numbers
+randomized and analyzed in each arm, events, ICCs.
 
 ## Agents: Claude API, OpenAI API or OpenAI subscription
 
@@ -419,7 +457,11 @@ record saved before authors were kept fetches them from its source when the tabl
 warning only when there is something to watch (a preprint, abstract only, a result that differs from the plan,
 an overlap with another record); and each result in a box with Include and Exclude. A result reads
 as a line per group in the usual shorthand, as printed: `App  8.1 ± 4.2  n = 100`, `median 7 [4–11]`,
-`12/100 events (12%)`, `MD -2.2 (95% CI -3.4 to -1) · p = 0.001`. A result is flagged only when a
+`12/100 events (12%)`, `MD -2.2 (95% CI -3.4 to -1) · p = 0.001`. Under the paper's header are its
+design and its own sample-size calculation as the manager read them, and at the top of each result,
+before its numbers, its estimand, the model behind it, what the numbers are, whether the estimand is
+the same as planned, close or different (and how), and what the numbers can supply for the planned
+calculation. A result is flagged only when a
 quote did not check out, the match to the plan is partial, confidence is low, or the extraction
 raised a concern (an SD that may be an SE). **Quotes** opens each value with its quote, location
 and check; **Show source text** opens the text with the quotes highlighted; **Details** has how the
@@ -427,7 +469,7 @@ paper was found, the text used, which model extracted it and why, and screening 
 
 A decision on a result overrides one made for its whole paper. **CSV: included results** exports
 one row per value of the results you included, with its quote, location, check outcome, concerns,
-flags, and your decision.
+flags, its result's design, estimand, model and fit to the plan, and your decision.
 
 ### Overlap
 
@@ -464,9 +506,16 @@ must explain that choice; generic effect-size conventions, an automatic discount
 sample size do not establish clinical importance. Sensitivity scenarios are labeled as assumptions,
 not confidence limits. They must use the same metric, outcome and timepoint.
 
+The head agent also gets the manager's reading of every kept result: its estimand and model, what
+its numbers are and how it compares with the plan, and each record's design and own sample-size
+calculation. Each recommendation shows the selected result's reading beside its calculation (same
+estimand as planned, close, or different), and each effect size to find has a note on what its
+values estimate and with which model before the note on how they compare.
+
 Recommendations are **recommended**, **provisional**, or **insufficient evidence**. A supported
 numerical choice with unresolved importance, an incomplete estimand, indirect evidence, limited
-appraisal or undecided review decisions is provisional. Missing or invalid numerical inputs yield
+appraisal, undecided review decisions, or a source result whose estimand the manager read as
+different from the plan (or has not read) is provisional. Missing or invalid numerical inputs yield
 no final number, with an explanation. A published effect is not used as an unsubstantiated
 noninferiority/equivalence margin. No automated status substitutes for scientific review.
 
@@ -480,7 +529,7 @@ independent corroboration.
 
 Saved extractions still open. Re-extract older papers to obtain the new methodological fields, then
 write the summary again. A summary becomes stale when the specification, decisions, extraction,
-verification or source metadata changes. A failed rewrite preserves the earlier result with an error.
+verification, source metadata or the manager's reading of a paper changes. A failed rewrite preserves the earlier result with an error.
 The JSON export includes recommendations, resolved numbers, justifications, provenance and the
 specification they were based on. CSV exports remain the reported evidence values.
 
