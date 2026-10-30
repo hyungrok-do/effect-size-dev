@@ -1,10 +1,11 @@
 """Claude API calls, and what the model providers share.
 
-Claude Opus 5.5 is the manager by default: it reads the problem, plans the search and adjudicates
-escalated extractions. Claude Haiku 5.5 is the worker by default: it screens every record and makes
-the first-pass extraction of every paper. The page may pick other Claude models for either role.
-openai_llm.py gives OpenAI models the same steps. Arithmetic never happens here; the models only
-read, quote and select justified planning assumptions.
+Claude Opus 5.5 is the manager by default: it reads the problem, plans the search, adjudicates
+escalated extractions and reads the statistical context of each paper's numbers. Claude Haiku 5.5
+is the worker by default: it screens every record and makes the first-pass extraction of every
+paper. The page may pick other Claude models for either role. openai_llm.py gives OpenAI models the
+same steps. Arithmetic never happens here; the models only read, quote and select justified planning
+assumptions.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ from pydantic import BaseModel, TypeAdapter
 from . import prompts
 from .config import Settings
 from .fulltext import FullText
-from .schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec
+from .schemas import (
+    EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec, StudyContext,
+)
 
 # Opus and Sonnet only: when a safety classifier declines a benign request, the API retries it on
 # the model Anthropic recommends for that refusal category. Haiku has no server-side fallback.
@@ -90,6 +93,10 @@ class LLM(Protocol):
     def adjudicate(
         self, spec: SearchSpec, document: dict, worker: PaperExtraction | None, flags: list[str], sink: UsageSink | None = None
     ) -> PaperExtraction: ...
+
+    def study_context(
+        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None
+    ) -> StudyContext: ...
 
     def screen(self, spec: SearchSpec, record_text: str, sink: UsageSink | None = None) -> ScreenDecision: ...
 
@@ -183,6 +190,20 @@ SEARCH_PLAN_RECORDED = "Recorded. Reply with a one-paragraph summary and stop."
 MAX_COUNTED = 12  # queries per count_pubmed call
 
 
+def context_input(extraction: PaperExtraction) -> str:
+    """The extraction as the manager reads it after the document, its results numbered from 1 for
+    StudyContext to refer to."""
+    d = extraction.model_dump()
+    numbered = {**d, "results": [{"result": i + 1, **r} for i, r in enumerate(d["results"])]}
+    return prompts.CONTEXT_INPUT + json.dumps(numbered, indent=1, ensure_ascii=False)
+
+
+def summary_input(overlap: dict, evidence: dict) -> str:
+    """What the summary is given (see evidence.build_evidence), with the overlap check."""
+    data = {"records": evidence["records"], "estimands": evidence["estimands"], "overlap": overlap, "values": evidence["values"]}
+    return "Records, the estimands of their results, the overlap check and the values:\n" + json.dumps(data, indent=1, ensure_ascii=False)
+
+
 def _cached_system(text: str) -> list[dict]:
     # The instructions and the specification are identical across a project's calls, so cache them.
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
@@ -257,7 +278,8 @@ class ClaudeLLM:
         return self._unwrap(message, output_format)
 
     def document(self, fulltext: FullText, title: str) -> dict:
-        """The paper for extract() and adjudicate(): a document block, the PDF itself when there is one."""
+        """The paper for extract(), adjudicate() and study_context(): a document block, the PDF itself
+        when there is one."""
         return fulltext.document_block(title)
 
     # -- manager (Opus by default) ------------------------------------------------
@@ -305,12 +327,11 @@ class ClaudeLLM:
         )
 
     def summarize(self, spec: SearchSpec, overlap: dict, evidence: dict, sink: UsageSink | None = None) -> EvidenceSummary:
-        data = {"records": evidence["records"], "overlap": overlap, "values": evidence["values"]}
         return self._parse(
             step="summarize",
             manager=True,
             system=prompts.SUMMARIZE + "\n\nSpecification:\n" + spec.model_dump_json(indent=2),
-            content=[{"type": "text", "text": "Records, the overlap check and the values:\n" + json.dumps(data, indent=1, ensure_ascii=False)}],
+            content=[{"type": "text", "text": summary_input(overlap, evidence)}],
             output_format=EvidenceSummary,
             effort="high",
             sink=sink,
@@ -336,6 +357,19 @@ class ClaudeLLM:
             content=[document, {"type": "text", "text": text}],
             output_format=PaperExtraction,
             effort="xhigh",
+            sink=sink,
+        )
+
+    def study_context(
+        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None
+    ) -> StudyContext:
+        return self._parse(
+            step="context",
+            manager=True,
+            system=prompts.CONTEXT + "\n\nSpecification:\n" + spec.model_dump_json(indent=2),
+            content=[document, {"type": "text", "text": context_input(extraction)}],
+            output_format=StudyContext,
+            effort="high",
             sink=sink,
         )
 

@@ -2,7 +2,8 @@
 
     spec (Opus) -> search plan (Opus + tools) -> run the levels from the top down (code) -> screen (Haiku)
     -> add what the included reviews cite (code) -> screen those (Haiku)
-    -> full text (code) -> extract (Haiku) -> verify (code) -> adjudicate escalations (Opus) -> review (human)
+    -> full text (code) -> extract (Haiku) -> verify (code) -> adjudicate escalations (Opus)
+    -> read each paper's estimands and models (Opus) -> check its quotes (code) -> review (human)
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from .openai_llm import OpenAIError
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
 from .sources import Record, SourceError, Sources, europepmc_pmid, europepmc_record, trial_record
 from .store import Store, now
-from .verify import Verification, escalation_reasons, in_audit_sample, verify
+from .verify import Verification, check_context, escalation_reasons, in_audit_sample, verify
 
 log = logging.getLogger(__name__)
 
@@ -531,7 +532,7 @@ class Pipeline:
         paper = self.store.paper(paper_id)
         assert paper is not None
         sink = self._sink(project_id)
-        self.store.update_paper(paper_id, status="fetching", error=None)
+        self.store.update_paper(paper_id, status="fetching", error=None, context=None)
         try:
             fulltext = get_fulltext(paper, self.sources)
         except Exception as exc:
@@ -577,6 +578,8 @@ class Pipeline:
                 reasons.append(f"manager review failed: {describe_error(exc)}")
 
         assert final is not None and final_report is not None
+        # The manager then reads what the numbers estimate: not when there are none, nor once the run is stopping.
+        read = bool(final.results) and (stop is None or stop.error is None)
         self.store.update_paper(
             paper_id,
             status="extracted",
@@ -585,7 +588,57 @@ class Pipeline:
             extracted_model=getattr(self.llm, f"{extracted_by}_model", None),
             verification=final_report.to_dict(),
             escalation={"reasons": reasons, "audit": audited} if reasons else None,
+            context={"status": "running"} if read else None,
         )
+        if read:
+            self._read_context(spec, paper_id, document, final, fulltext.text, sink, stop)
+
+    def read_context(self, project_id: str, paper_id: int) -> None:
+        """The manager reads the statistical context of a paper extracted without it (in an older project,
+        or after the reading failed), from the document obtained again as extraction obtains it."""
+        project, paper = self.store.project(project_id), self.store.paper(paper_id)
+        assert project is not None and paper is not None
+        if paper["status"] != "extracted":
+            return  # an extraction under way reads it itself
+        if not paper["extraction"]["results"]:
+            self.store.update_paper(paper_id, context=None)  # nothing to read
+            return
+        self.store.update_paper(paper_id, context={"status": "running"})
+        try:
+            fulltext = get_fulltext(paper, self.sources)
+            if fulltext is None:
+                raise SourceError("no open full text or abstract was found")
+        except Exception as exc:
+            self.store.update_paper(paper_id, context={"status": "error", "error": f"Could not get the text: {exc}"})
+            return
+        spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
+        document = self.llm.document(fulltext, paper["title"] or paper["ext_id"])
+        extraction = PaperExtraction.model_validate(paper["extraction"])
+        self._read_context(spec, paper_id, document, extraction, fulltext.text, self._sink(project_id))
+
+    def _read_context(
+        self, spec: SearchSpec, paper_id: int, document: dict, extraction: PaperExtraction, text: str, sink,
+        stop: "_Stop | None" = None,
+    ) -> None:
+        """The manager reads each result's estimand and model; its quotes are checked against the paper's
+        text. A failure is kept with the paper, whose extraction stands; in a run, one that would fail every
+        paper stops the run."""
+        try:
+            context = self.llm.study_context(spec, document, extraction, sink)
+        except Exception as exc:
+            stopping = stops_the_run(exc)
+            if not stopping:
+                log.exception("reading the context of paper %s failed", paper_id)
+            self.store.update_paper(paper_id, context={"status": "error", "error": describe_error(exc)})
+            if stop is not None and stopping:
+                stop.set(exc)  # after the extraction and this error are stored, as when the adjudication is refused
+            return
+        self.store.update_paper(paper_id, context={
+            "status": "done",
+            "result": context.model_dump(),
+            "checks": check_context(context, text),
+            "model": getattr(self.llm, "manager_model", None),
+        })
 
     def _worker_pass(
         self, spec: SearchSpec, document: dict, fulltext: FullText, quotes_reliable: bool, sink, stop: "_Stop | None" = None

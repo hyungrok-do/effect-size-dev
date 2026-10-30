@@ -7,9 +7,11 @@ import anthropic
 import httpx2
 import pytest
 
+from esf import prompts
 from esf.config import Settings
-from esf.llm import NO_KEY, ClaudeLLM, ModelDeclined, ModelTruncated, NoCredentials, describe_error, server_credentials
-from fixtures import SPEC, streamed
+from esf.llm import NO_KEY, ClaudeLLM, ModelDeclined, ModelTruncated, NoCredentials, describe_error, output_schema, server_credentials
+from esf.schemas import PaperExtraction, StudyContext
+from fixtures import SPEC, FakeLLM, streamed
 
 # Every variable the Anthropic SDK reads a credential from, besides a profile on disk.
 CREDENTIAL_VARIABLES = (
@@ -104,6 +106,42 @@ def test_manager_steps_run_on_opus_with_fallbacks():
     assert spec["fallbacks"] == "default"
     assert "server-side-fallback-2026-07-01" in spec_req.headers["anthropic-beta"]
     assert "None: the junior reviewer" in adjudicate["messages"][0]["content"][1]["text"]
+
+
+def test_the_manager_reads_the_context_from_the_document_then_the_numbered_extraction():
+    extraction = PaperExtraction.model_validate({**EXTRACTION, "results": EXTRACTION["results"] * 2})
+    reading = FakeLLM().study_context(SPEC, {"title": "A trial"}, extraction)
+    llm, api = make_llm([("sse", streamed("claude-opus-5-5", reading.model_dump()))])
+    usage = []
+    assert llm.study_context(SPEC, DOC, extraction, sink=lambda step, model, u: usage.append((step, model))) == reading
+    [(request, body)] = api.requests
+    assert body["model"] == "claude-opus-5-5" and body["output_config"]["effort"] == "high" and body["fallbacks"] == "default"
+    assert body["output_config"]["format"]["schema"] == output_schema(StudyContext)
+    assert body["system"][0]["text"] == prompts.CONTEXT + "\n\nSpecification:\n" + SPEC.model_dump_json(indent=2)
+    document, text = body["messages"][0]["content"]
+    assert document == DOC and text["type"] == "text" and text["text"].startswith(prompts.CONTEXT_INPUT)
+    # Each result leads with its number, from 1, for the reading to refer to it by.
+    sent = json.loads(text["text"].removeprefix(prompts.CONTEXT_INPUT))
+    assert [list(r)[0] for r in sent["results"]] == ["result", "result"] and [r["result"] for r in sent["results"]] == [1, 2]
+    assert sent == {**extraction.model_dump(), "results": [{"result": i + 1, **r} for i, r in enumerate(extraction.model_dump()["results"])]}
+    assert text["text"] == prompts.CONTEXT_INPUT + json.dumps(sent, indent=1, ensure_ascii=False)
+    assert usage == [("context", "claude-opus-5-5")]
+
+
+def test_the_summary_is_given_the_estimands_of_the_results():
+    summary = {"overview": "One trial.", "needs": [], "overlap": "", "caveats": [], "gaps": []}
+    llm, api = make_llm([("sse", streamed("claude-opus-5-5", summary))])
+    evidence = {"records": [{"key": "R1", "context": {"design": "RCT", "sample_size": "", "sample_size_found": False, "notes": ""}}],
+                "estimands": [{"key": "E1", "record": "R1", "result": "R1:0"}],
+                "values": [{"key": "V1", "result": "R1:0", "estimand": "E1"}]}
+    llm.summarize(SPEC, {"groups": [], "notes": ""}, evidence)
+    [(_, body)] = api.requests
+    assert body["model"] == "claude-opus-5-5" and body["system"][0]["text"].startswith(prompts.SUMMARIZE)
+    header, data = body["messages"][0]["content"][0]["text"].split("\n", 1)
+    assert header == "Records, the estimands of their results, the overlap check and the values:"
+    assert json.loads(data) == {"records": evidence["records"], "estimands": evidence["estimands"],
+                                "overlap": {"groups": [], "notes": ""}, "values": evidence["values"]}
+    assert list(json.loads(data)) == ["records", "estimands", "overlap", "values"]
 
 
 def test_the_chosen_models_run_with_the_fallback_their_own_model_takes():

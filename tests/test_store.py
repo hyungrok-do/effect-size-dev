@@ -29,7 +29,13 @@ def test_an_older_database_gains_the_new_columns(tmp_path):
     store.add_paper("p1", source="pubmed", ext_id="1", found_by=["x"], found_in=["primary"], status="candidate")
     assert store.project("p1")["search_log"] == [{"level": "primary", "hits": 4}]
     assert store.papers("p1")[0]["found_in"] == ["primary"]
+    # The manager's reading of a paper's context: none for a paper extracted before it, kept as JSON after.
+    paper = store.papers("p1")[0]
+    assert paper["context"] is None
+    store.update_paper(paper["id"], context={"status": "error", "error": "overloaded"})
+    assert store.paper(paper["id"])["context"] == {"status": "error", "error": "overloaded"}
     Store(path)  # opening it again changes nothing
+    assert "context" in {row[1] for row in sqlite3.connect(path).execute("PRAGMA table_info(papers)")}
 
 
 def test_an_older_specification_is_upgraded():

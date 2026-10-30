@@ -69,6 +69,21 @@ def test_search_screen_extract_end_to_end(tmp_path):
     assert llm.calls.count("extract") == 8 and llm.calls.count("adjudicate") == 1
     assert "8.1 (4.2)" in pipeline.source_text(project_id, papers["11111111"]["id"])
 
+    # Then the manager read what each paper's numbers estimate, after the final extraction (the
+    # pilot's after the manager redid it), and its quotes were checked against the paper's text.
+    assert llm.calls.count("context") == 8
+    assert llm.calls.index("context") > llm.calls.index("extract")
+    assert all(p["context"]["status"] == "done" for p in papers.values() if p["status"] == "extracted")
+    assert papers["33333333"]["context"] is None
+    trial = papers["11111111"]["context"]
+    [result] = trial["result"]["results"]
+    assert (result["result"], result["model"], result["vs_plan"]) == (1, "ANCOVA adjusted for baseline", "same")
+    assert result["quote"] == "Analyses followed the intention-to-treat principle."
+    assert trial["checks"] == {"sample_size": None, "results": ["exact"]}
+    assert papers[REVIEW]["context"]["result"]["results"][0]["vs_plan"] == "different"
+    assert papers[REVIEW]["context"]["checks"] == {"sample_size": None, "results": [None]}
+    assert len(papers["44444444"]["context"]["result"]["results"]) == len(pilot["extraction"]["results"])
+
 
 def test_the_search_runs_from_the_top_down(tmp_path):
     _, store, _, project_id = run_all(tmp_path)
@@ -258,11 +273,67 @@ def test_overlap_is_checked_and_the_summary_describes_what_was_kept(tmp_path):
     registry = [v for v in evidence["values"] if v["record"] == keys["NCT01234567"]]
     assert registry and all(v["same_participants_as"] == keys["11111111"] for v in registry)
     assert all(v["same_participants_as"] is None for v in evidence["values"] if v["record"] != keys["NCT01234567"])
-    assert set(evidence) == {"records", "values"} and [v["key"] for v in evidence["values"]][:2] == ["V1", "V2"]
+    assert list(evidence) == ["records", "estimands", "values"]
+    assert [v["key"] for v in evidence["values"]][:2] == ["V1", "V2"]
+    # The manager's reading of each kept result is its estimand, named by the result's values.
+    assert [e["key"] for e in evidence["estimands"]] == [f"E{i}" for i in range(1, len(evidence["records"]) + 1)]
+    by_result = {e["result"]: e["key"] for e in evidence["estimands"]}
+    assert all(v["estimand"] == by_result[v["result"]] for v in evidence["values"])
+    trial = next(e for e in evidence["estimands"] if e["record"] == keys["11111111"])
+    assert (trial["result"], trial["model"], trial["vs_plan"]) == (f"{keys['11111111']}:0", "ANCOVA adjusted for baseline", "same")
+    assert keys["44444444"] not in {e["record"] for e in evidence["estimands"]}
+    # Each kept record carries the design and the paper's own sample-size calculation as the manager read them.
+    records = {r["key"]: r for r in evidence["records"]}
+    assert records[keys[REVIEW]]["context"] == {
+        "design": "meta-analysis of randomized trials", "sample_size": "", "sample_size_found": False, "notes": ""}
+    assert all(r["context"]["design"] for r in records.values())
     need = summary["result"]["needs"][0]
     assert need["need"] == "The difference and its SD" and need["values"]
     assert {evidence["values"][int(k[1:]) - 1]["statistic"] for k in need["values"]} <= {"mean", "sd", "n"}
+    assert need["estimands"].startswith("[V") and "estimates the planned difference" in need["estimands"]
     assert summary["basis"][0][0] == min(p["id"] for p in store.papers(project_id) if p["status"] == "extracted")
+    assert summary["basis"][0][8]["design"]  # the context it was written with
+
+
+def test_a_recommendation_on_a_result_read_as_a_different_estimand_is_provisional(tmp_path):
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    review = next(p for p in store.papers(project_id) if p["ext_id"] == REVIEW)
+    different = ("The manager read the selected result's estimand as different from the planned one: "
+                 "standardized scale, not PHQ-9 points.")
+    unread = "The manager has not read the selected result's estimand and model."
+
+    def recommendation():
+        pipeline.summarize(project_id)
+        summary = store.project(project_id)["summary"]
+        assert summary["status"] == "done", summary
+        [rec] = summary["result"]["recommendations"]
+        # The head agent chose the review's pooled effect, whose result the manager read.
+        [key] = rec["choice"]["inputs"]
+        value = next(v for v in summary["evidence"]["values"] if v["key"] == key)
+        assert value["record"] == f"R{review['id']}" and value["statistic"] == "standardized_mean_difference"
+        return rec, value, summary["evidence"]
+
+    # The manager read it as a pooled standardized effect: a different estimand from the planned difference
+    # in PHQ-9 points. The resolved number stays, as a provisional one, with the reason.
+    rec, value, evidence = recommendation()
+    assert next(e for e in evidence["estimands"] if e["key"] == value["estimand"])["vs_plan"] == "different"
+    assert rec["status"] == "provisional" and rec["resolved"]["value"] == .3 and rec["resolved"]["basis_value"] == .35
+    assert rec["validation_notes"][-1] == different and unread not in rec["validation_notes"]
+
+    # Read as the same estimand, that note goes; the others stand.
+    context = review["context"]
+    same = {**context, "result": {**context["result"], "results": [
+        {**r, "vs_plan": "same", "differences": []} for r in context["result"]["results"]]}}
+    store.update_paper(review["id"], context=same)
+    rec, value, _ = recommendation()
+    assert value["estimand"] and different not in rec["validation_notes"] and unread not in rec["validation_notes"]
+    assert rec["status"] == "provisional" and rec["validation_notes"]
+
+    # Not read at all (an older project, or the reading failed): provisional until the manager reads it.
+    store.update_paper(review["id"], context={"status": "error", "error": "overloaded"})
+    rec, value, _ = recommendation()
+    assert value["estimand"] is None and rec["status"] == "provisional" and rec["validation_notes"][-1] == unread
+    assert rec["resolved"]["value"] == .3
 
 
 def test_nothing_kept_means_no_summary(tmp_path):
@@ -392,6 +463,123 @@ def test_a_stopping_error_in_the_review_keeps_the_workers_extraction(tmp_path):
     assert pilot["status"] == "extracted" and pilot["extracted_by"] == "worker"
     assert any(r.startswith("manager review failed: The Anthropic account has run out of credit") for r in pilot["escalation"]["reasons"])
     assert llm.calls.count("adjudicate") == 1
+
+
+def test_a_failed_reading_of_the_context_keeps_the_extraction_and_can_be_read_again(tmp_path):
+    pipeline, store, llm = make_pipeline(tmp_path)
+    study_context = llm.study_context
+
+    def overloaded(*args, **kwargs):
+        llm.calls.append("context")
+        raise RuntimeError("overloaded")
+
+    llm.study_context = overloaded
+    project_id = store.create_project("We plan a randomized trial of a mindfulness app versus waitlist for PHQ-9 at 12 weeks.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    project = store.project(project_id)
+    assert project["status"] == "done", project["error"]
+    extracted = store.papers(project_id, status="extracted")
+    assert len(extracted) == 8 and llm.calls.count("context") == 8
+    assert all(p["extraction"]["results"] and p["context"] == {"status": "error", "error": "overloaded"} for p in extracted)
+    assert project["overlap"]["report"]["groups"]  # the run went on to the overlap check
+
+    # Read again on request: the document is obtained again as extraction obtains it.
+    llm.study_context = study_context
+    trial = next(p for p in extracted if p["ext_id"] == "11111111")
+    pipeline.read_context(project_id, trial["id"])
+    context = store.paper(trial["id"])["context"]
+    assert context["status"] == "done" and context["checks"] == {"sample_size": None, "results": ["exact"]}
+    assert context["result"]["results"][0]["quote"] == "Analyses followed the intention-to-treat principle."
+    assert store.paper(trial["id"])["extraction"] == trial["extraction"] and llm.calls.count("context") == 9
+    # A paper extracted before the manager read contexts (an older project) is read the same way.
+    pdf = next(p for p in extracted if p["ext_id"] == "22222222")
+    store.update_paper(pdf["id"], context=None)
+    pipeline.read_context(project_id, pdf["id"])
+    assert store.paper(pdf["id"])["context"]["status"] == "done"
+    # Nothing to read in a paper that is not extracted, or whose extraction has no results.
+    excluded = next(p for p in store.papers(project_id) if p["status"] == "screened_out")
+    pipeline.read_context(project_id, excluded["id"])
+    assert store.paper(excluded["id"])["context"] is None
+    store.update_paper(pdf["id"], extraction={**pdf["extraction"], "results": []})
+    pipeline.read_context(project_id, pdf["id"])
+    assert store.paper(pdf["id"])["context"] is None and llm.calls.count("context") == 10
+
+
+def test_reading_the_context_again_says_when_the_text_cannot_be_had(tmp_path):
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    trial = next(p for p in store.papers(project_id) if p["ext_id"] == "11111111")
+    pipeline.sources = Sources(pipeline.settings, client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404))))
+    store.update_paper(trial["id"], abstract=None, doi=None)
+    pipeline.read_context(project_id, trial["id"])
+    context = store.paper(trial["id"])["context"]
+    assert context["status"] == "error" and context["error"].startswith("Could not get the text")
+    assert llm.calls.count("context") == 8
+
+
+def test_a_stopping_error_in_the_reading_keeps_the_extraction_and_stops_the_run(tmp_path):
+    pipeline, store, llm = make_pipeline(tmp_path, worker_concurrency=1)
+
+    def refused(*args, **kwargs):
+        llm.calls.append("context")
+        raise out_of_credit()
+
+    llm.study_context = refused
+    project_id = store.create_project("We plan a randomized trial of a mindfulness app versus waitlist for PHQ-9 at 12 weeks.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    project = store.project(project_id)
+    assert project["status"] == "error" and "run out of credit" in project["error"]
+    assert llm.calls.count("context") == 1 and llm.calls.count("extract") == 1  # one refused call, then no more
+    papers = store.papers(project_id)
+    # The paper the refusal came on keeps its extraction, with the error; the others wait for the next run.
+    [extracted] = [p for p in papers if p["status"] == "extracted"]
+    assert extracted["extraction"]["results"] and extracted["context"]["status"] == "error"
+    assert extracted["context"]["error"].startswith("The Anthropic account has run out of credit")
+    assert {p["status"] for p in papers if p is not extracted} <= {"screened_in", "unsure", "screened_out"}
+
+
+def test_an_extraction_without_results_is_not_read(tmp_path):
+    pipeline, store, llm = make_pipeline(tmp_path)
+    extract = llm.extract
+    llm.extract = lambda spec, document, sink=None: extract(spec, document, sink).model_copy(update={"results": []})
+    project_id = store.create_project("We plan a randomized trial of a mindfulness app versus waitlist for PHQ-9 at 12 weeks.")
+    pipeline.read_spec(project_id)
+    pipeline.run(project_id)
+    extracted = store.papers(project_id, status="extracted")
+    assert extracted and all(p["context"] is None for p in extracted)
+    assert "context" not in llm.calls
+
+
+def test_extracting_a_paper_again_clears_its_context_until_it_is_read_again(tmp_path):
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    trial = next(p for p in store.papers(project_id) if p["ext_id"] == "11111111")
+    seen = []
+    study_context = llm.study_context
+
+    def reading(spec, document, extraction, sink=None):
+        seen.append(store.paper(trial["id"])["context"])  # while the manager reads it
+        return study_context(spec, document, extraction, sink)
+
+    llm.study_context = reading
+    updates = []
+    update_paper = store.update_paper
+    store.update_paper = lambda paper_id, **fields: (updates.append(fields), update_paper(paper_id, **fields))[1]
+    spec = SearchSpec.model_validate(upgrade_spec(store.project(project_id)["spec"]))
+    pipeline.extract_paper(project_id, spec, trial["id"])
+    assert updates[0] == {"status": "fetching", "error": None, "context": None}
+    assert seen == [{"status": "running"}]
+    assert store.paper(trial["id"])["status"] == "extracted" and store.paper(trial["id"])["context"]["status"] == "done"
+
+
+def test_a_restart_ends_a_reading_that_was_under_way(tmp_path):
+    _, store, _, project_id = run_all(tmp_path)
+    trial = next(p for p in store.papers(project_id) if p["ext_id"] == "11111111")
+    store.update_paper(trial["id"], context={"status": "running"})
+    store.interrupt_running()
+    paper = store.paper(trial["id"])
+    assert paper["status"] == "extracted" and paper["context"]["status"] == "error" and "restarted" in paper["context"]["error"]
+    assert all(p["context"]["status"] == "done" for p in store.papers(project_id, status="extracted") if p["id"] != trial["id"])
 
 
 @pytest.mark.parametrize("code, stops", [

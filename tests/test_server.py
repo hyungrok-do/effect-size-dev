@@ -24,7 +24,7 @@ from esf.chatgpt import (
 from esf.config import MODEL_CHOICES, REPO_ROOT, Settings
 from esf.llm import NO_KEY, ClaudeLLM
 from esf.openai_llm import OpenAILLM
-from esf.server import _remote, create_app, csv_cell, plan_llm
+from esf.server import EXPORT_COLUMNS, _remote, create_app, csv_cell, plan_llm
 from esf.sources import Sources
 from esf.store import Store
 from fixtures import SPEC, FakeLLM, LiteratureAPIs, mock_client, streamed
@@ -98,9 +98,18 @@ def test_full_flow_over_http(tmp_path):
     papers = {p["ext_id"]: p for p in client.get(f"/api/projects/{project_id}/papers").json()}
     assert papers["11111111"]["decisions"]["0"]["decision"] == "include"
 
-    rows = list(csv.DictReader(io.StringIO(client.get(f"/api/projects/{project_id}/export.csv?included_only=true").text)))
+    # The manager's reading of each paper comes to the page with it, and goes into the exports.
+    assert trial["context"]["status"] == "done" and trial["context"]["checks"] == {"sample_size": None, "results": ["exact"]}
+    assert papers["33333333"]["context"] is None
+    export = client.get(f"/api/projects/{project_id}/export.csv?included_only=true").text
+    rows = list(csv.DictReader(io.StringIO(export)))
     assert {r["id"] for r in rows} == {"11111111"} and len(rows) == 6
-    assert client.get(f"/api/projects/{project_id}/export.json").json()["project"]["id"] == project_id
+    assert export.splitlines()[0].split(",") == EXPORT_COLUMNS
+    assert {(r["design"], r["estimand_population"], r["model"], r["vs_plan"], r["differences"]) for r in rows} == {
+        ("two-arm parallel RCT, individually randomized", "all randomized (ITT)", "ANCOVA adjusted for baseline", "same", "")}
+    exported = client.get(f"/api/projects/{project_id}/export.json").json()
+    assert exported["project"]["id"] == project_id
+    assert next(p for p in exported["papers"] if p["id"] == trial["id"])["context"] == trial["context"]
 
     source = client.get(f"/api/projects/{project_id}/papers/{trial['id']}/source")
     assert source.status_code == 200 and "8.1 (4.2)" in source.text
@@ -334,6 +343,66 @@ def test_a_missing_key_gives_an_actionable_error(tmp_path):
     project_id = client.post("/api/projects", json={"paragraph": "A randomized trial of a mindfulness app for PHQ-9."}).json()["id"]
     project = wait_for(client, project_id, {"error"})
     assert "Enter a valid key in the API key box" in project["error"]
+
+
+def wait_for_context(client, project_id, paper_id, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        context = next(p for p in client.get(f"/api/projects/{project_id}/papers").json() if p["id"] == paper_id)["context"]
+        if (context or {}).get("status") != "running":
+            return context
+        time.sleep(0.05)
+    raise AssertionError("still reading")
+
+
+def test_the_manager_reads_the_context_of_a_paper_already_extracted(tmp_path):
+    llm, keys = FakeLLM(), []
+    client = make_client(tmp_path, llm=FakeLLM(), llm_for_key=lambda key, manager, worker: keys.append((key, manager)) or llm)
+    project_id = client.post("/api/projects", json={"paragraph": PARAGRAPH}).json()["id"]
+    wait_for(client, project_id, {"spec_ready"})
+    client.post(f"/api/projects/{project_id}/run")
+    wait_for(client, project_id, {"done"})
+    papers = {p["ext_id"]: p for p in client.get(f"/api/projects/{project_id}/papers").json()}
+    trial, excluded = papers["11111111"], papers["33333333"]
+    # As a paper extracted before the manager read contexts: read on request, on the models the page chose.
+    store = client.app.state.store
+    store.update_paper(trial["id"], context=None)
+    url = f"/api/projects/{project_id}/papers/{trial['id']}/context"
+    headers = {"X-Anthropic-Api-Key": "sk-ant-test", "X-Manager-Model": "claude-sonnet-5-5"}
+    assert client.post(url, headers=headers).status_code == 202
+    context = wait_for_context(client, project_id, trial["id"])
+    assert context["status"] == "done" and context["checks"] == {"sample_size": None, "results": ["exact"]}
+    assert context["result"]["results"][0]["quote"] == "Analyses followed the intention-to-treat principle."
+    assert llm.calls == ["context"] and keys == [("sk-ant-test", "claude-sonnet-5-5")]
+    # Read again after a failure.
+    store.update_paper(trial["id"], context={"status": "error", "error": "overloaded"})
+    assert client.post(url, headers=headers).status_code == 202
+    assert wait_for_context(client, project_id, trial["id"])["status"] == "done" and llm.calls == ["context", "context"]
+
+    # Not while it is being read, nor for a paper with nothing to read, nor during a run.
+    store.update_paper(trial["id"], context={"status": "running"})
+    assert client.post(url).status_code == 409
+    store.update_paper(trial["id"], context=None)
+    response = client.post(f"/api/projects/{project_id}/papers/{excluded['id']}/context")
+    assert response.status_code == 400 and response.json()["detail"] == "Extract this paper first."
+    store.update_paper(trial["id"], extraction={**trial["extraction"], "results": []})
+    assert client.post(url).status_code == 400
+    store.update_paper(trial["id"], extraction=trial["extraction"])
+    store.update_project(project_id, status="extracting")
+    assert client.post(url).status_code == 409
+    store.update_project(project_id, status="done")
+    assert client.post(f"/api/projects/{project_id}/papers/999999/context").status_code == 404
+    assert client.post(f"/api/projects/nope/papers/{trial['id']}/context").status_code == 404
+    assert llm.calls == ["context", "context"]
+    # Extracting it again clears the reading until the manager has read the new extraction.
+    assert client.post(f"/api/projects/{project_id}/papers/{trial['id']}/extract", headers=headers).status_code == 202
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        paper = next(p for p in client.get(f"/api/projects/{project_id}/papers").json() if p["id"] == trial["id"])
+        if paper["status"] == "extracted" and (paper["context"] or {}).get("status") != "running":
+            break
+        time.sleep(0.05)
+    assert paper["context"]["status"] == "done" and llm.calls[-2:] == ["extract", "context"]
 
 
 def test_unknown_ids(tmp_path):

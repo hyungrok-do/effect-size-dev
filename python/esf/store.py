@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS papers (
     extracted_model TEXT,
     verification TEXT,
     escalation TEXT,
+    context TEXT,
     error TEXT,
     UNIQUE (project_id, source, ext_id)
 );
@@ -101,6 +102,7 @@ JSON_COLUMNS = {
     "extraction",
     "verification",
     "escalation",
+    "context",
 }
 
 # Statuses of a project while a job is working on it.
@@ -189,7 +191,7 @@ class Store:
             for table, column in (
                 ("projects", "search_log"), ("projects", "overlap"), ("projects", "summary"), ("projects", "run_started_at"),
                 ("papers", "found_in"), ("papers", "authors"), ("papers", "cited_by"), ("papers", "author_list"),
-                ("papers", "extracted_model"),
+                ("papers", "extracted_model"), ("papers", "context"),
             ):
                 if column not in {row[1] for row in self._db.execute(f"PRAGMA table_info({table})")}:
                     self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
@@ -248,6 +250,9 @@ class Store:
                 error = "The server restarted while the summary was being written."
                 previous = row["summary"].get("previous")
                 self.update_project(row["id"], summary={**previous, "last_error": error} if previous else {"status": "error", "error": error})
+        for row in self._all("SELECT id, context FROM papers WHERE context IS NOT NULL"):
+            if row["context"].get("status") == "running":
+                self.update_paper(row["id"], context={"status": "error", "error": "The server restarted while the manager was reading this paper."})
 
     # -- papers ---------------------------------------------------------------
 

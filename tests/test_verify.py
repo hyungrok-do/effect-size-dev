@@ -1,6 +1,8 @@
+from esf.schemas import ResultContext, StudyContext
 from esf.verify import (
     Source,
     ValueCheck,
+    check_context,
     escalation_reasons,
     in_audit_sample,
     number_in,
@@ -101,3 +103,32 @@ def test_audit_sample_is_deterministic_and_proportional():
     assert picked == [k for k in keys if in_audit_sample(k, 0.1)]
     assert 120 < len(picked) < 280
     assert not any(in_audit_sample(k, 0.0) for k in keys)
+
+
+def _reading(number, quote):
+    return ResultContext(
+        result=number, population="all randomized", treatments="app vs waitlist", variable="PHQ-9 at 12 weeks",
+        intercurrent_events="not stated", summary_measure="difference in means", model="ANCOVA", missing_data="not stated",
+        quote=quote, location="Methods" if quote else "", numbers_are="observed means and SDs", vs_plan="same", differences=[],
+        use="The SDs can serve as the outcome SD.",
+    )
+
+
+def test_the_managers_quotes_are_checked_against_the_paper():
+    model = "The primary outcome was analysed with an ANCOVA adjusted for baseline PHQ-9, by intention to treat in all participants as randomized."
+    text = f"Statistical analysis\nA sample of 120 gives 90% power to detect a\ndifference of 3 points (SD 5).\n{model}"
+    context = StudyContext(
+        design="two-arm parallel RCT", sample_size="A sample of 120 gives 90% power to detect a difference of 3 points (SD 5).",
+        sample_size_location="Statistical analysis",
+        results=[
+            _reading(1, model),
+            _reading(2, ""),
+            _reading(3, "The primary outcome was analysed with a mixed model for repeated measures and an unstructured covariance."),
+            _reading(4, model.replace("analysed", "analyzed")),
+        ],
+        notes="",
+    )
+    # Exact across line breaks; none without a quote; missing when the paper doesn't say it; approximate when respelled.
+    assert check_context(context, text) == {"sample_size": "exact", "results": ["exact", None, "missing", "approximate"]}
+    without = context.model_copy(update={"sample_size": "  ", "results": []})
+    assert check_context(without, text) == {"sample_size": None, "results": []}
