@@ -110,6 +110,10 @@ export class Store extends EventTarget {
             ...paper, status: before[paper.screen?.decision] || 'screened_in',
             error: 'The page was closed or reloaded before this was extracted.',
           }));
+        } else if (paper.context?.status === 'running') { // the extraction stands; its reading can be asked for again
+          await request(papers.put({
+            ...paper, context: { status: 'error', error: 'The page was closed or reloaded while the manager was reading this paper.' },
+          }));
         }
       }
     });

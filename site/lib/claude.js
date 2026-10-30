@@ -1,6 +1,7 @@
 // Claude, called from the browser with the user's own API key.
 //
-//   Opus 5.5   (manager)  reads the problem, plans the search, re-extracts escalated papers
+//   Opus 5.5   (manager)  reads the problem, plans the search, re-extracts escalated papers, reads each
+//                         paper's estimands and models
 //   Sonnet 5.5 (fetcher)  downloads what the browser may not: PDFs and sites that refuse web pages
 //   Haiku 5.5  (workers)  screens every record and reads every paper
 //
@@ -86,6 +87,11 @@ export function searchRunners(toolbox) {
 
 const cachedSystem = (text) => [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
 const withSpec = (prompt, spec) => `${prompt}\n\nSpecification:\n${JSON.stringify(spec, null, 2)}`;
+
+// The extraction as the manager reads it with the document, each result numbered from 1, so the
+// context it returns can say which result it is about.
+export const contextInput = (extraction) => PROMPTS.CONTEXT_INPUT
+  + JSON.stringify({ ...extraction, results: extraction.results.map((r, i) => ({ result: i + 1, ...r })) }, null, 1);
 
 // The structured output is the text after any fallback switch point.
 function structured(message) {
@@ -190,10 +196,10 @@ export class Claude {
   }
 
   summarize(spec, overlap, evidence, { sink } = {}) {
-    const data = { records: evidence.records, overlap, values: evidence.values };
+    const data = { records: evidence.records, estimands: evidence.estimands, overlap, values: evidence.values };
     return this.parse({
       step: 'summarize', manager: true, system: withSpec(PROMPTS.SUMMARIZE, spec),
-      content: [{ type: 'text', text: `Records, the overlap check and the values:\n${JSON.stringify(data, null, 1)}` }],
+      content: [{ type: 'text', text: `Records, the estimands of their results, the overlap check and the values:\n${JSON.stringify(data, null, 1)}` }],
       schema: SCHEMAS.EvidenceSummary, effort: 'high', sink,
     });
   }
@@ -204,6 +210,14 @@ export class Claude {
     return this.parse({
       step: 'adjudicate', manager: true, system: withSpec(PROMPTS.ADJUDICATE, spec),
       content: [document, { type: 'text', text }], schema: SCHEMAS.PaperExtraction, effort: 'xhigh', sink,
+    });
+  }
+
+  // The statistical context of a paper's final extraction: what each result estimates, with which model.
+  studyContext(spec, document, extraction, { sink } = {}) {
+    return this.parse({
+      step: 'context', manager: true, system: withSpec(PROMPTS.CONTEXT, spec),
+      content: [document, { type: 'text', text: contextInput(extraction) }], schema: SCHEMAS.StudyContext, effort: 'high', sink,
     });
   }
 

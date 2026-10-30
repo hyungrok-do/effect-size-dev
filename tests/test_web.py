@@ -313,6 +313,93 @@ def test_claude_gets_only_the_anthropic_key(browser, served):
     context.close()
 
 
+def test_the_review_shows_what_each_result_estimates_and_with_which_model(browser, served, monkeypatch):
+    """After the run the manager has read each paper's estimand and model: the card shows them before the
+    numbers, the summary's recommendation beside its calculation, and the export carries them. A paper
+    without a reading gets a button that asks the server for one; a reading that fails keeps the
+    extraction and offers to try again."""
+    context, page = open_page(browser, served)
+    page.wait_for_selector("#agents-page:not([hidden])")
+    page.fill("#api-key", ANTHROPIC_KEY)
+    page.click("#agents-done")
+    assert "reads what each result estimates and with which model" in page.inner_text("#intro .lede")
+    page.fill("#paragraph", PARAGRAPH)
+    page.click("#read")
+    page.wait_for_selector("#spec:not([hidden])")
+    project_id = page.evaluate("location.hash.slice(1)")
+    page.click("#run")
+    page.wait_for_selector("#map-body .map-stage[data-stage='ready'][data-state='done']", timeout=30000)
+    page.wait_for_selector("#review:not([hidden]) .paper")
+
+    # Each result: what it estimates and with which model, before its numbers; the design under the header.
+    page.click("#queue button[title^='A mindfulness app for depressive']")
+    card = page.locator("#papers .paper")
+    estimand = card.locator(".result .estimand")
+    estimand.wait_for()
+    assert estimand.get_attribute("data-fit") == "same" and estimand.locator(".fit .badge").inner_text() == "Same estimand as planned"
+    assert "Model ANCOVA adjusted for baseline" in " ".join(estimand.inner_text().split())
+    assert card.locator(".result details.quotes .model-quote .badge").text_content() == "quote found"
+    assert " ".join(card.locator(".study-context").inner_text().split()) == "Design two-arm parallel RCT, individually randomized"
+    page.click("#queue button[title^='Mindfulness apps for depressive symptoms']")
+    review = page.locator("#papers .paper .result .estimand")
+    review.wait_for()
+    assert review.get_attribute("data-fit") == "different" and review.locator(".differences li").all_inner_texts() == [
+        "standardized scale, not PHQ-9 points"]
+    # The server's export carries them too, column for column as the page's.
+    exported = httpx.get(f"{served['url']}api/projects/{project_id}/export.csv").text.splitlines()
+    assert exported[0].split(",")[15:26] == ["design", "estimand_population", "estimand_treatments", "estimand_variable",
+                                            "intercurrent_events", "summary_measure", "model", "missing_data", "numbers_are",
+                                            "vs_plan", "differences"]
+    # The summary's recommendation says, beside its calculation, what its source result estimates: the
+    # review's pooled standardized effect, another quantity than the plan's, so it stays provisional.
+    page.click("#summarize")
+    source = page.locator("#summary-body .planning-recommendation .source-estimand")
+    source.wait_for(timeout=15000)
+    assert source.get_attribute("data-fit") == "different" and source.locator(".badge").inner_text() == "Different estimand"
+    assert source.locator(".differences li").all_inner_texts() == ["standardized scale, not PHQ-9 points"]
+    assert " ".join(source.locator(".model").inner_text().split()) == "Model random-effects meta-analysis"
+    assert page.locator("#summary-body .planning-recommendation").get_attribute("data-status") == "provisional"
+    assert page.locator("#summary-body .summary-block.need h4.label").first.inner_text().lower() == "estimands"
+
+    # A paper extracted before the manager read estimands: the card asks the server for a reading.
+    papers = httpx.get(f"{served['url']}api/projects/{project_id}/papers").json()
+    trial = next(p for p in papers if p["title"].startswith("A mindfulness app for depressive"))
+    Store(served["path"] / "test.sqlite3").update_paper(trial["id"], context=None)
+    page.reload()
+    page.wait_for_selector("#review:not([hidden]) .paper")
+    page.click("#queue button[title^='A mindfulness app for depressive']")
+    card = page.locator("#papers .paper")
+    assert card.locator(".result .estimand").count() == 0
+    asked = card.locator(".study-context button", has_text="Read the estimand and model")
+    asked.click()
+    card.locator(".result .estimand[data-fit='same']").wait_for(timeout=15000)
+    assert any(method == "POST" and url.endswith(f"/papers/{trial['id']}/context") and status == 202
+               for method, url, _, status in page.api)
+
+    # A reading that fails keeps the extraction, and says why beside a button to try again.
+    def refused(self, spec, document, extraction, sink=None):
+        raise RuntimeError("The manager could not read it.")
+
+    reads = FakeLLM.study_context
+    monkeypatch.setattr(FakeLLM, "study_context", refused)
+    Store(served["path"] / "test.sqlite3").update_paper(trial["id"], context=None)
+    page.reload()
+    page.wait_for_selector("#review:not([hidden]) .paper")
+    page.click("#queue button[title^='A mindfulness app for depressive']")
+    card = page.locator("#papers .paper")
+    card.locator(".study-context button", has_text="Read the estimand and model").click()
+    card.locator(".study-context button", has_text="Read the estimand and model again").wait_for(timeout=15000)
+    assert "Reading the estimand and model failed: " in card.inner_text() and "could not read it" in card.inner_text()
+    assert card.locator(".result").count() == 1 and card.locator(".result .arms tr").count() == 2
+    stored = httpx.get(f"{served['url']}api/projects/{project_id}/papers").json()
+    assert next(p for p in stored if p["id"] == trial["id"])["status"] == "extracted"
+    monkeypatch.setattr(FakeLLM, "study_context", reads)
+    card.locator(".study-context button", has_text="Read the estimand and model again").click()
+    card.locator(".result .estimand[data-fit='same']").wait_for(timeout=15000)
+    assert not page.errors, page.errors
+    context.close()
+
+
 def test_sign_in_with_chatgpt_and_search_on_the_plan(browser, served):
     sign_in, responses = served["sign_in"], served["responses"]
     context, page = open_page(browser, served)

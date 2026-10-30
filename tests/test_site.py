@@ -26,8 +26,8 @@ from esf.config import REPO_ROOT
 from esf.jats import jats_to_text
 from esf.sources import clean_affiliations, europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_results_text
 from esf.evidence import build_evidence, decisions_basis, overlap_records
-from esf.schemas import PaperExtraction, upgrade_spec
-from esf.verify import in_audit_sample, numbers_in, verify
+from esf.schemas import PaperExtraction, StudyContext, upgrade_spec
+from esf.verify import check_context, in_audit_sample, numbers_in, verify
 from fixtures import (
     ABSTRACT_LINE, CONTEXT_INPUT, EUROPEPMC, EUROPEPMC_QUERY, JATS, PDF_LINE, PLAN, PMC_ONLY, PREPRINT, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL,
     FakeLLM, FakeOpenAI, LiteratureAPIs, _extraction, _result, _value, make_pdf, streamed,
@@ -76,6 +76,32 @@ EVIDENCE_OVERLAP = {"groups": [
     # A review and two studies it pools: separate studies, so none shares another's participants.
     {"records": ["R4", "R1", "R3"], "relation": "review_includes_study", "evidence": "R4 cites R1 and R3", "use": "R1"},
 ], "notes": ""}
+
+
+def _context(fits, design="two-arm parallel RCT", sample_size="", notes=""):
+    """A paper's context once the manager has read it, a ResultContext per {result number: (vs_plan, differences)}."""
+    results = [{"result": n, "population": "all randomized", "treatments": "app vs waitlist", "variable": "PHQ-9 at 12 weeks",
+                "intercurrent_events": "not stated", "summary_measure": "difference in means", "model": "ANCOVA adjusted for baseline",
+                "missing_data": "not stated", "quote": "", "location": "", "numbers_are": "observed means and SDs",
+                "vs_plan": fit, "differences": differences, "use": "The SDs can serve as the outcome SD."}
+               for n, (fit, differences) in fits.items()]
+    return {"status": "done", "model": "claude-opus-5-5", "checks": {"sample_size": None, "results": [None] * len(results)},
+            "result": {"design": design, "sample_size": sample_size, "sample_size_location": "Methods" if sample_size else "",
+                       "results": results, "notes": notes}}
+
+
+# The same papers once the manager has read some of them: a result excluded by decision keeps no estimand,
+# a paper excluded whole keeps none either, and a reading that failed or is running counts as none.
+CONTEXT_PAPERS = [
+    {**EVIDENCE_PAPERS[0], "context": _context({1: ("same", []), 2: ("close", ["GAD-7, not PHQ-9"])})},
+    {**EVIDENCE_PAPERS[1], "context": {"status": "error", "error": "The Anthropic API returned an error."}},
+    {**EVIDENCE_PAPERS[2], "context": _context({1: ("different", ["completers rather than all randomized"])},
+                                               sample_size="We needed 75 per arm.", notes="Attrition differed between arms.")},
+    {**EVIDENCE_PAPERS[3], "context": {"status": "running"}},
+    {**EVIDENCE_PAPERS[4], "context": None},
+    {**EVIDENCE_PAPERS[5], "context": _context({1: ("same", [])})},
+    EVIDENCE_PAPERS[6],
+]
 
 # Affiliation strings as PubMed and Europe PMC give them, cleaned the same way by both editions.
 AFFILIATION_CASES = [
@@ -150,6 +176,7 @@ class Network:
         self.openai_calls: list[tuple[dict, dict]] = []
         self.openai_quota: int | None = None  # screenings the OpenAI account has credit for
         self.refused: list[str] = []
+        self.context_error: tuple[int, dict] | None = None  # how Anthropic answers the manager's reading of a paper's context
 
     def __call__(self, route, request):
         host = urlparse(request.url).hostname
@@ -183,6 +210,10 @@ class Network:
             return route.fulfill(status=200, headers={**CORS, "content-type": "application/json"}, body=json.dumps(info))
         body = json.loads(request.post_data)
         self.claude.append((request.headers, body))
+        if self.context_error and (body.get("system") or [{"text": ""}])[0]["text"].startswith(prompts.CONTEXT):
+            status, error = self.context_error
+            return route.fulfill(status=status, headers={**CORS, "content-type": "application/json", "request-id": "req_test"},
+                                 body=json.dumps(error))
         if body.get("stream"):
             return route.fulfill(status=200, headers={**CORS, "content-type": "text/event-stream"},
                                  body=streamed(body["model"], self.structured(body)))
@@ -296,10 +327,17 @@ def test_browser_ports_match_python(browser, site_url):
             cases.append((_extraction([_result([_value("A vs B", "mean_difference", 2.2, quote)])]), negative, reliable))
     keys = [f"project:{i}" for i in range(50)]
     g_cases = [0, 1.5, 100.0, 1234567, 0.00001, 0.0001, -2.2, 12.345678, 1e21]
+    # The manager's quotes checked against the paper: exact, near, missing, and none.
+    study = FakeLLM().study_context(SPEC, {"title": "A mindfulness app"}, _extraction([_result([]), _result([]), _result([])]))
+    study.sample_size = "The sample size was chosen to detect a difference of three points."
+    study.results[1].quote = "Analyses followed the intention to treat principle"
+    study.results[2].quote = ""
+    contexts = [[study.model_dump(), jats_to_text(JATS)]]
     data = {
         "jats": JATS, "trial": TRIAL, "pubmed": PUBMED_XML, "numbers": numbers, "keys": keys, "g": g_cases,
         "europepmc": EUROPEPMC["resultList"]["result"][:3], "old_spec": OLD_SPEC,
         "evidence": [EVIDENCE_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP],
+        "with_contexts": [CONTEXT_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP], "contexts": contexts,
         "verify": [[e.model_dump(), t, r] for e, t, r in cases],
         "affiliations": AFFILIATION_CASES,
     }
@@ -322,6 +360,9 @@ def test_browser_ports_match_python(browser, site_url):
             overlapRecords: ev.overlapRecords(data.evidence[0]),
             evidence: ev.buildEvidence(...data.evidence),
             basis: ev.decisionsBasis(data.evidence[0], data.evidence[1]),
+            withContexts: ev.buildEvidence(...data.with_contexts),
+            basisWithContexts: ev.decisionsBasis(data.with_contexts[0], data.with_contexts[1]),
+            checked: data.contexts.map(([c, t]) => v.checkContext(c, t)),
             affiliations: data.affiliations.map((texts) => affiliations.cleanAffiliations(texts)),
             europepmc: data.europepmc.map((r) => [sources.europepmcPmid(r), sources.europepmcPmid(r) ? null : sources.europepmcRecord(r),
                                                     sources.europepmcUrl(String(r.id))]),
@@ -338,16 +379,41 @@ def test_browser_ports_match_python(browser, site_url):
     assert result["overlapRecords"] == overlap_records(EVIDENCE_PAPERS)
     assert result["evidence"] == build_evidence(EVIDENCE_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP)
     assert result["basis"] == decisions_basis(EVIDENCE_PAPERS, EVIDENCE_DECISIONS)
+    assert result["withContexts"] == build_evidence(CONTEXT_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP)
+    assert result["basisWithContexts"] == decisions_basis(CONTEXT_PAPERS, EVIDENCE_DECISIONS)
+    assert result["checked"] == [check_context(StudyContext.model_validate(c), t) for c, t in contexts]
+    assert result["checked"][0]["sample_size"] == "missing" and result["checked"][0]["results"][::2] == ["exact", None]
     assert result["affiliations"] == [clean_affiliations(texts) for texts in AFFILIATION_CASES]
     # What the evidence holds: the excluded result and paper are gone, the overlapping record is kept
     # and marked as the same participants as the record to use, and nothing is combined.
     evidence = result["evidence"]
-    assert set(evidence) == {"records", "values"}
+    assert list(evidence) == ["records", "estimands", "values"] and evidence["estimands"] == []
+    assert all(r["context"] is None for r in evidence["records"]) and all(v["estimand"] is None for v in evidence["values"])
     assert not any(v["outcome"] == "GAD-7" for v in evidence["values"]) and not any(v["record"] == "R6" for v in evidence["values"])
     assert [r["key"] for r in evidence["records"]] == sorted({v["record"] for v in evidence["values"]}, key=lambda k: int(k[1:]))
     assert all(v["same_participants_as"] == ("R2" if v["record"] == "R5" else None) for v in evidence["values"])
     assert [v["key"] for v in evidence["values"]] == [f"V{i}" for i in range(1, len(evidence["values"]) + 1)]
     assert result["overlapRecords"][2]["cited_by"] == ["R4"] and result["overlapRecords"][3]["cited_by"] == []
+    # With the manager's readings: each kept result it read has an estimand, named by the result id its
+    # values carry, and each record it read carries its design and its own sample-size calculation. A
+    # reading that failed or is running counts as none; an excluded result or paper keeps none.
+    read = result["withContexts"]
+    assert list(read) == ["records", "estimands", "values"]
+    assert [(e["key"], e["record"], e["result"], e["vs_plan"], e["differences"]) for e in read["estimands"]] == [
+        ("E1", "R1", "R1:0", "same", []), ("E2", "R3", "R3:0", "different", ["completers rather than all randomized"])]
+    assert all(e["result"] in {v["result"] for v in read["values"] if v["estimand"] == e["key"]} for e in read["estimands"])
+    assert {r["key"]: r["context"] for r in read["records"]} == {
+        "R1": {"design": "two-arm parallel RCT", "sample_size": "", "sample_size_found": False, "notes": ""},
+        "R2": None,
+        "R3": {"design": "two-arm parallel RCT", "sample_size": "We needed 75 per arm.", "sample_size_found": False,
+               "notes": "Attrition differed between arms."},
+        "R4": None, "R5": None}
+    assert {v["record"]: v["estimand"] for v in read["values"]} == {"R1": "E1", "R2": None, "R3": "E2", "R4": None, "R5": None}
+    # A summary goes out of date once a paper is read: the reading joins its row of the basis.
+    unread = result["basis"]
+    assert result["basisWithContexts"][0] == [*unread[0], CONTEXT_PAPERS[0]["context"]["result"]]
+    assert result["basisWithContexts"][1:] == [unread[1], [*unread[2], CONTEXT_PAPERS[2]["context"]["result"]], *unread[3:5],
+                                                 [*unread[5], CONTEXT_PAPERS[5]["context"]["result"]]]
     assert result["europepmc"] == [
         [europepmc_pmid(r), None if europepmc_pmid(r) else asdict(europepmc_record(r)), europepmc_url(str(r["id"]))]
         for r in data["europepmc"]
@@ -630,6 +696,12 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     review = open_paper(page, "Mindfulness apps for depressive symptoms: a systematic review")
     assert review.locator(".badge", has_text="Reviews search").count() == 1
     assert "A review and the studies it pools" in review.locator(".overlap-note").inner_text()
+    # The manager read what the review's pooled result estimates: another quantity than the plan's, and why.
+    fit = review.locator(".result .estimand")
+    assert fit.get_attribute("data-fit") == "different" and fit.locator(".fit .badge").inner_text() == "Different estimand"
+    assert fit.locator(".differences li").all_inner_texts() == ["standardized scale, not PHQ-9 points"]
+    assert "Model random-effects meta-analysis" in " ".join(fit.inner_text().split())
+    assert " ".join(review.locator(".study-context").inner_text().split()) == "Design meta-analysis of randomized trials"
     trial = open_paper(page, "A mindfulness app for depressive")
     assert "Same study as" in trial.locator(".overlap-note").inner_text() and "Use this record’s numbers." in trial.locator(".overlap-note").inner_text()
     page.click("#source-switch button:has-text('ClinicalTrials.gov')")
@@ -699,7 +771,9 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
                      "Added 1 study cited by the reviews", "Screening “Smartphone mindfulness",
                      "Screening “Stress responses in a mouse model", "exclude (other): Animal study.", "include (review): Relevant review.",
                      "Fetching example.org/rct2.pdf for the browser", "PDF, 1 KB",
-                     "Extracting “Brief mindfulness training", "Reviewing “Mindfulness groups", "Search finished"):
+                     "Extracting “Brief mindfulness training", "Reviewing “Mindfulness groups",
+                     "Reading the estimand and model of “A mindfulness app for depressive", "1 result: 1 matches the planned estimand",
+                     "1 result: 1 differs", "Search finished"):
         assert expected in timeline, expected
     page.click("#activity-filter button:has-text('Sonnet')")
     assert page.locator("#timeline li .who").all_inner_texts() == ["Sonnet 5.5"]
@@ -710,6 +784,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert pdf_paper.locator(".badge", has_text="Fetched by Sonnet").count() == 1
     assert pdf_paper.locator(".badge", has_text="Open-access PDF").count() == 1
     assert pdf_paper.locator(".badge", has_text="quote found").count() == 4
+    assert pdf_paper.locator(".paper-details .badge", has_text="Estimands read by Opus 5.5").count() == 1
     assert open_paper(page, "Mindfulness groups and depressive").locator(".badge", has_text="Reviewed by Opus").count() == 1
 
     # A result reads as a line per group, mean ± SD with n; the quotes are folded away until asked for.
@@ -717,6 +792,25 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     arms = trial.locator(".result").first.locator(".arms tr").all_inner_texts()
     assert [" ".join(a.split()) for a in arms][:2] == ["App 8.1 ± 4.2 n = 100", "Waitlist 10.3 ± 4.5 n = 100"], arms
     assert not trial.locator(".result details.quotes table").first.is_visible()
+    # Before the numbers, what the result estimates and with which model, as Opus read the paper, and how
+    # that compares with the planned estimand; the model's quote is folded away with the others.
+    first = trial.locator(".result").first
+    estimand = first.locator(".estimand")
+    assert estimand.get_attribute("data-fit") == "same" and estimand.locator(".fit .badge").inner_text() == "Same estimand as planned"
+    assert estimand.locator(".differences").count() == 0
+    assert estimand.locator("dt").all_inner_texts() == ["Estimand", "Model", "The numbers are", "For the planned calculation"]
+    said = " ".join(estimand.inner_text().split())
+    for part in ("Population all randomized (ITT)", "Treatments mindfulness app vs waitlist", "Variable PHQ-9 at 12 weeks",
+                 "Intercurrent events not stated", "Summary measure difference in mean PHQ-9",
+                 "Model ANCOVA adjusted for baseline Missing data not stated", "The numbers are observed means and SDs at 12 weeks",
+                 "For the planned calculation The SDs can serve as the outcome SD."):
+        assert part in said, (part, said)
+    assert first.evaluate("(r) => [...r.children].map((el) => el.className)")[:3] == ["result-head", "estimand", "arms"]
+    model_quote = first.locator("details.quotes .model-quote")
+    assert model_quote.text_content().startswith("Model Analyses followed the intention-to-treat principle. Methods")
+    assert model_quote.locator(".badge").text_content() == "quote found"
+    # Under the paper's header, the design as a statistician states it.
+    assert " ".join(trial.locator(".study-context").inner_text().split()) == "Design two-arm parallel RCT, individually randomized"
     # Its free full text in PubMed Central comes first: the title links there, and its PMCID leads.
     assert trial.locator("h3 a").get_attribute("href") == "https://pmc.ncbi.nlm.nih.gov/articles/PMC9000001/"
     # It is cited in full for credibility: year, venue and authors, then each identifier, linked.
@@ -755,10 +849,19 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
         page.click("#export-included")
     rows = list(csv.DictReader(io.StringIO(open(download.value.path(), encoding="utf-8").read())))
     assert len(rows) == 6 and {r["id"] for r in rows} == {"11111111"} and rows[0]["quote_check"] == "exact"
+    # Each row carries its result's estimand and model, after the result's own columns.
+    assert list(rows[0])[14:27] == ["confidence", "design", "estimand_population", "estimand_treatments", "estimand_variable",
+                                    "intercurrent_events", "summary_measure", "model", "missing_data", "numbers_are", "vs_plan",
+                                    "differences", "group"]
+    assert {(r["design"], r["estimand_population"], r["model"], r["vs_plan"], r["differences"]) for r in rows} == {
+        ("two-arm parallel RCT, individually randomized", "all randomized (ITT)", "ANCOVA adjusted for baseline", "same", "")}
     with page.expect_download() as download:
         page.click("#export-all")
     rows = list(csv.DictReader(io.StringIO(open(download.value.path(), encoding="utf-8").read())))
     assert len({r["id"] for r in rows}) == 8 and all(r["value"] for r in rows)
+    pooled = [r for r in rows if r["statistic"] == "standardized_mean_difference"]
+    assert [(r["vs_plan"], r["differences"], r["summary_measure"]) for r in pooled] == [
+        ("different", "standardized scale, not PHQ-9 points", "pooled standardized mean difference")]
     with page.expect_download() as download:
         page.click("#export-json")
     exported = json.loads(open(download.value.path(), encoding="utf-8").read())
@@ -805,10 +908,23 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert '0.3' in recommendation.locator('.planning-effect').inner_text()
     assert 'Evidence estimate: 0.35' in recommendation.inner_text()
     assert 'head-agent judgment' in recommendation.inner_text()
+    # Beside the calculation, what its source result estimates as Opus read the review: a pooled
+    # standardized effect, another quantity than the planned one, which keeps the choice provisional.
+    source = recommendation.locator(".source-estimand")
+    assert recommendation.evaluate("(r) => r.querySelector('.effect-calculation').nextElementSibling.className") == "source-estimand"
+    assert source.get_attribute("data-fit") == "different" and source.locator(".badge").inner_text() == "Different estimand"
+    assert source.locator(".differences li").all_inner_texts() == ["standardized scale, not PHQ-9 points"]
+    assert " ".join(source.locator(".model").inner_text().split()) == "Model random-effects meta-analysis"
+    assert ("The manager read the selected result's estimand as different from the planned one: standardized scale, not PHQ-9 points."
+            in recommendation.inner_text())
     need = page.locator("#summary-body .summary-block.need").first
     assert need.locator("h3").inner_text() == "The difference and its SD"
+    # What the values estimate and with which model comes first, then how they compare.
+    assert need.locator("h4.label").all_text_contents() == ["Estimands", "How they compare"]
+    estimands = need.locator("p.estimands")
+    assert "estimates the planned difference in mean PHQ-9 with an ANCOVA." in estimands.inner_text() and estimands.locator(".cand").count() == 1
     # The SDs as printed, smallest and largest, each with the record it came from.
-    chips = need.locator("p .cand").all_inner_texts()
+    chips = need.locator("p.comparison .cand").all_inner_texts()
     assert [c.split()[0] for c in chips] == ["3.8", "4.5"] and all(c.split()[1].startswith("R") for c in chips)
     # One row per study arm, a column per statistic.
     arms = page.evaluate("""async () => {
@@ -818,7 +934,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
         return new Set(summary.result.needs[0].values.map((k) => values.get(k)).map((v) => JSON.stringify([v.record, v.outcome, v.timepoint, v.group]))).size;
     }""")
     assert need.locator("tbody tr").count() == arms
-    assert need.locator("thead th").all_inner_texts() == ["Study", "Outcome", "Group", "n", "Mean", "SD", "Check"]
+    assert need.locator("thead th").all_inner_texts() == ["Study", "Outcome", "Group", "Estimand", "n", "Mean", "SD", "Check"]
+    # Each row's estimand against the plan, how it differs and the model on hover.
+    fits = need.locator("tbody tr td:nth-child(4) .badge")
+    assert fits.count() == arms and set(fits.all_inner_texts()) == {"Same as planned"}
+    assert fits.first.get_attribute("title") == "The same quantity as the planned estimand\nModel: ANCOVA adjusted for baseline"
     # The registry record's values are listed, marked as the same participants as its paper.
     registry_rows = need.locator("tbody tr", has_text="same participants as")
     assert registry_rows.count() > 0 and all("Mindfulness App" in t for t in registry_rows.all_inner_texts())
@@ -837,6 +957,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert page.locator("#summary-body .summary-block li a").count() >= 5
     assert "one study reported more than once" in body and "No dropout rates." in body
     assert page.locator("#summary-body details summary").first.inner_text().startswith("Every value kept (")
+    page.locator("#summary-body details summary").first.click()
+    every = page.locator("#summary-body details").first.locator(".value-table")
+    assert every.locator("thead th").all_inner_texts() == ["Key", "Study", "Outcome", "Group", "Estimand", "Statistic", "Value", "n", "Check"]
+    pooled = every.locator("tbody tr", has_text="SMD").locator("td:nth-child(5) .badge")
+    assert pooled.inner_text() == "Different" and pooled.get_attribute("title").startswith("standardized scale, not PHQ-9 points")
     # The agent panel shows the number with its key, not the bare key.
     assert "the largest SD is 4.5 [V" in page.inner_text("#activity")
 
@@ -856,6 +981,16 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert summarized["started"] <= summarized["at"] and summarized["phase"] == "done"
     read = next(r for r in log if r["step"] == "extract" and "Brief mindfulness" in r["text"])
     assert read["models"] == HAIKU and read["paper_title"].startswith("Brief mindfulness") and "PHQ-9" in read["detail"]
+    # The manager read the estimand and model of every extracted paper, after its extraction.
+    readings = [r for r in log if r["step"] == "context"]
+    assert len(readings) == 8 and all(r["agent"] == "manager" and r["models"] == OPUS and r["phase"] == "done" for r in readings)
+    assert {r["paper_title"] for r in readings} == {r["paper_title"] for r in log if r["step"] == "extract"}
+    pooled = next(r for r in readings if r["paper_title"].startswith("Mindfulness apps for depressive"))
+    assert pooled["text"].startswith("Reading the estimand and model of “Mindfulness apps for depressive symptoms")
+    assert pooled["detail"] == "1 result: 1 differs\nNo sample-size calculation of its own."
+    for title in {r["paper_title"] for r in readings}:
+        steps_of = [r["step"] for r in log if r["paper_title"] == title and r["step"] in ("extract", "adjudicate", "context")]
+        assert steps_of[-1] == "context", (title, steps_of)
     with page.expect_download() as download:
         page.click("#export-log-json")
     exported = json.loads(open(download.value.path(), encoding="utf-8").read())
@@ -880,12 +1015,13 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     steps = {}
     for headers, body in calls:
         system = (body.get("system") or [{"text": ""}])[0]["text"]
-        step = next((s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "SUMMARIZE")
+        step = next((s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "OVERLAP", "SUMMARIZE")
                      if system.startswith(getattr(prompts, s))), "FETCH")
         steps.setdefault(step, (headers, body))
-    assert set(steps) == {"SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "SUMMARIZE", "FETCH"}
-    expected = {"SPEC": (OPUS, "high"), "SEARCH": (OPUS, "high"), "ADJUDICATE": (OPUS, "xhigh"), "OVERLAP": (OPUS, "high"), "SUMMARIZE": (OPUS, "high"),
-                "FETCH": (SONNET, "low"), "SCREEN": (HAIKU, "low"), "EXTRACT": (HAIKU, "medium")}
+    assert set(steps) == {"SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "OVERLAP", "SUMMARIZE", "FETCH"}
+    expected = {"SPEC": (OPUS, "high"), "SEARCH": (OPUS, "high"), "ADJUDICATE": (OPUS, "xhigh"), "CONTEXT": (OPUS, "high"),
+                "OVERLAP": (OPUS, "high"), "SUMMARIZE": (OPUS, "high"), "FETCH": (SONNET, "low"), "SCREEN": (HAIKU, "low"),
+                "EXTRACT": (HAIKU, "medium")}
     for step, (model, effort) in expected.items():
         headers, body = steps[step]
         assert (body["model"], body["output_config"]["effort"]) == (model, effort), step
@@ -894,6 +1030,19 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
         else:
             assert body["fallbacks"] == "default" and "server-side-fallback-2026-07-01" in headers.get("anthropic-beta", ""), step
     assert '"description": "Undergraduate students"' in steps["SEARCH"][1]["messages"][0]["content"]  # the edit was searched
+    # The manager reads the document with the extraction, its results numbered from 1, and the plan as edited.
+    reading = steps["CONTEXT"][1]
+    assert '"description": "Undergraduate students"' in reading["system"][0]["text"].split("\n\nSpecification:\n", 1)[1]
+    document, extraction = reading["messages"][0]["content"]
+    assert document["type"] == "document" and extraction["text"].startswith(prompts.CONTEXT_INPUT)
+    numbered = json.loads(extraction["text"].removeprefix(prompts.CONTEXT_INPUT))["results"]
+    assert [list(r)[0] for r in numbered] == ["result"] * len(numbered) and [r["result"] for r in numbered] == list(range(1, len(numbered) + 1))
+    # The summary is given the records, with their designs, and the estimands of their results with the values.
+    summarized = steps["SUMMARIZE"][1]["messages"][0]["content"][0]["text"]
+    assert summarized.startswith("Records, the estimands of their results, the overlap check and the values:\n")
+    sent = json.loads(summarized.split("\n", 1)[1])
+    assert list(sent) == ["records", "estimands", "overlap", "values"] and len(sent["estimands"]) == 8
+    assert all(v["estimand"] for v in sent["values"]) and all(r["context"]["design"] for r in sent["records"])
     fetch = steps["FETCH"][1]
     assert fetch["tools"] == [{"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 1}]
     assert PDF_URL in fetch["messages"][0]["content"]
@@ -1087,6 +1236,9 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     assert names == ["GPT-6.1 Sol manager", "GPT-6 Luna workers", "Code search and checks"], names
     assert "GPT-6.1 Sol" in page.locator("#timeline li .who").all_inner_texts()
     assert [x.inner_text() for x in page.locator("#map-body [data-stage='extract'] .map-agent").all()] == ["Code", "GPT-6 Luna", "GPT-6.1 Sol"]
+    # The manager read each paper's estimands and models too.
+    assert app.locator(".result .estimand[data-fit='same']").count() == 1
+    assert "Reading the estimand and model of “" in page.inner_text("#timeline")
 
     page.click("#tab-summary")
     assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol recommends a planning effect size")
@@ -1101,17 +1253,18 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     for _, body in calls:
         assert body["store"] is False and body["stream"] is True and "max_output_tokens" not in body and "temperature" not in body
         assert all(item.get("role") != "system" for item in body["input"])
-        step = next(s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "OVERLAP", "SUMMARIZE")
+        step = next(s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "OVERLAP", "SUMMARIZE")
                     if body["instructions"].startswith(getattr(prompts, s)))
         steps.setdefault(step, body)
     expected = {"SPEC": ("gpt-6.1-sol", "high"), "SEARCH": ("gpt-6.1-sol", "high"), "ADJUDICATE": ("gpt-6.1-sol", "xhigh"),
-                "OVERLAP": ("gpt-6.1-sol", "high"), "SUMMARIZE": ("gpt-6.1-sol", "high"), "SCREEN": ("gpt-6-luna", "low"),
-                "EXTRACT": ("gpt-6-luna", "medium")}
+                "CONTEXT": ("gpt-6.1-sol", "high"), "OVERLAP": ("gpt-6.1-sol", "high"), "SUMMARIZE": ("gpt-6.1-sol", "high"),
+                "SCREEN": ("gpt-6-luna", "low"), "EXTRACT": ("gpt-6-luna", "medium")}
     assert set(steps) == set(expected)
     for step, (model, effort) in expected.items():
         assert (steps[step]["model"], steps[step]["reasoning"]["effort"]) == (model, effort), step
         if step != "SEARCH":
             assert steps[step]["text"]["format"]["strict"] is True and steps[step]["text"]["format"]["type"] == "json_schema"
+    assert steps["CONTEXT"]["text"]["format"]["name"] == "StudyContext"
     search = steps["SEARCH"]
     assert [t["name"] for t in search["tools"]] == ["count_pubmed", "search_pubmed", "search_europepmc", "search_clinicaltrials", "submit_search_plan"]
     assert all(t["type"] == "function" and t["strict"] for t in search["tools"])
@@ -1267,6 +1420,46 @@ def test_a_run_stops_when_the_openai_account_runs_out_of_credit(browser, site_ur
     context.close()
 
 
+def test_a_reading_the_key_may_not_make_stops_the_run_and_keeps_the_extraction(browser, site_url):
+    """An error that would fail every call (here, the key refused for the manager's reading) stops the run
+    as the manager's review does: the paper keeps its extraction, with the reason its reading failed."""
+    network = Network()
+    network.context_error = (401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"},
+                                   "request_id": "req_test"})
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    context.route("**/*", network)
+    page = context.new_page()
+    page.goto(site_url)
+    page.fill("#api-key", KEY)
+    page.click("#agents-done")
+    page.fill("#contact-email", "test@example.com")
+    page.dispatch_event("#contact-email", "change")
+    page.click("#setup-done")
+    page.fill("#paragraph", "We propose a two-arm randomized trial of a 12-week mindfulness app versus waitlist for PHQ-9 in students.")
+    page.click("#read")
+    page.wait_for_selector("#spec:not([hidden])")
+    page.click("#run")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().project(location.hash.slice(1))).status;
+    }""") != "error":
+        time.sleep(0.2)
+    found = page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        const store = new Store();
+        const id = location.hash.slice(1);
+        return { project: await store.project(id), papers: await store.papers(id) };
+    }""")
+    assert "did not accept the API key" in (found["project"]["error"] or ""), found["project"]
+    extracted = [p for p in found["papers"] if p["status"] == "extracted"]
+    assert extracted and all(p["extraction"]["results"] and p["context"]["status"] == "error" for p in extracted)
+    assert all("did not accept the API key" in p["context"]["error"] for p in extracted)
+    # The papers not yet started wait for Continue; the overlap check never ran.
+    assert len(extracted) < 8 and found["project"]["overlap"] is None
+    context.close()
+
+
 STORE_SEARCH = """async ([papers, spec, fields]) => {
     const { Store } = await import('/lib/store.js');
     const store = new Store();
@@ -1281,6 +1474,133 @@ STORE_SEARCH = """async ([papers, spec, fields]) => {
 def stored_search(page, papers, **fields):
     """A search kept in the page's storage as a finished run leaves it, with `fields` changed; its id."""
     return page.evaluate(STORE_SEARCH, [papers, SPEC.model_dump(), fields])
+
+
+CONTEXT_REFUSED = (400, {"type": "error", "error": {"type": "invalid_request_error", "message": "context refused"}, "request_id": "req_test"})
+
+
+def test_the_manager_reads_the_estimand_and_model_of_an_extracted_paper(browser, site_url):
+    """A paper extracted before the manager read estimands gets a button that asks for them. The manager
+    reads the text the extraction used: the copy kept in this browser, or the text found again. A reading
+    that fails never loses the extraction: the card says why, beside a button to try again, and a paper
+    extracted again (here from your PDF) is read again. The manager compares each result with the plan
+    as it stands, its planning context included."""
+    network = Network()
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    context.route("**/*", network)
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(site_url)
+    # Two papers extracted before the manager read them.
+    papers = [
+        _paper(1, [("PHQ-9", "12 weeks", [("App", "mean", 8.1), ("App", "sd", 4.2)])], ext_id="1001", extracted_by="worker",
+               fulltext_kind="abstract"),
+        _paper(2, [("PHQ-9", "12 weeks", [("App", "mean", 9.0), ("App", "sd", 4.0)])], ext_id="1002", extracted_by="worker",
+               fulltext_kind="abstract", abstract="The app group scored 9.0 (SD 4.0) on the PHQ-9 at 12 weeks."),
+    ]
+    project_id = stored_search(page, papers)
+    # The text of the first is kept in this browser; the second's is not, so it is found again.
+    page.evaluate("""async (id) => {
+        const { Store } = await import('/lib/store.js');
+        const store = new Store();
+        const paper = (await store.papers(id)).find((p) => p.title === 'Trial 1');
+        await store.saveDocument(id, paper.id, { kind: 'abstract', text: 'Trial 1. Analyses followed the intention-to-treat principle.', url: '' });
+    }""", project_id)
+    page.fill("#api-key", KEY)
+    page.goto(f"{site_url}#{project_id}")
+    page.reload()
+    page.wait_for_selector("#review:not([hidden]) .paper")
+
+    # The plan's analysis population, stated in the specification, is what the manager compares with.
+    page.click("#tab-spec")
+    part = page.locator("[data-part='planning']")
+    part.locator("[data-edit='planning.analysis_population']").click()
+    page.fill("#spec-planning-analysis_population", "Students, all as randomized")
+    page.press("#spec-planning-analysis_population", "Enter")
+    part.get_by_text("Students, all as randomized").wait_for()
+    page.wait_for_function("""async () => {
+        const { Store } = await import('/lib/store.js');
+        const { planning } = (await new Store().project(location.hash.slice(1))).spec;
+        return planning?.analysis_population === 'Students, all as randomized';
+    }""")
+    page.click("#tab-review")
+
+    # Asked for, the manager reads the kept text: the result shows its estimand before its numbers.
+    card = open_paper(page, "Trial 1")
+    assert card.locator(".result .estimand").count() == 0
+    note = card.locator(".study-context")
+    assert note.inner_text().startswith("The manager has not yet read what these results estimate")
+    note.locator("button", has_text="Read the estimand and model").click()
+    card.locator(".result .estimand[data-fit='same']").wait_for()
+    assert " ".join(card.locator(".study-context").inner_text().split()) == "Design two-arm parallel RCT, individually randomized"
+    sent = next(body for _, body in network.claude if body["system"][0]["text"].startswith(prompts.CONTEXT))
+    document, extraction = sent["messages"][0]["content"]
+    assert document["source"]["data"] == "Trial 1. Analyses followed the intention-to-treat principle." and document["title"] == "Trial 1"
+    assert json.loads(extraction["text"].removeprefix(prompts.CONTEXT_INPUT))["results"][0]["result"] == 1
+    assert '"analysis_population": "Students, all as randomized"' in sent["system"][0]["text"] and sent["model"] == OPUS
+    page.wait_for_function("() => document.querySelector('#timeline').textContent.includes('Reading the estimand and model of “Trial 1”')")
+    row = page.locator("#timeline li", has_text="Reading the estimand and model of “Trial 1”")
+    assert row.locator(".who").inner_text() == "Opus 5.5" and "1 result: 1 matches the planned estimand" in row.inner_text()
+
+    # A reading that fails: the extraction stands, and the card says why, beside a button to try again.
+    network.context_error = CONTEXT_REFUSED
+    card = open_paper(page, "Trial 2")
+    card.locator(".study-context button", has_text="Read the estimand and model").click()
+    card.locator(".study-context button", has_text="Read the estimand and model again").wait_for()
+    assert "Reading the estimand and model failed: The Anthropic API returned an error (400: context refused" in card.inner_text()
+    assert card.locator(".result").count() == 1 and card.locator(".result .estimand").count() == 0
+    assert " ".join(card.locator(".arms tr").first.inner_text().split()) == "App 9 ± 4"
+    stored = page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        return (await new Store().papers(location.hash.slice(1))).find((p) => p.title === 'Trial 2');
+    }""")
+    assert stored["status"] == "extracted" and stored["extraction"]["results"] and stored["context"]["status"] == "error"
+    network.context_error = None
+    card.locator(".study-context button", has_text="Read the estimand and model again").click()
+    card.locator(".result .estimand[data-fit='same']").wait_for()
+    # Its text was found again as extraction finds it: from the abstract.
+    sent = [body for _, body in network.claude if body["system"][0]["text"].startswith(prompts.CONTEXT)][-1]
+    assert sent["messages"][0]["content"][0]["source"]["data"] == "# Trial 2\n\n## Abstract\nThe app group scored 9.0 (SD 4.0) on the PHQ-9 at 12 weeks.\n"
+
+    # Extracted again from your PDF, while the manager's reading fails: the new extraction is kept, its
+    # reading starts over and fails, and the reading closed with the page earlier is marked as stopped.
+    network.context_error = CONTEXT_REFUSED
+    card = open_paper(page, "Trial 1")
+    card.locator(".paper-details summary").click()
+    with page.expect_file_chooser() as chooser:
+        card.locator("button", has_text="Re-extract from your PDF").click()
+    chooser.value.set_files(files=[{"name": "trial-1.pdf", "mimeType": "application/pdf", "buffer": make_pdf(PDF_LINE)}])
+    page.wait_for_function("""async () => {
+        const { Store } = await import('/lib/store.js');
+        const paper = (await new Store().papers(location.hash.slice(1))).find((p) => p.title === 'Trial 1');
+        return paper.status === 'extracted' && paper.fulltext_kind === 'upload' && paper.context?.status === 'error';
+    }""", timeout=15000)
+    page.click("#tabs button:has-text('Extracted')")
+    card = open_paper(page, "Trial 1")
+    card.locator(".study-context button", has_text="Read the estimand and model again").wait_for()
+    assert card.locator(".result").count() == 1 and card.locator(".result .estimand").count() == 0
+    # The page closed while the manager was reading: the reading is marked as stopped, to ask for again.
+    page.evaluate("""async () => {
+        const { Store } = await import('/lib/store.js');
+        const store = new Store();
+        const paper = (await store.papers(location.hash.slice(1))).find((p) => p.title === 'Trial 2');
+        await store.updatePaper(paper.id, { context: { status: 'running' } });
+    }""")
+    page.reload()
+    page.wait_for_selector("#review:not([hidden]) .paper")
+    card = open_paper(page, "Trial 2")
+    assert "The page was closed or reloaded while the manager was reading this paper." in card.locator(".study-context").inner_text()
+    assert card.locator(".study-context button", has_text="Read the estimand and model again").count() == 1
+    # The uploaded PDF is kept, so its reading uses it again.
+    network.context_error = None
+    card = open_paper(page, "Trial 1")
+    card.locator(".study-context button", has_text="Read the estimand and model again").click()
+    card.locator(".result .estimand").wait_for()
+    sent = [body for _, body in network.claude if body["system"][0]["text"].startswith(prompts.CONTEXT)][-1]
+    assert sent["messages"][0]["content"][0]["source"]["media_type"] == "application/pdf"
+    assert not errors, errors
+    context.close()
 
 
 def test_the_subscription_requires_a_companion_before_starting_work(browser, site_url):
@@ -1316,12 +1636,13 @@ def test_the_subscription_requires_a_companion_before_starting_work(browser, sit
     # Until the companion supplies the plan's catalog, the page names roles without guessing models.
     assert page.inner_text("#models") == "Connect ChatGPT to run the agents"
     # Nor do the lines about what a role will do name a model: they name the role.
-    assert "and the manager summarizes what the papers you kept report" in page.inner_text(".lede")
+    assert "The manager reads what each result estimates and with which model" in page.inner_text(".lede")
     assert page.inner_text("#summary .summary").startswith("The manager recommends a planning effect size")
     assert page.locator("#roles li strong").all_inner_texts() == ["Manager", "Workers", "Code"]
     roles = page.locator("#roles li").all_inner_texts()
     assert [role.split("\n", 1)[1] for role in roles] == [
-        "Reads the problem, plans the search, reviews flagged extractions, checks overlap, writes the summary",
+        "Reads the problem, plans the search, reviews flagged extractions, reads each paper’s estimands and models, checks overlap, "
+        "writes the summary",
         "Screen every record and extract every paper", "Runs the searches, gets the text, checks every quote"]
     assert page.locator("#roles select").count() == 0 and "plan's own list" in page.inner_text("#roles-note")
     assert page.is_hidden("#agents-notice") and page.is_visible("#chatgpt-privacy")
@@ -1340,7 +1661,8 @@ def test_the_subscription_requires_a_companion_before_starting_work(browser, sit
     page.click("#tab-setup")
     assert page.inner_text("#agents-summary") == "OpenAI subscription: connect the local companion and sign in to use your plan here."
 
-    # Every job (reading a problem, Continue, Search again, extracting, the summary) opens that box instead.
+    # Every job (reading a problem, Continue, Search again, extracting, reading the estimand and model, the
+    # summary) opens that box instead.
     def stopped():
         assert page.is_visible("#agents-page") and page.get_attribute("#local-box", "data-missing") == "true"
         assert "Nothing was started" in page.inner_text("#local-status")
@@ -1363,6 +1685,8 @@ def test_the_subscription_requires_a_companion_before_starting_work(browser, sit
     card = open_paper(page, "Trial 1")
     card.locator(".paper-details summary").click()
     card.locator("button", has_text="Re-extract from your PDF").click()
+    stopped()
+    open_paper(page, "Trial 1").locator(".study-context button", has_text="Read the estimand and model").click()
     stopped()
     page.click("#tab-summary")
     page.click("#summarize")
@@ -1813,4 +2137,98 @@ def test_planning_recommendation_rendering_and_spec_staleness(browser, site_url)
             decisions: {}, overlap: null, linksOf: () => ({})}));
     }""", {"summary": data, "spec": plan, "papers": [paper]})
     assert page.locator('.stale').count() == 1
+    page.close()
+
+
+def test_the_recommendation_shows_what_its_source_result_estimates(browser, site_url):
+    """Beside a recommendation's calculation, how its source result's estimand compares with the planned one,
+    as the manager read it, with how it differs and the model; "Estimand not read" when it has not read it.
+    Each effect size the plan needs gives its values' estimands before how they compare, and its tables a
+    column for them. A summary written before the manager read estimands shows as it did."""
+    from esf.planning import finalize_summary
+    from test_planning import example, summary as make_summary, spec as make_spec
+
+    page = browser.new_page(viewport={"width": 900, "height": 1000})
+    page.goto(site_url)
+    paper = _paper(1, [])
+    plan = make_spec()
+    need = {"need": "The difference and its SD", "values": ["V1", "V2", "V3", "V4"],
+            "estimands": "[V1] and [V2] are observed means at 12 weeks, as planned.", "comparison": "The SDs are [V3] and [V4]."}
+
+    def shown(reading):
+        evidence = example()
+        evidence["estimands"][0]["model"] = "ANCOVA adjusted for baseline PHQ-9"
+        if reading == "close":
+            evidence["estimands"][0].update(vs_plan="close", differences=["change from baseline rather than the value at 12 weeks"])
+        if reading == "different":
+            evidence["estimands"][0].update(vs_plan="different", differences=["completers rather than all randomized"])
+        if reading == "unread":
+            evidence["estimands"] = []
+            for v in evidence["values"]:
+                v["estimand"] = None
+        raw = {**make_summary(), "needs": [need]}
+        result = finalize_summary(raw, evidence, plan)
+        if reading == "old":  # written and kept before the manager read estimands
+            evidence.pop("estimands")
+            for v in evidence["values"]:
+                v.pop("estimand")
+            result["needs"] = [{k: v for k, v in n.items() if k != "estimands"} for n in result["needs"]]
+        summary = {"status": "done", "result": result, "evidence": evidence, "basis": decisions_basis([paper], {}), "spec_basis": plan}
+        page.evaluate("""async ({summary, spec, papers}) => {
+            const { summaryView } = await import('/lib/review-view.js');
+            const root = document.createElement('main');
+            document.body.replaceChildren(root);
+            root.append(...summaryView({ summary, spec, papers, decisions: {}, overlap: null, linksOf: () => ({}) }));
+        }""", {"summary": summary, "spec": plan, "papers": [paper]})
+        card = page.locator(".planning-recommendation")
+        source = card.locator(".source-estimand")
+        block = page.locator(".summary-block.need")
+        return card, source, block, " ".join(card.inner_text().split())
+
+    for reading, badge, status in [("same", "Same estimand as planned", "recommended"),
+                                   ("close", "Close to the planned estimand", "recommended"),
+                                   ("different", "Different estimand", "provisional")]:
+        card, source, block, said = shown(reading)
+        assert card.get_attribute("data-status") == status, reading
+        # Next to the calculation: the fit, how it differs, and the model.
+        assert card.evaluate("(r) => r.querySelector('.effect-calculation').nextElementSibling.className") == "source-estimand"
+        assert source.get_attribute("data-fit") == reading and source.locator(".badge").inner_text() == badge
+        assert " ".join(source.locator(".model").inner_text().split()) == "Model ANCOVA adjusted for baseline PHQ-9"
+        differences = source.locator(".differences li").all_inner_texts()
+        assert differences == {"same": [], "close": ["change from baseline rather than the value at 12 weeks"],
+                               "different": ["completers rather than all randomized"]}[reading]
+        assert ("as different from the planned one: completers rather than all randomized." in said) == (reading == "different")
+        # The need: its estimands, then how they compare; a column of fits in its table.
+        assert block.locator("h4.label").all_text_contents() == ["Estimands", "How they compare"]
+        assert block.locator("p.estimands .cand").count() == 2 and block.locator("p.comparison .cand").count() == 2
+        assert "Estimand" in block.locator("thead th").all_inner_texts()
+        fits = block.locator("tbody td .badge.fit").all_inner_texts()
+        assert fits == [{"same": "Same as planned", "close": "Close to planned", "different": "Different"}[reading]] * 2, fits
+
+    # Not read: said beside the calculation and among what is unresolved; the tables have no column for it.
+    card, source, block, said = shown("unread")
+    assert card.get_attribute("data-status") == "provisional"
+    assert source.get_attribute("data-fit") == "unread" and source.locator(".badge").inner_text() == "Estimand not read"
+    assert source.locator(".model").count() == 0 and "has not read the selected result's estimand and model" in said
+    assert "Estimand" not in block.locator("thead th").all_inner_texts()
+
+    # A summary kept from before: as it was, with no word about estimands.
+    card, source, block, said = shown("old")
+    assert card.get_attribute("data-status") == "recommended" and source.count() == 0 and "Estimand" not in said
+    assert block.locator("h4.label").count() == 0 and block.locator("p").first.inner_text() == "The SDs are 4 R1 and 4 R1."
+    assert "Estimand" not in block.locator("thead th").all_inner_texts()
+    page.close()
+
+
+def test_both_editions_export_the_same_columns(browser, site_url):
+    """The page's CSV has the local server's columns, the estimand and model of each result among them."""
+    from esf.server import EXPORT_COLUMNS
+
+    page = browser.new_page()
+    page.goto(site_url + "vendor/LICENSES.txt")
+    columns = page.evaluate("async () => (await import('/lib/export.js')).COLUMNS")
+    assert columns == EXPORT_COLUMNS
+    assert columns[columns.index("confidence") + 1:columns.index("group")] == [
+        "design", "estimand_population", "estimand_treatments", "estimand_variable", "intercurrent_events", "summary_measure",
+        "model", "missing_data", "numbers_are", "vs_plan", "differences"]
     page.close()

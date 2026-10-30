@@ -39,6 +39,7 @@
 .value-table { font-size: 13.5px; }
 .value-table td .sub { display: block; color: var(--ink-2); font-size: 12.5px; }
 .value-table .unchecked { text-decoration: underline wavy var(--warn); text-underline-offset: 3px; }
+.value-table .badge.fit { white-space: nowrap; cursor: help; }
 .stale { margin-top: 12px; }
 
 /* The result box's warnings and folded quotes, and the paper's folded details. */
@@ -75,3 +76,46 @@
 .planning-recommendation { border-left: 3px solid var(--accent, #27605d); padding-left: 1rem; }
 .planning-effect { font-size: 1.45rem; margin: .8rem 0; }
 .effect-calculation code { white-space: normal; overflow-wrap: anywhere; }
+
+/* A paper's statistical context under its header, and each result's estimand and model under its
+   heading: labels in a narrow column, what the manager read beside them; one column on a phone. */
+.study-context { margin: 10px 0 0; font-size: 14px; }
+dl.study-context, .estimand dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; }
+dl.study-context { padding: 10px 14px; border-radius: 10px; background: var(--surface-2); }
+dl.study-context > div, .estimand dl > div { display: contents; }
+.study-context dt, .estimand dt { color: var(--muted); font-size: 12.5px; padding-top: 1px; }
+.study-context dd, .estimand dd { margin: 0; min-width: 0; overflow-wrap: break-word; }
+.study-context q, .model-quote q { color: var(--ink-2); quotes: '“' '”'; }
+.study-context .where, .model-quote .where { color: var(--muted); font-size: 12.5px; }
+.study-context.pending { color: var(--ink-2); }
+.study-context.pending p { margin: 0 0 8px; }
+p.study-context.pending { margin-bottom: 0; }
+.estimand { padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 14px; box-shadow: inset 3px 0 var(--line); }
+.estimand[data-fit="same"] { box-shadow: inset 3px 0 var(--ok); }
+.estimand[data-fit="close"] { box-shadow: inset 3px 0 var(--warn); }
+.estimand[data-fit="different"] { box-shadow: inset 3px 0 var(--error); }
+.estimand .fit { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.estimand .differences { flex-basis: 100%; margin: 0; padding-left: 18px; font-size: 13.5px; color: var(--ink-2); }
+.estimand dl { margin: 8px 0 0; }
+.estimand .attributes { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 2px 10px; }
+.estimand .attributes > span { display: contents; }
+.estimand .k, .model-quote .k { color: var(--muted); font-size: 12.5px; }
+.estimand .missing-data { display: block; }
+.model-quote { margin: 6px 0 0; font-size: 13.5px; }
+/* Beside a recommendation's calculation, what its source result estimates. */
+.source-estimand { margin: 10px 0; padding: 8px 12px; border-radius: 8px; background: var(--surface-2); font-size: 14px;
+  box-shadow: inset 3px 0 var(--line); }
+.source-estimand[data-fit="same"] { box-shadow: inset 3px 0 var(--ok); }
+.source-estimand[data-fit="close"], .source-estimand[data-fit="unread"] { box-shadow: inset 3px 0 var(--warn); }
+.source-estimand[data-fit="different"] { box-shadow: inset 3px 0 var(--error); }
+.source-estimand .fit { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.source-estimand .differences { flex-basis: 100%; margin: 0; padding-left: 18px; font-size: 13.5px; color: var(--ink-2); }
+.source-estimand .model { margin: 4px 0 0; overflow-wrap: break-word; }
+.source-estimand .k { color: var(--muted); font-size: 12.5px; }
+.summary-block.need h4.label { margin: 10px 0 2px; font-size: 12.5px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .03em; }
+@media (max-width: 640px) {
+  dl.study-context, .estimand dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .study-context dt, .estimand dt { margin-top: 6px; }
+  dl.study-context > div:first-child dt, .estimand dl > div:first-child dt { margin-top: 0; }
+}

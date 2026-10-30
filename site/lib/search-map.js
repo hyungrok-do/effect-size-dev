@@ -36,7 +36,8 @@ const STAGES = [
   { key: 'follow', title: 'Follow the reviews’ references', agents: ['code', 'worker'], how: () => 'Studies cited by the included reviews are added and screened.' },
   {
     key: 'extract', title: 'Read and extract', agents: ['code', 'fetcher', 'worker', 'manager'],
-    how: (n) => `Text is fetched, ${n.worker} extracts each number with its quote, code checks it, ${n.manager} redoes what is flagged.`,
+    how: (n) => `Text is fetched, ${n.worker} extracts each number with its quote, code checks it, ${n.manager} redoes what is flagged `
+      + 'and reads what each result estimates and with which model.',
   },
   { key: 'overlap', title: 'Check for overlap', agents: ['manager'], how: (n) => `${n.manager} finds studies reported twice and reviews pooling studies in the set.` },
   { key: 'ready', title: 'Ready for review', agents: [], how: () => 'Extracted records wait for your review.' },
