@@ -40,11 +40,11 @@ def _reading(number, vs_plan="same", differences=()):
     )
 
 
-def _done(*readings, design="two-arm parallel RCT", sample_size_check="exact"):
+def _done(*readings, design="two-arm parallel RCT", sample_size_check="exact", model_checks=None):
     context = StudyContext(design=design, sample_size="A sample of 100 gives 80% power.", sample_size_location="Methods",
                            results=list(readings), notes="Attrition 10% in each arm.")
     return {"status": "done", "result": context.model_dump(),
-            "checks": {"sample_size": sample_size_check, "results": ["exact"] * len(readings)}, "model": "the-manager"}
+            "checks": {"sample_size": sample_size_check, "results": model_checks or ["exact"] * len(readings)}, "model": "the-manager"}
 
 
 def _paper(paper_id, results, context):
@@ -56,10 +56,11 @@ def papers():
     return [
         # Both results read; the investigator excluded the second.
         _paper(1, [_arms(8.1, 4.2), _arms(9.0, 4.4)], _done(_reading(1), _reading(2))),
-        # Only the second result read: the first has no estimand. Its sample-size quote wasn't found in the paper.
+        # Only the second result read: the first has no estimand. Its sample-size quote wasn't found in the
+        # paper, nor its model's quote (checked in the order of the readings, not of the results).
         _paper(2, [_arms(8.4, 4.0), _arms(7.9, 3.9)],
                _done(_reading(2, "close", ["completers rather than all randomized", "8 weeks"]), design="cluster RCT",
-                     sample_size_check="missing")),
+                     sample_size_check="missing", model_checks=["missing"])),
         # Being read, or the reading failed: no estimands, no context on the record.
         _paper(3, [_arms(9.2, 4.1)], {"status": "running"}),
         _paper(4, [_arms(9.5, 4.3)], {"status": "error", "error": "overloaded"}),
@@ -80,11 +81,13 @@ def test_the_kept_results_carry_their_estimands_and_the_values_name_them():
     # Each estimand names its result as the values do (record:index from 0).
     assert [(e["key"], e["record"], e["result"]) for e in evidence["estimands"]] == [("E1", "R1", "R1:0"), ("E2", "R2", "R2:1")]
     first = evidence["estimands"][0]
-    assert list(first) == ["key", "record", "result", "outcome", "timepoint", *ESTIMAND_FIELDS]
+    assert list(first) == ["key", "record", "result", "outcome", "timepoint", *ESTIMAND_FIELDS, "model_quote"]
     assert (first["outcome"], first["timepoint"], first["model"], first["variable"]) == (
         "PHQ-9", "12 weeks", "ANCOVA adjusted for baseline PHQ-9", "PHQ-9 at 12 weeks (result 1)")
     second = evidence["estimands"][1]
     assert second["vs_plan"] == "close" and second["differences"] == ["completers rather than all randomized", "8 weeks"]
+    # Whether the quote of each one's model was found in the paper.
+    assert (first["model_quote"], second["model_quote"]) == ("exact", "missing")
     by_result = {v["result"]: v["estimand"] for v in evidence["values"]}
     assert all(by_result[e["result"]] == e["key"] for e in evidence["estimands"])
 
@@ -158,3 +161,14 @@ def test_the_export_carries_the_managers_reading_of_each_result():
     for row in rows:
         if (row["paper_id"], row["result"]) in {(2, 1), (3, 1), (4, 1), (6, 1)}:
             assert all(row[column] == "" for column in EXPORT_COLUMNS[at("design"):at("group")]), row
+
+
+def test_a_result_read_twice_has_its_first_reading_in_the_summary_and_the_export():
+    """A reading stored before the manager's readings were kept to one per result: the summary and the
+    export take the first, as the review does, with its own quote check."""
+    twice = _done(_reading(1), _reading(1, "different", ["completers rather than all randomized"]), model_checks=["exact", "missing"])
+    paper = _paper(1, [_arms(8.1, 4.2)], twice)
+    [estimand] = build_evidence([paper], {}, None)["estimands"]
+    assert (estimand["vs_plan"], estimand["differences"], estimand["model_quote"]) == ("same", [], "exact")
+    rows = export_rows(SimpleNamespace(decisions=lambda _: {}, papers=lambda *args, **kwargs: [paper]), "project", False)
+    assert {(row["vs_plan"], row["differences"]) for row in rows} == {("same", "")}

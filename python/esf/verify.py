@@ -162,6 +162,19 @@ def verify(extraction: PaperExtraction, source_text: str, quotes_reliable: bool 
     return report
 
 
+def one_reading_per_result(context: StudyContext, count: int) -> StudyContext:
+    """The manager's reading with at most one ResultContext per result of an extraction of `count`
+    results: the first it gave for each number, and none for a number the extraction does not have. It
+    is stored so, so the review, the summary and the exports take the same reading of each result."""
+    seen: set[int] = set()
+    kept = []
+    for r in context.results:
+        if 1 <= r.result <= count and r.result not in seen:
+            seen.add(r.result)
+            kept.append(r)
+    return context.model_copy(update={"results": kept})
+
+
 def check_context(context: StudyContext, source_text: str) -> dict:
     """Whether the quotes in the manager's reading of a paper's context are in the paper: 'exact',
     'approximate' or 'missing' for the sample-size calculation and for each result's model, in the

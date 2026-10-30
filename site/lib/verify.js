@@ -137,6 +137,19 @@ export function verify(extraction, sourceText, quotesReliable = true) {
   return report;
 }
 
+// The manager's reading with at most one ResultContext per result of an extraction of `count` results:
+// the first it gave for each number, and none for a number the extraction does not have. It is stored
+// so, so the review, the summary and the exports take the same reading of each result.
+export function oneReadingPerResult(context, count) {
+  const seen = new Set();
+  const kept = context.results.filter((r) => {
+    if (!(Number.isInteger(r.result) && r.result >= 1 && r.result <= count) || seen.has(r.result)) return false;
+    seen.add(r.result);
+    return true;
+  });
+  return { ...context, results: kept };
+}
+
 // Whether the quotes in the manager's reading of a paper's context are in the paper: 'exact',
 // 'approximate' or 'missing' for the sample-size calculation and for each result's model, in the order
 // of context.results; null where there is no quote.

@@ -122,7 +122,7 @@ For each outcome relevant to the specification (closely related outcomes too, ma
 indirect), record one result per outcome measure, timepoint, and analysis population. Within a \
 result, list every reported number as its own value with the verbatim text it appears in and its \
 location. For a number in a table, quote the whole table row it sits in, as written. Group sizes \
-(n) belong in the same result as the means they go with. Keep adjusted and unadjusted analyses in separate results. Classify descriptive arm means as unadjusted unless the means themselves are adjusted. Set outcome_type and independent_groups from the extracted design, not the planned study.
+(n) belong in the same result as the means they go with. A result carries one n per group: the n its values were computed on. Keep adjusted and unadjusted analyses in separate results. Classify descriptive arm means as unadjusted unless the means themselves are adjusted. Set outcome_type and independent_groups from the extracted design, not the planned study.
 
 Label statistics exactly as the document does: an SE is "se", not "sd"; a confidence interval bound is ci_lower \
 or ci_upper, with describes saying what the interval is for. Set ci_level to the reported confidence \
@@ -136,9 +136,12 @@ model-adjusted (least-squares), whether a spread is an SD, an SE or the SE of a 
 whether a value is at follow-up or a change from baseline. Besides the follow-up values, record \
 what a sample-size calculation draws on when the document prints it: each arm's baseline values (a \
 result with timepoint "baseline"), the correlation between baseline and follow-up, the number \
-randomized and the number analyzed in each arm (they give the dropout); for a binary outcome, the \
-events and n in each arm; for a time-to-event outcome, the hazard ratio with its CI, the events in \
-each arm and the median times; for a cluster design, the ICC and the number and size of clusters.
+randomized in each arm with the baseline values (in the result with timepoint "baseline", or, when \
+no baseline values are printed, in a result of its own with timepoint "randomization"), and in each \
+follow-up result only the n analyzed for its values (together they give the dropout); for a binary \
+outcome, the events and n in each arm; for a time-to-event outcome, the hazard ratio with its CI, \
+the events in each arm and the median times; for a cluster design, the ICC and the number and size \
+of clusters.
 
 In appraisal, extract source-supported information on randomization, deviations from treatment, missing outcomes, measurement, selective reporting, confounding, estimands and clinical importance. Each item needs a verbatim quote and location. Do not call an unreported item low risk. Distinguish a between-group important difference from an individual change threshold; note whose views support importance. These are evidence notes, not a completed RoB 2 assessment. An abstract rarely supports a comprehensive appraisal.
 
@@ -148,7 +151,8 @@ ADJUDICATE = """\
 You are the senior reviewer for an extraction a junior reviewer made from the document below. The \
 automatic checks raised the flags listed. Re-read the document, then return a corrected, complete \
 extraction in the same format: fix wrong numbers, labels, groups, and quotes; add missed results; \
-remove values the document does not print. Check appraisal quotes and assessments too; remove unsupported items. Every value must carry verbatim text from the document \
+remove values the document does not print. A result carries one n per group: the n its values \
+were computed on. Check appraisal quotes and assessments too; remove unsupported items. Every value must carry verbatim text from the document \
 that contains it. Preserve the printed sign. For CI bounds, record the stated confidence level in \
 ci_level as a percent; use null if unstated or not a CI bound, never a default of 95%. Never compute or convert values yourself.
 
@@ -169,11 +173,16 @@ specification (its population, comparison, outcomes and timepoints, and its plan
 
 Read the methods (the statistical analysis, the sample-size paragraph, how outcomes were measured, \
 how missing data were handled) and the results. Then, for each result:
-- Its estimand, by the attributes of ICH E9(R1): the population analyzed (all randomized, a \
-modified ITT set, completers, per protocol); the treatments compared; the variable (the endpoint, \
-its timepoint, and whether it is the value at follow-up, the change from baseline or a percent \
-change); how intercurrent events such as stopping the intervention, rescue treatment or death were \
-handled, and the strategy that amounts to; and the population-level summary measure.
+- Its estimand, by the attributes of ICH E9(R1): the population: the patients the trial targets by \
+its eligibility (and any baseline subgroup the result is limited to); then, separately, the analysis \
+set its numbers come from (all randomized, a modified ITT set, completers, per protocol), which is \
+how the estimand was estimated, not its population; the treatments compared; the variable (the \
+endpoint, its timepoint, and whether it is the value at follow-up, the change from baseline or a \
+percent change); how intercurrent events such as stopping the intervention, rescue treatment or \
+death were handled, as stated, then the strategy that amounts to, marked "inferred:" when the paper \
+does not name it (an ITT label alone does not make it treatment policy: say whether outcomes were \
+collected and analyzed after people stopped the intervention); and the population-level summary \
+measure.
 - Its model: the model or test behind the numbers, with its covariates, strata, random effects and \
 covariance structure, how it handles repeated measures, clustering or a crossover, and how missing \
 outcomes were handled. Quote the sentences that describe it, verbatim.
@@ -182,15 +191,30 @@ model-based SE or the SE of a difference; adjusted or not; at one visit or over 
 instrument's scale or standardized. Then what they can and cannot supply for the planned \
 calculation: an SE from a model is not the outcome's SD; the SD of a change is not the SD at \
 follow-up, and an ANCOVA-based calculation also needs the baseline–follow-up correlation; a \
-standardized mean difference gives no SD on the instrument's scale; an SD among completers tends to \
-be smaller than among all randomized; SDs from a cluster trial need its ICC and cluster sizes; a \
-hazard ratio needs the control arm's event rate and follow-up to give a number of events.
+standardized mean difference gives no SD on the instrument's scale and depends on the SD that \
+standardized it (at follow-up, of the change, at baseline, a model's residual SD, or one derived \
+from a test statistic or paired data): say which, and treat one standardized by a change or \
+residual SD as a different quantity from one standardized by the SD at follow-up; an SD among \
+completers may differ from one among all randomized, in either direction, and an SD after single \
+imputation (LOCF, BOCF, mean imputation) is distorted, mean imputation shrinking it: say which the \
+SD is, and prefer the SD of observed outcomes or one after multiple imputation; a hazard ratio sets \
+the number of events needed, and the control arm's event rate or median, the accrual and follow-up \
+and the dropout turn events into participants, assuming proportional hazards; an individual-level \
+SD from a cluster trial is the total SD, a cluster-randomized plan also needs the ICC and cluster \
+sizes, and a cluster trial's SE or CI of the effect includes its design effect.
 - How its estimand and model compare with the plan, attribute by attribute. Where the \
 specification leaves part of the planned estimand open, compare with what it does say and name the \
-open part.
+open part. An attribute the paper does not state is never "same". Grade the estimand only: a \
+different model for the same quantity (for a difference in means, an unadjusted comparison where an \
+ANCOVA is planned) goes under differences and use, not vs_plan. For an odds ratio or hazard ratio, \
+adjusting for different covariates changes the quantity estimated (conditional vs marginal), so it \
+is an estimand difference.
 
 Also state the design as a statistician would, and quote the paper's own sample-size calculation if \
-it reports one: its assumptions are planning values someone has already argued for.
+it reports one. Its assumptions show what that team assumed when planning, not what was observed or \
+shown to matter: say in notes whether the paper justifies its target difference and how, and \
+whether its assumed SD or event rate differs from what it then reported (without computing \
+anything).
 
 Never compute, convert or estimate a number, and don't restate the reported values: the page shows \
 them beside your text. When the document doesn't say something, write "not stated" rather than \
@@ -241,9 +265,12 @@ value naming its own): the result's estimand, the model behind its numbers, what
 terms of that model (observed or least-squares means, an SD or a model-based SE, the value at
 follow-up or a change), whether its estimand is the same as the planned one, close or different and
 how, and what the numbers can supply for the planned calculation; and, on each record, the design as
-a statistician states it and the paper's own sample-size calculation, quoted. Reason from these.
-Prefer values whose estimand matches the plan; never treat a model-based SE as an SD, a change-score
-SD as an SD at follow-up, or a standardized effect as one on the instrument's scale. In each
+a statistician states it and the paper's own sample-size calculation, quoted. Reason from these. A
+paper's assumed target difference is evidence of neither plausibility nor clinical importance unless
+the paper justifies it. A reading whose model quote was not found in the paper (model_quote
+"missing") is unconfirmed. Prefer values whose estimand matches the plan; never treat a model-based
+SE as an SD, a change-score SD as an SD at follow-up, a standardized effect as one on the
+instrument's scale, or a standardized effect from one denominator as one from another. In each
 recommendation's estimand, say how the selected result's estimand compares with the planned one. In
 each needs row, say under estimands what the values estimate and with which model, which estimate
 the same quantity as the plan, how the others differ, and what each difference means for the

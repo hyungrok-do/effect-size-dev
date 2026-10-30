@@ -20,7 +20,8 @@ export const COLUMNS = [
   'decision_reason',
 ];
 
-// The estimand columns of a paper's result; empty when the manager has not read them.
+// The estimand columns of a paper's result (its first reading, as the review and the summary take it);
+// empty when the manager has not read them.
 function estimandColumns(paper, index) {
   const context = paper.context?.status === 'done' ? paper.context.result : null;
   const read = context?.results.find((c) => c.result === index + 1);

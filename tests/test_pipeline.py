@@ -463,6 +463,8 @@ def test_a_stopping_error_in_the_review_keeps_the_workers_extraction(tmp_path):
     assert pilot["status"] == "extracted" and pilot["extracted_by"] == "worker"
     assert any(r.startswith("manager review failed: The Anthropic account has run out of credit") for r in pilot["escalation"]["reasons"])
     assert llm.calls.count("adjudicate") == 1
+    # The run is stopping, so the manager does not read it (as in the browser edition).
+    assert pilot["context"] is None and llm.calls[-1] == "adjudicate"
 
 
 def test_a_failed_reading_of_the_context_keeps_the_extraction_and_can_be_read_again(tmp_path):
@@ -484,7 +486,7 @@ def test_a_failed_reading_of_the_context_keeps_the_extraction_and_can_be_read_ag
     assert all(p["extraction"]["results"] and p["context"] == {"status": "error", "error": "overloaded"} for p in extracted)
     assert project["overlap"]["report"]["groups"]  # the run went on to the overlap check
 
-    # Read again on request: the document is obtained again as extraction obtains it.
+    # Read again on request, in the text the extraction used.
     llm.study_context = study_context
     trial = next(p for p in extracted if p["ext_id"] == "11111111")
     pipeline.read_context(project_id, trial["id"])
@@ -506,15 +508,58 @@ def test_a_failed_reading_of_the_context_keeps_the_extraction_and_can_be_read_ag
     assert store.paper(pdf["id"])["context"] is None and llm.calls.count("context") == 10
 
 
-def test_reading_the_context_again_says_when_the_text_cannot_be_had(tmp_path):
+def test_reading_the_context_again_reads_the_text_the_extraction_used(tmp_path):
+    """Read again, a paper is read in the text its extraction used: the copy kept with the project, or a
+    PDF downloaded again for its pages; never another text (the abstract) when that one cannot be had."""
     pipeline, store, llm, project_id = run_all(tmp_path)
-    trial = next(p for p in store.papers(project_id) if p["ext_id"] == "11111111")
+    papers = {p["ext_id"]: p for p in store.papers(project_id)}
+    trial, pdf = papers["11111111"], papers["22222222"]
+    assert (trial["fulltext_kind"], pdf["fulltext_kind"]) == ("pmc_xml", "oa_pdf")
+    # Europe PMC, Unpaywall and the PDF now answer 404, which leaves only the abstract to find.
     pipeline.sources = Sources(pipeline.settings, client=httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404))))
-    store.update_paper(trial["id"], abstract=None, doi=None)
+    documents = []
+    study_context = llm.study_context
+    llm.study_context = lambda spec, document, extraction, sink=None: (
+        documents.append(document), study_context(spec, document, extraction, sink))[1]
+    # The PMC text the extraction used is kept with the project, and read without fetching it again.
     pipeline.read_context(project_id, trial["id"])
     context = store.paper(trial["id"])["context"]
-    assert context["status"] == "error" and context["error"].startswith("Could not get the text")
-    assert llm.calls.count("context") == 8
+    assert context["status"] == "done" and context["checks"]["results"] == ["exact"]
+    assert documents == [{"type": "document", "title": trial["title"],
+                          "source": {"type": "text", "media_type": "text/plain", "data": pipeline.source_text(project_id, trial["id"])}}]
+    # A PDF is downloaded again for its pages; when it cannot be, the paper is not read in its abstract.
+    unread = "Could not get the text: the text the extraction used could not be found again."
+    pipeline.read_context(project_id, pdf["id"])
+    assert store.paper(pdf["id"])["context"] == {"status": "error", "error": unread}
+    # Nor is a paper whose kept copy is gone, or one with no text to be found at all.
+    pipeline._text_path(project_id, trial["id"]).unlink()
+    pipeline.read_context(project_id, trial["id"])
+    assert store.paper(trial["id"])["context"] == {"status": "error", "error": unread}
+    store.update_paper(trial["id"], abstract=None, doi=None)
+    pipeline.read_context(project_id, trial["id"])
+    assert store.paper(trial["id"])["context"] == {"status": "error", "error": unread}
+    assert len(documents) == 1 and llm.calls.count("context") == 9
+
+
+def test_the_managers_reading_is_kept_to_one_reading_per_result(tmp_path):
+    """A reading the manager gives twice for one result, or for a result the extraction does not have,
+    is not stored: the review, the summary and the exports all take the same reading of each result."""
+    pipeline, store, llm, project_id = run_all(tmp_path)
+    trial = next(p for p in store.papers(project_id) if p["ext_id"] == "11111111")
+    study_context = llm.study_context
+
+    def twice(spec, document, extraction, sink=None):
+        context = study_context(spec, document, extraction, sink)
+        [first] = context.results
+        again = first.model_copy(update={"vs_plan": "different", "quote": "Not in the paper."})
+        return context.model_copy(update={"results": [first.model_copy(update={"result": 0}), first, again,
+                                                      first.model_copy(update={"result": 2})]})
+
+    llm.study_context = twice
+    pipeline.read_context(project_id, trial["id"])
+    context = store.paper(trial["id"])["context"]
+    assert [(r["result"], r["vs_plan"]) for r in context["result"]["results"]] == [(1, "same")]
+    assert context["checks"]["results"] == ["exact"]
 
 
 def test_a_stopping_error_in_the_reading_keeps_the_extraction_and_stops_the_run(tmp_path):

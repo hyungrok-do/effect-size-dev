@@ -19,7 +19,7 @@ import { pdfText } from './pdf.js';
 import {
   bytesToBase64, europepmcPmid, europepmcRecord, europepmcUrl, SourceError, trialRecord, trialResultsText,
 } from './sources.js';
-import { checkContext, escalationReasons, inAuditSample, verify } from './verify.js';
+import { checkContext, escalationReasons, inAuditSample, oneReadingPerResult, verify } from './verify.js';
 
 export const DEFAULTS = {
   auditFraction: 0.1, perQueryLimit: 100, maxCandidates: 300, maxReviewsFollowed: 10, maxCited: 150,
@@ -46,9 +46,10 @@ const found = (x) => [
 ].join('\n');
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 // What the manager's reading of a paper found, without the paper's numbers: "2 results: 1 matches the
-// planned estimand, 1 differs".
-const FITS = [['same', 'matches the planned estimand', 'match the planned estimand'], ['close', 'is close to it', 'are close to it'],
-  ['different', 'differs', 'differ']];
+// planned estimand, 1 differs from the planned estimand".
+const FITS = [['same', 'matches the planned estimand', 'match the planned estimand'],
+  ['close', 'is close to the planned estimand', 'are close to the planned estimand'],
+  ['different', 'differs from the planned estimand', 'differ from the planned estimand']];
 const contextFound = (c) => {
   const fits = FITS.map(([fit, one, many]) => [c.results.filter((r) => r.vs_plan === fit).length, one, many])
     .filter(([n]) => n).map(([n, one, many]) => `${n} ${n === 1 ? one : many}`);
@@ -665,26 +666,29 @@ export class Pipeline {
         reasons.push(`manager review failed: ${describeError(error)}`);
       }
     }
+    // The manager then reads what the numbers estimate: not when there are none, nor once the run is stopping.
+    const read = final.results.length > 0 && !stop?.error;
     await this.store.updatePaper(paperId, {
       status: 'extracted', extraction: final, extracted_by: extractedBy, extracted_model: this.llm.models?.[extractedBy] || null,
       verification: finalReport,
       escalation: reasons.length ? { reasons, audit: audited } : null,
-      context: final.results.length ? { status: 'running' } : null,
+      context: read ? { status: 'running' } : null,
     });
-    await this.studyContext(projectId, spec, paperId, title, document, final, doc.text, stop);
+    if (read) await this.studyContext(projectId, spec, paperId, title, document, final, doc.text, stop);
   }
 
   // The manager reads the paper again with its final extraction: what each result estimates (its
-  // estimand, by ICH E9(R1)), the model behind it, and how both compare with the plan. Its quotes are
-  // checked against the paper's text. A failure is kept with the paper and never loses the extraction;
-  // in a run, an error that would fail every paper stops the run after this one, as the review does.
-  // The paper's context is already marked as running.
+  // estimand, by ICH E9(R1)), the model behind it, and how both compare with the plan, one reading kept
+  // per result. Its quotes are checked against the paper's text. A failure is kept with the paper and
+  // never loses the extraction; in a run, an error that would fail every paper stops the run after this
+  // one, as the review does. The paper's context is already marked as running.
   async studyContext(projectId, spec, paperId, title, document, extraction, text, stop = null) {
     if (!extraction.results.length) return;
     try {
       const result = await this.activity.track(
         { agent: 'manager', step: 'context', text: `Reading the estimand and model of “${title}”`, paperId },
-        (step) => this.llm.studyContext(spec, document, extraction, { sink: step.meter(this.sink(projectId)) }),
+        async (step) => oneReadingPerResult(await this.llm.studyContext(spec, document, extraction, { sink: step.meter(this.sink(projectId)) }),
+          extraction.results.length),
         contextFound,
       );
       await this.store.updatePaper(paperId, {
@@ -698,7 +702,8 @@ export class Pipeline {
 
   // Read the estimand and model of a paper extracted without them (before the manager read them, or
   // when its reading failed), in the text its extraction used: the copy kept in this browser (your own
-  // PDF included), or, if there is none, found again as extraction finds it.
+  // PDF included), or, if there is none, found again as extraction finds it; never another text, such as
+  // the abstract, when that one cannot be had again.
   async readContext(projectId, paperId) {
     const project = await this.store.project(projectId);
     const paper = await this.store.paper(paperId);
@@ -715,7 +720,9 @@ export class Pipeline {
           () => this.fullText(paper),
           (d) => (d ? `${TEXT_KIND[d.kind]}, ${Math.max(1, Math.round(d.text.length / 1000))}k characters` : 'no open text found'),
         );
-        if (!doc) throw new Error('The text the extraction used could not be found again.');
+        if (!doc || doc.kind !== paper.fulltext_kind || (paper.fulltext_url && doc.url !== paper.fulltext_url)) {
+          throw new Error('the text the extraction used could not be found again.');
+        }
       }
     } catch (error) {
       await this.store.updatePaper(paperId, { context: { status: 'error', error: `Could not get the text: ${describeError(error)}` } });

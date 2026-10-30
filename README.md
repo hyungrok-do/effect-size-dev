@@ -138,27 +138,36 @@ A reported number helps a sample-size calculation only if it estimates the quant
 analysis needs, so after a paper's numbers are extracted and checked the manager reads the paper
 again with them (the step `context`) and states, for each result:
 
-- its estimand, by the attributes of ICH E9(R1): who was analyzed (all randomized, completers, per
-  protocol), the treatments, the variable and its timepoint (the value at follow-up or the change
-  from baseline), how stopping treatment or rescue medication was handled and the strategy that
-  amounts to, and the summary measure;
+- its estimand, by the attributes of ICH E9(R1): the population (the patients the trial targets by
+  its eligibility) and, separately, the analysis set its numbers come from (all randomized,
+  completers, per protocol), the treatments, the variable and its timepoint (the value at follow-up
+  or the change from baseline), how stopping treatment or rescue medication was handled and the
+  strategy that amounts to (marked as inferred when the paper does not name it; an ITT label alone
+  does not make it treatment policy), and the summary measure;
 - the model behind the numbers (an MMRM with its covariates and covariance structure, an ANCOVA, a
   t-test, a Cox model, a random-effects meta-analysis), how missing outcomes were handled, and the
   sentences of the methods that say so, quoted and checked against the paper;
 - what the printed numbers are in terms of that model: observed means and SDs, or least-squares
   means with model-based SEs, which are not SDs;
-- whether its estimand is the same as the planned one, close, or different, and how;
+- whether its estimand is the same as the planned one, close, or different, and how (an attribute
+  the paper does not state is never the same; a different model for the same difference in means is
+  not a different estimand, but covariate adjustment of an odds ratio or hazard ratio is);
 - what the numbers can and cannot supply for the planned calculation: the SD of a change is not the
   SD at follow-up, and an ANCOVA also needs the baseline–follow-up correlation; a standardized mean
-  difference gives no SD on the instrument's scale; an SD among completers tends to be smaller than
-  among all randomized.
+  difference gives no SD on the instrument's scale and depends on the SD that standardized it; an SD
+  among completers may differ from one among all randomized, in either direction, and an SD after
+  single imputation (LOCF, BOCF, mean imputation) is distorted.
 
 It also states the design as a statistician would and quotes the paper's own sample-size
-calculation, whose assumptions are planning values someone has already argued for. It never
+calculation, whose assumptions show what that team assumed when planning, not what was observed or
+shown to matter: it says whether the paper justifies its target difference, and whether the assumed
+SD or event rate differs from what the paper then reported. It never
 computes or converts a number. A paper with no results is not read again; if the step fails, the
 extraction stands with **Read the estimand and model again** on its card, and a paper extracted
-before this step existed has **Read the estimand and model**. It adds one manager call per extracted
-paper, reading the paper's text again.
+before this step existed has **Read the estimand and model**, which reads the text the extraction
+used (the copy kept with the project, or a PDF downloaded again) and says so when that text cannot be
+had again rather than reading the abstract instead. One reading is kept per result. It adds one
+manager call per extracted paper, reading the paper's text again.
 
 The specification step reasons the same way: it derives the statistics to find from the planned
 analysis (for an ANCOVA, the SD at follow-up and the baseline–follow-up correlation; for a cluster
@@ -461,7 +470,8 @@ as a line per group in the usual shorthand, as printed: `App  8.1 ± 4.2  n = 10
 design and its own sample-size calculation as the manager read them, and at the top of each result,
 before its numbers, its estimand, the model behind it, what the numbers are, whether the estimand is
 the same as planned, close or different (and how), and what the numbers can supply for the planned
-calculation. A result is flagged only when a
+calculation; a model whose quote was not found in the paper is marked and counted among the quotes to
+check, and a result the manager's reading leaves out says **Estimand not read**. A result is flagged only when a
 quote did not check out, the match to the plan is partial, confidence is low, or the extraction
 raised a concern (an SD that may be an SE). **Quotes** opens each value with its quote, location
 and check; **Show source text** opens the text with the quotes highlighted; **Details** has how the
@@ -510,12 +520,15 @@ The head agent also gets the manager's reading of every kept result: its estiman
 its numbers are and how it compares with the plan, and each record's design and own sample-size
 calculation. Each recommendation shows the selected result's reading beside its calculation (same
 estimand as planned, close, or different), and each effect size to find has a note on what its
-values estimate and with which model before the note on how they compare.
+values estimate and with which model before the note on how they compare. Its table has a row per
+arm of each result, so two analyses of one arm (all randomized and completers) are two rows, each
+with its own estimand.
 
 Recommendations are **recommended**, **provisional**, or **insufficient evidence**. A supported
 numerical choice with unresolved importance, an incomplete estimand, indirect evidence, limited
-appraisal, undecided review decisions, or a source result whose estimand the manager read as
-different from the plan (or has not read) is provisional. Missing or invalid numerical inputs yield
+appraisal, undecided review decisions, or a source result whose estimand the manager read as close
+to or different from the plan (or has not read, or described with a model quote not found in the
+paper) is provisional. Missing or invalid numerical inputs yield
 no final number, with an explanation. A published effect is not used as an unsubstantiated
 noninferiority/equivalence margin. No automated status substitutes for scientific review.
 

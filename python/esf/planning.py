@@ -116,15 +116,19 @@ def resolve_choice(choice: dict, evidence: dict) -> dict:
 
 
 def _estimand_notes(key: str | None, evidence: dict) -> list[str]:
-    """What the manager's reading of the selected result's estimand leaves open: no reading, or an
-    estimand that differs from the planned one."""
+    """What the manager's reading of the selected result's estimand leaves open: no reading, an estimand
+    close to or different from the planned one, or a model whose quote was not found in the paper."""
     reading = next((e for e in evidence.get("estimands") or [] if e["key"] == key), None)
     if reading is None:
         return ["The manager has not read the selected result's estimand and model."]
-    if reading.get("vs_plan") == "different":
-        how = "; ".join(reading.get("differences") or [])
-        return ["The manager read the selected result's estimand as different from the planned one" + (f": {how}." if how else ".")]
-    return []
+    notes = []
+    how = "; ".join(reading.get("differences") or [])
+    fit = {"different": "different from", "close": "close to, not the same as,"}.get(reading.get("vs_plan"))
+    if fit:
+        notes.append(f"The manager read the selected result's estimand as {fit} the planned one" + (f": {how}." if how else "."))
+    if reading.get("model_quote") == "missing":
+        notes.append("The model the manager described for the selected result is not supported by a quote found in the paper.")
+    return notes
 
 
 def _empty(outcome: str) -> dict:

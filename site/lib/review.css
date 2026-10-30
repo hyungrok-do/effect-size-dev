@@ -92,7 +92,7 @@ dl.study-context > div, .estimand dl > div { display: contents; }
 p.study-context.pending { margin-bottom: 0; }
 .estimand { padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 14px; box-shadow: inset 3px 0 var(--line); }
 .estimand[data-fit="same"] { box-shadow: inset 3px 0 var(--ok); }
-.estimand[data-fit="close"] { box-shadow: inset 3px 0 var(--warn); }
+.estimand[data-fit="close"], .estimand[data-fit="unread"] { box-shadow: inset 3px 0 var(--warn); }
 .estimand[data-fit="different"] { box-shadow: inset 3px 0 var(--error); }
 .estimand .fit { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .estimand .differences { flex-basis: 100%; margin: 0; padding-left: 18px; font-size: 13.5px; color: var(--ink-2); }

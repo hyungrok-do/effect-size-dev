@@ -280,7 +280,9 @@ def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict
         paper_decisions = decisions.get(paper["id"], {})
         context = paper.get("context") or {}
         study = context["result"] if context.get("status") == "done" else {}
-        read = {c["result"]: c for c in study.get("results") or []}
+        read: dict[int, dict] = {}
+        for c in study.get("results") or []:
+            read.setdefault(c["result"], c)  # the first reading of a result, as the review and the summary take it
         for index, result in enumerate(extraction.get("results", [])):
             decision = effective_decision(paper_decisions, index)
             if included_only and (decision or {}).get("decision") != "include":
@@ -458,7 +460,9 @@ def create_app(
         status = 503 if exc.retryable else 500 if exc.code == "storage_failed" else 502
         return JSONResponse({"detail": str(exc)}, status_code=status)
 
-    def submit(key: str, fn: Callable[[], None]) -> None:
+    def submit(key: str, fn: Callable[[], None], before: Callable[[], None] | None = None) -> None:
+        """Run fn in the background under a key no other job holds, or refuse with 409. `before` writes
+        what the job starts from, once the key is claimed: a refused request changes nothing."""
         with busy_lock:
             if key in busy:
                 raise HTTPException(409, "This is already running.")
@@ -471,7 +475,14 @@ def create_app(
                 with busy_lock:
                     busy.discard(key)
 
-        jobs.submit(job)
+        try:
+            if before is not None:
+                before()
+            jobs.submit(job)
+        except BaseException:
+            with busy_lock:
+                busy.discard(key)
+            raise
 
     def get_project(project_id: str) -> dict:
         project = store.project(project_id)
@@ -684,9 +695,13 @@ def create_app(
             raise HTTPException(409, "Wait until the current run finishes.")
         spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
         job = pipeline_for(agents)
-        store.clear_decisions(paper_id)
-        store.update_paper(paper_id, status="fetching", error=None, context=None)
-        submit(f"paper-{paper_id}", lambda: job.extract_paper(project_id, spec, paper_id))
+
+        def start() -> None:
+            store.clear_decisions(paper_id)
+            store.update_paper(paper_id, status="fetching", error=None, context=None)
+
+        # Refused while the paper is extracted or read (the same key), before its decisions are cleared.
+        submit(f"paper-{paper_id}", lambda: job.extract_paper(project_id, spec, paper_id), before=start)
         return {"ok": True}
 
     @app.post("/api/projects/{project_id}/papers/{paper_id}/context", status_code=202)

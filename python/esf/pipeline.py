@@ -30,7 +30,7 @@ from .openai_llm import OpenAIError
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
 from .sources import Record, SourceError, Sources, europepmc_pmid, europepmc_record, trial_record
 from .store import Store, now
-from .verify import Verification, check_context, escalation_reasons, in_audit_sample, verify
+from .verify import Verification, check_context, escalation_reasons, in_audit_sample, one_reading_per_result, verify
 
 log = logging.getLogger(__name__)
 
@@ -595,7 +595,9 @@ class Pipeline:
 
     def read_context(self, project_id: str, paper_id: int) -> None:
         """The manager reads the statistical context of a paper extracted without it (in an older project,
-        or after the reading failed), from the document obtained again as extraction obtains it."""
+        or after the reading failed), in the text its extraction used: the copy kept with the project, or a
+        PDF (whose pages the manager reads) downloaded again; never another text, such as the abstract,
+        when that one cannot be had again."""
         project, paper = self.store.project(project_id), self.store.paper(paper_id)
         assert project is not None and paper is not None
         if paper["status"] != "extracted":
@@ -605,9 +607,7 @@ class Pipeline:
             return
         self.store.update_paper(paper_id, context={"status": "running"})
         try:
-            fulltext = get_fulltext(paper, self.sources)
-            if fulltext is None:
-                raise SourceError("no open full text or abstract was found")
+            fulltext = self._text_used(project_id, paper)
         except Exception as exc:
             self.store.update_paper(paper_id, context={"status": "error", "error": f"Could not get the text: {exc}"})
             return
@@ -616,15 +616,27 @@ class Pipeline:
         extraction = PaperExtraction.model_validate(paper["extraction"])
         self._read_context(spec, paper_id, document, extraction, fulltext.text, self._sink(project_id))
 
+    def _text_used(self, project_id: str, paper: dict) -> FullText:
+        """The text a paper's extraction used, again: its saved copy, unless it was a PDF, which is
+        downloaded again for its pages; found again as extraction finds it when there is no copy. Raises
+        when it is another text than the one the extraction used."""
+        kind, saved = paper.get("fulltext_kind"), self.source_text(project_id, paper["id"])
+        if kind in ("registry", "pmc_xml", "abstract") and saved is not None:
+            return FullText(kind=kind, text=saved, url=paper.get("fulltext_url") or "")
+        fulltext = get_fulltext(paper, self.sources)
+        if fulltext is None or fulltext.kind != kind or (paper.get("fulltext_url") and fulltext.url != paper["fulltext_url"]):
+            raise SourceError("the text the extraction used could not be found again.")
+        return fulltext
+
     def _read_context(
         self, spec: SearchSpec, paper_id: int, document: dict, extraction: PaperExtraction, text: str, sink,
         stop: "_Stop | None" = None,
     ) -> None:
-        """The manager reads each result's estimand and model; its quotes are checked against the paper's
-        text. A failure is kept with the paper, whose extraction stands; in a run, one that would fail every
-        paper stops the run."""
+        """The manager reads each result's estimand and model, one reading kept per result; its quotes are
+        checked against the paper's text. A failure is kept with the paper, whose extraction stands; in a
+        run, one that would fail every paper stops the run."""
         try:
-            context = self.llm.study_context(spec, document, extraction, sink)
+            context = one_reading_per_result(self.llm.study_context(spec, document, extraction, sink), len(extraction.results))
         except Exception as exc:
             stopping = stops_the_run(exc)
             if not stopping:

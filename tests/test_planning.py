@@ -24,8 +24,8 @@ def example(binary=False):
                    outcome_type='binary' if binary else 'continuous', relevance='direct', confidence='high', concerns=[],
                    estimand='E1')
               for i, (g, st, n) in enumerate(data)]
-    # The manager's reading of the result: the same estimand as planned.
-    estimands = [dict(key='E1', record='R1', result='R1:0', vs_plan='same', differences=[])]
+    # The manager's reading of the result: the same estimand as planned, its model's quote found in the paper.
+    estimands = [dict(key='E1', record='R1', result='R1:0', vs_plan='same', differences=[], model_quote='exact')]
     records = [dict(key='R1', design='parallel RCT', fulltext_kind='pmc_xml', study_type='rct', matches_spec=True,
                     appraisal=[dict(domain=d, quote_found=True) for d in
                                ['randomization', 'deviations', 'missing_outcomes', 'measurement', 'selective_reporting']])]
@@ -146,11 +146,17 @@ def test_planning_judgment_is_separate_from_observed_effect():
 
 
 @pytest.mark.parametrize('change', ['none', 'importance', 'unreviewed', 'abstract', 'outcome', 'invalid', 'noninferiority', 'omitted',
-                                    'unread', 'different_estimand'])
+                                    'unread', 'different_estimand', 'close_estimand', 'close_no_differences',
+                                    'model_quote_missing', 'model_quote_approximate', 'no_model_quote'])
 def test_final_recommendation_validation_and_browser_parity(change):
     evidence, plan, raw = example(), spec(), summary()
     if change == 'unread': evidence['estimands'] = []
     if change == 'different_estimand': evidence['estimands'][0].update(vs_plan='different', differences=['completers rather than all randomized'])
+    if change == 'close_estimand': evidence['estimands'][0].update(vs_plan='close', differences=['completers rather than all randomized; 30% dropout'])
+    if change == 'close_no_differences': evidence['estimands'][0].update(vs_plan='close')
+    if change == 'model_quote_missing': evidence['estimands'][0].update(model_quote='missing')
+    if change == 'model_quote_approximate': evidence['estimands'][0].update(model_quote='approximate')
+    if change == 'no_model_quote': evidence['estimands'][0].update(model_quote=None)
     if change == 'importance': plan['planning']['clinical_importance'] = ''
     if change == 'unreviewed': evidence['values'][0]['decision'] = None
     if change == 'abstract': evidence['records'][0]['fulltext_kind'] = 'abstract'
@@ -161,7 +167,8 @@ def test_final_recommendation_validation_and_browser_parity(change):
     actual = finalize_summary(raw, evidence, plan)
     assert javascript('finalize', raw, evidence, plan) == actual
     rec = actual['recommendations'][0]
-    expected = 'recommended' if change == 'none' else 'insufficient_evidence' if change in ('invalid', 'noninferiority', 'omitted') else 'provisional'
+    expected = ('recommended' if change in ('none', 'model_quote_approximate', 'no_model_quote')
+                else 'insufficient_evidence' if change in ('invalid', 'noninferiority', 'omitted') else 'provisional')
     assert rec['status'] == expected
     assert (rec['resolved'] is None) == (expected == 'insufficient_evidence')
     assert actual['overview'] == raw['overview']
@@ -170,6 +177,14 @@ def test_final_recommendation_validation_and_browser_parity(change):
     if change == 'different_estimand':
         assert rec['validation_notes'][-1] == ("The manager read the selected result's estimand as different from the planned one: "
                                                "completers rather than all randomized.")
+    # An estimand read as close to the planned one is not the same: the recommendation says how it differs.
+    if change == 'close_estimand':
+        assert rec['validation_notes'] == ["The manager read the selected result's estimand as close to, not the same as, the planned one: "
+                                           "completers rather than all randomized; 30% dropout."]
+    if change == 'close_no_differences':
+        assert rec['validation_notes'] == ["The manager read the selected result's estimand as close to, not the same as, the planned one."]
+    if change == 'model_quote_missing':
+        assert rec['validation_notes'] == ["The model the manager described for the selected result is not supported by a quote found in the paper."]
 
 
 def test_scenarios_match_metric_and_keep_their_assumptions():

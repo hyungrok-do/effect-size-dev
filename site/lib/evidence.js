@@ -10,8 +10,9 @@
 // instead; reviews and the studies they pool are separate studies and are not marked. Nothing is
 // combined across studies. Claude refers to values by key, so every number in a summary comes
 // from here, never from the model. Where the manager has read a paper's statistical context, its kept
-// results carry their estimands (E1, E2, ...), each value names its result's, and its record carries the
-// design and the paper's own sample-size calculation as the manager stated them.
+// results carry their estimands (E1, E2, ...), with whether the quote of each one's model was found in
+// the paper, each value names its result's, and its record carries the design and the paper's own
+// sample-size calculation as the manager stated them.
 
 const PAPER = -1; // result_index of a decision about the whole paper
 
@@ -54,6 +55,17 @@ function decisionOf(decisions, paperId, index) {
 // The manager's reading of a paper's statistical context (a StudyContext), when it has one.
 const contextOf = (paper) => (paper.context?.status === 'done' ? paper.context.result : null);
 
+// The manager's reading of each result, by its number (from 1), with the check of its model's quote; the
+// first reading of a number when there are more, as the review and the exports take it.
+function readings(paper) {
+  const found = paper.context?.checks?.results || [];
+  const read = new Map();
+  (contextOf(paper)?.results || []).forEach((c, k) => {
+    if (!read.has(c.result)) read.set(c.result, [c, found[k] ?? null]);
+  });
+  return read;
+}
+
 // What the summary is told about a result's estimand, from the manager's reading (ResultContext).
 const ESTIMAND_FIELDS = [
   'population', 'treatments', 'variable', 'intercurrent_events', 'summary_measure', 'model', 'missing_data',
@@ -81,7 +93,7 @@ export function buildEvidence(papers, decisions, overlap) {
   const estimands = [];
   for (const p of extracted(papers)) {
     const checks = p.verification?.values || [];
-    const read = new Map((contextOf(p)?.results || []).map((c) => [c.result, c]));
+    const read = readings(p);
     p.extraction.results.forEach((r, i) => {
       if (decisionOf(decisions, p.id, i) === 'exclude') return;
       const row = checks[i] || [];
@@ -89,10 +101,11 @@ export function buildEvidence(papers, decisions, overlap) {
       let estimand = null;
       if (read.has(i + 1)) {
         estimand = `E${estimands.length + 1}`;
-        const c = read.get(i + 1);
+        const [c, modelQuote] = read.get(i + 1);
         estimands.push({
           key: estimand, record: recordKey(p), result: `${recordKey(p)}:${i}`, outcome: r.outcome_measure, timepoint: r.timepoint,
           ...Object.fromEntries(ESTIMAND_FIELDS.map((name) => [name, c[name] ?? null])),
+          model_quote: modelQuote, // 'exact', 'approximate', 'missing', or null with no quote
         });
       }
       r.values.forEach((v, j) => {

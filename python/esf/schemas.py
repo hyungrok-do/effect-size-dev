@@ -318,8 +318,9 @@ class ResultContext(BaseModel):
 
     result: int = Field(description="Which result of the extraction this is about, by its number (1 for the first).")
     population: str = Field(
-        description="Who the numbers are about as analyzed, e.g. 'all randomized, missing outcomes imputed', "
-        "'completers at 12 weeks'."
+        description="The patients the result is about by the trial's eligibility (and any baseline subgroup it is "
+        "limited to), then the analysis set its numbers come from, e.g. 'adults with moderate depression in primary "
+        "care; completers at 12 weeks'."
     )
     treatments: str = Field(description="The conditions compared, as the paper defines them.")
     variable: str = Field(
@@ -327,9 +328,11 @@ class ResultContext(BaseModel):
         "percent change, e.g. 'change in PHQ-9 from baseline to 8 weeks'."
     )
     intercurrent_events: str = Field(
-        description="How the paper handled stopping the intervention, rescue treatment, death and the like, and the "
-        "strategy that amounts to (treatment policy, hypothetical, composite, while on treatment, principal stratum); "
-        "'not stated' if the paper doesn't say."
+        description="How the paper handled stopping the intervention, rescue treatment, death and the like, as "
+        "stated; then the strategy it amounts to (treatment policy, hypothetical, composite, while on treatment, "
+        "principal stratum), prefixed 'inferred:' when the paper does not name it. An ITT label alone does not make "
+        "it treatment policy: say whether outcomes were collected and analyzed after people stopped the "
+        "intervention. 'not stated' if the paper doesn't say."
     )
     summary_measure: str = Field(
         description="The population-level summary the result reports, e.g. 'difference in adjusted mean PHQ-9', "
@@ -352,8 +355,14 @@ class ResultContext(BaseModel):
         "not SDs'."
     )
     vs_plan: Literal["same", "close", "different"] = Field(
-        description="How its estimand compares with the planned study's: same: the same quantity; close: an attribute "
-        "differs in a way that changes little; different: it estimates another quantity."
+        description="How its estimand compares with the planned study's. same: the paper states each attribute and "
+        "each matches the plan (attributes the plan leaves open aside); close: an attribute differs, or the paper "
+        "does not state it, in a way that should change the numbers little, each listed under differences; "
+        "different: it estimates another quantity (another variable, timepoint, summary measure, population or "
+        "intercurrent-event strategy). Grade the estimand only. A different model for the same quantity (for a "
+        "difference in means, an unadjusted comparison where an ANCOVA is planned) goes under differences and use, "
+        "not vs_plan. For an odds ratio or hazard ratio, adjusting for different covariates changes the quantity "
+        "estimated (conditional vs marginal), so it is an estimand difference."
     )
     differences: list[str] = Field(
         description="Each attribute of the estimand or the model that differs from the plan, and how, e.g. "

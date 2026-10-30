@@ -405,6 +405,38 @@ def test_the_manager_reads_the_context_of_a_paper_already_extracted(tmp_path):
     assert paper["context"]["status"] == "done" and llm.calls[-2:] == ["extract", "context"]
 
 
+def test_extracting_a_paper_while_the_manager_reads_it_changes_nothing(tmp_path):
+    """A paper being read holds its job: a request to extract it again is refused before its decisions
+    or its status change, and the reading ends as it would have."""
+    llm, reading, release = FakeLLM(), threading.Event(), threading.Event()
+    client = make_client(tmp_path, llm=llm)
+    project_id = client.post("/api/projects", json={"paragraph": PARAGRAPH}).json()["id"]
+    wait_for(client, project_id, {"spec_ready"})
+    client.post(f"/api/projects/{project_id}/run")
+    wait_for(client, project_id, {"done"})
+    trial = next(p for p in client.get(f"/api/projects/{project_id}/papers").json() if p["ext_id"] == "11111111")
+    assert client.put(f"/api/projects/{project_id}/papers/{trial['id']}/decisions",
+                      json={"result_index": 0, "decision": "include", "reason": ""}).status_code == 200
+    study_context = llm.study_context
+
+    def held(*args, **kwargs):
+        reading.set()
+        assert release.wait(10)
+        return study_context(*args, **kwargs)
+
+    llm.study_context = held
+    client.app.state.store.update_paper(trial["id"], context=None)
+    assert client.post(f"/api/projects/{project_id}/papers/{trial['id']}/context").status_code == 202
+    assert reading.wait(10)
+    response = client.post(f"/api/projects/{project_id}/papers/{trial['id']}/extract")
+    assert response.status_code == 409
+    release.set()
+    context = wait_for_context(client, project_id, trial["id"])
+    paper = next(p for p in client.get(f"/api/projects/{project_id}/papers").json() if p["id"] == trial["id"])
+    assert context["status"] == "done" and paper["status"] == "extracted"
+    assert paper["decisions"]["0"]["decision"] == "include" and paper["extraction"] == trial["extraction"]
+
+
 def test_unknown_ids(tmp_path):
     client = make_client(tmp_path)
     assert client.get("/api/projects/nope").status_code == 404

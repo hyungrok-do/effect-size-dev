@@ -79,16 +79,19 @@ export function resolveChoice(choice, evidence) {
     formula, inputs: keys, input_values: nums };
 }
 
-// What the manager's reading of the selected result's estimand leaves open: no reading, or an estimand
-// that differs from the planned one.
+// What the manager's reading of the selected result's estimand leaves open: no reading, an estimand close
+// to or different from the planned one, or a model whose quote was not found in the paper.
 function estimandNotes(key, evidence) {
   const reading = (evidence.estimands || []).find((e) => e.key === key);
   if (!reading) return ["The manager has not read the selected result's estimand and model."];
-  if (reading.vs_plan === 'different') {
-    const how = (reading.differences || []).join('; ');
-    return [`The manager read the selected result's estimand as different from the planned one${how ? `: ${how}.` : '.'}`];
+  const notes = [];
+  const how = (reading.differences || []).join('; ');
+  const fit = reading.vs_plan === 'different' ? 'different from' : reading.vs_plan === 'close' ? 'close to, not the same as,' : null;
+  if (fit) notes.push(`The manager read the selected result's estimand as ${fit} the planned one${how ? `: ${how}.` : '.'}`);
+  if (reading.model_quote === 'missing') {
+    notes.push('The model the manager described for the selected result is not supported by a quote found in the paper.');
   }
-  return [];
+  return notes;
 }
 
 const empty = (outcome) => ({ outcome, status: 'insufficient_evidence', estimand: '', choice: null, resolved: null,

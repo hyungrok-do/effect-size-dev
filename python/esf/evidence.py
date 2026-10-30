@@ -11,8 +11,9 @@ studies. Claude refers to values by key, so every number in a summary comes from
 here, never from the model.
 
 Where the manager has read a paper's statistical context, its kept results carry their estimands
-(E1, E2, ...), each value names its result's, and its record carries the design and the paper's own
-sample-size calculation as the manager stated them.
+(E1, E2, ...), with whether the quote of each one's model was found in the paper, each value names
+its result's, and its record carries the design and the paper's own sample-size calculation as the
+manager stated them.
 
 Mirrors site/lib/evidence.js; the tests require identical output.
 """
@@ -75,6 +76,16 @@ def _context(paper: dict) -> dict | None:
     return context.get("result") if context.get("status") == "done" else None
 
 
+def _readings(paper: dict) -> dict[int, tuple[dict, str | None]]:
+    """The manager's reading of each result, by its number (from 1), with the check of its model's quote;
+    the first reading of a number when there are more, as the review and the exports take it."""
+    found = ((paper.get("context") or {}).get("checks") or {}).get("results") or []
+    read: dict[int, tuple[dict, str | None]] = {}
+    for k, c in enumerate((_context(paper) or {}).get("results") or []):
+        read.setdefault(c["result"], (c, found[k] if k < len(found) else None))
+    return read
+
+
 # What the summary is told about a result's estimand, from the manager's reading (ResultContext).
 ESTIMAND_FIELDS = (
     "population", "treatments", "variable", "intercurrent_events", "summary_measure", "model", "missing_data",
@@ -94,7 +105,7 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
     estimands: list[dict] = []
     for p in _extracted(papers):
         checks = (p.get("verification") or {}).get("values") or []
-        read = {c["result"]: c for c in (_context(p) or {}).get("results") or []}
+        read = _readings(p)
         for i, r in enumerate(p["extraction"]["results"]):
             if _decision(decisions, p["id"], i) == "exclude":
                 continue
@@ -102,11 +113,13 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
             sizes = {v["group"]: v["value"] for v in r["values"] if v["statistic"] == "n"}
             estimand = None
             if i + 1 in read:
+                reading, model_quote = read[i + 1]
                 estimand = f"E{len(estimands) + 1}"
                 estimands.append({
                     "key": estimand, "record": record_key(p), "result": f"{record_key(p)}:{i}",
                     "outcome": r["outcome_measure"], "timepoint": r["timepoint"],
-                    **{name: read[i + 1].get(name) for name in ESTIMAND_FIELDS},
+                    **{name: reading.get(name) for name in ESTIMAND_FIELDS},
+                    "model_quote": model_quote,  # 'exact', 'approximate', 'missing', or None with no quote
                 })
             for j, v in enumerate(r["values"]):
                 check = row[j] if j < len(row) else None

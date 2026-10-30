@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import asdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -27,7 +28,8 @@ from esf.jats import jats_to_text
 from esf.sources import clean_affiliations, europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_results_text
 from esf.evidence import build_evidence, decisions_basis, overlap_records
 from esf.schemas import PaperExtraction, StudyContext, upgrade_spec
-from esf.verify import check_context, in_audit_sample, numbers_in, verify
+from esf.server import EXPORT_COLUMNS, export_rows
+from esf.verify import check_context, in_audit_sample, numbers_in, one_reading_per_result, verify
 from fixtures import (
     ABSTRACT_LINE, CONTEXT_INPUT, EUROPEPMC, EUROPEPMC_QUERY, JATS, PDF_LINE, PLAN, PMC_ONLY, PREPRINT, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL,
     FakeLLM, FakeOpenAI, LiteratureAPIs, _extraction, _result, _value, make_pdf, streamed,
@@ -78,25 +80,36 @@ EVIDENCE_OVERLAP = {"groups": [
 ], "notes": ""}
 
 
-def _context(fits, design="two-arm parallel RCT", sample_size="", notes=""):
-    """A paper's context once the manager has read it, a ResultContext per {result number: (vs_plan, differences)}."""
+def _context(fits, design="two-arm parallel RCT", sample_size="", notes="", checks=None):
+    """A paper's context once the manager has read it, a ResultContext per {result number: (vs_plan, differences)},
+    with the checks of their models' quotes (none quoted by default)."""
     results = [{"result": n, "population": "all randomized", "treatments": "app vs waitlist", "variable": "PHQ-9 at 12 weeks",
                 "intercurrent_events": "not stated", "summary_measure": "difference in means", "model": "ANCOVA adjusted for baseline",
                 "missing_data": "not stated", "quote": "", "location": "", "numbers_are": "observed means and SDs",
                 "vs_plan": fit, "differences": differences, "use": "The SDs can serve as the outcome SD."}
                for n, (fit, differences) in fits.items()]
-    return {"status": "done", "model": "claude-opus-5-5", "checks": {"sample_size": None, "results": [None] * len(results)},
+    return {"status": "done", "model": "claude-opus-5-5", "checks": {"sample_size": None, "results": checks or [None] * len(results)},
             "result": {"design": design, "sample_size": sample_size, "sample_size_location": "Methods" if sample_size else "",
                        "results": results, "notes": notes}}
+
+
+def _read_twice(context, check):
+    """The context with its first result read again, otherwise (as stored before one reading was kept per
+    result): only the first reading counts, with its own quote check."""
+    first = context["result"]["results"][0]
+    context["result"]["results"].append({**first, "vs_plan": "same", "differences": []})
+    context["checks"]["results"].append(check)
+    return context
 
 
 # The same papers once the manager has read some of them: a result excluded by decision keeps no estimand,
 # a paper excluded whole keeps none either, and a reading that failed or is running counts as none.
 CONTEXT_PAPERS = [
-    {**EVIDENCE_PAPERS[0], "context": _context({1: ("same", []), 2: ("close", ["GAD-7, not PHQ-9"])})},
+    {**EVIDENCE_PAPERS[0], "context": _context({1: ("same", []), 2: ("close", ["GAD-7, not PHQ-9"])}, checks=["exact", "missing"])},
     {**EVIDENCE_PAPERS[1], "context": {"status": "error", "error": "The Anthropic API returned an error."}},
-    {**EVIDENCE_PAPERS[2], "context": _context({1: ("different", ["completers rather than all randomized"])},
-                                               sample_size="We needed 75 per arm.", notes="Attrition differed between arms.")},
+    {**EVIDENCE_PAPERS[2], "context": _read_twice(_context({1: ("different", ["completers rather than all randomized"])},
+                                                           sample_size="We needed 75 per arm.", notes="Attrition differed between arms.",
+                                                           checks=["missing"]), "exact")},
     {**EVIDENCE_PAPERS[3], "context": {"status": "running"}},
     {**EVIDENCE_PAPERS[4], "context": None},
     {**EVIDENCE_PAPERS[5], "context": _context({1: ("same", [])})},
@@ -333,11 +346,20 @@ def test_browser_ports_match_python(browser, site_url):
     study.results[1].quote = "Analyses followed the intention to treat principle"
     study.results[2].quote = ""
     contexts = [[study.model_dump(), jats_to_text(JATS)]]
+    # The manager's reading kept to one per result of an extraction of 2: result 2 first, then 1; a second
+    # reading of 2, and readings of results 0 and 3, are dropped.
+    numbered = study.model_dump()
+    numbered["results"] = [{**r, "result": n, "vs_plan": fit} for r, (n, fit) in
+                           zip(numbered["results"] * 2, [(2, "close"), (1, "same"), (2, "different"), (0, "same"), (3, "same")])]
+    readings = [[numbered, 2], [numbered, 0]]
+    # Both editions' exports of the papers the manager read, by the columns of its reading.
+    exported = [{**p, "ext_id": str(p["id"])} for p in CONTEXT_PAPERS if p["status"] == "extracted"]
     data = {
         "jats": JATS, "trial": TRIAL, "pubmed": PUBMED_XML, "numbers": numbers, "keys": keys, "g": g_cases,
         "europepmc": EUROPEPMC["resultList"]["result"][:3], "old_spec": OLD_SPEC,
         "evidence": [EVIDENCE_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP],
-        "with_contexts": [CONTEXT_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP], "contexts": contexts,
+        "with_contexts": [CONTEXT_PAPERS, EVIDENCE_DECISIONS, EVIDENCE_OVERLAP], "contexts": contexts, "readings": readings,
+        "exported": exported,
         "verify": [[e.model_dump(), t, r] for e, t, r in cases],
         "affiliations": AFFILIATION_CASES,
     }
@@ -348,6 +370,7 @@ def test_browser_ports_match_python(browser, site_url):
         const panel = await import('/lib/spec-panel.js');
         const ev = await import('/lib/evidence.js');
         const affiliations = await import('/lib/affiliations.js');
+        const { exportRows } = await import('/lib/export.js');
         return {
             jats: jats.jatsToText(data.jats),
             trial: sources.trialResultsText(data.trial),
@@ -363,6 +386,8 @@ def test_browser_ports_match_python(browser, site_url):
             withContexts: ev.buildEvidence(...data.with_contexts),
             basisWithContexts: ev.decisionsBasis(data.with_contexts[0], data.with_contexts[1]),
             checked: data.contexts.map(([c, t]) => v.checkContext(c, t)),
+            oneReading: data.readings.map(([c, n]) => v.oneReadingPerResult(c, n)),
+            exported: exportRows(data.exported, {}, false),
             affiliations: data.affiliations.map((texts) => affiliations.cleanAffiliations(texts)),
             europepmc: data.europepmc.map((r) => [sources.europepmcPmid(r), sources.europepmcPmid(r) ? null : sources.europepmcRecord(r),
                                                     sources.europepmcUrl(String(r.id))]),
@@ -383,6 +408,14 @@ def test_browser_ports_match_python(browser, site_url):
     assert result["basisWithContexts"] == decisions_basis(CONTEXT_PAPERS, EVIDENCE_DECISIONS)
     assert result["checked"] == [check_context(StudyContext.model_validate(c), t) for c, t in contexts]
     assert result["checked"][0]["sample_size"] == "missing" and result["checked"][0]["results"][::2] == ["exact", None]
+    assert result["oneReading"] == [one_reading_per_result(StudyContext.model_validate(c), n).model_dump() for c, n in readings]
+    assert [[(r["result"], r["vs_plan"]) for r in c["results"]] for c in result["oneReading"]] == [[(2, "close"), (1, "same")], []]
+    reading_columns = EXPORT_COLUMNS[EXPORT_COLUMNS.index("design"):EXPORT_COLUMNS.index("group")]
+    local = export_rows(SimpleNamespace(decisions=lambda _: {}, papers=lambda *args, **kwargs: exported), "project", False)
+    assert [[r["paper_id"], r["result"], *(r[c] for c in reading_columns)] for r in result["exported"]] == [
+        [r["paper_id"], r["result"], *(r[c] for c in reading_columns)] for r in local]
+    # A result read twice (as stored before one reading was kept per result) is exported by its first reading.
+    assert {r["vs_plan"] for r in local if r["paper_id"] == 3} == {"different"}
     assert result["affiliations"] == [clean_affiliations(texts) for texts in AFFILIATION_CASES]
     # What the evidence holds: the excluded result and paper are gone, the overlapping record is kept
     # and marked as the same participants as the record to use, and nothing is combined.
@@ -401,6 +434,8 @@ def test_browser_ports_match_python(browser, site_url):
     assert list(read) == ["records", "estimands", "values"]
     assert [(e["key"], e["record"], e["result"], e["vs_plan"], e["differences"]) for e in read["estimands"]] == [
         ("E1", "R1", "R1:0", "same", []), ("E2", "R3", "R3:0", "different", ["completers rather than all randomized"])]
+    # Each with whether its model's quote was found, from the check of that reading (R3's first of two).
+    assert [e["model_quote"] for e in read["estimands"]] == ["exact", "missing"]
     assert all(e["result"] in {v["result"] for v in read["values"] if v["estimand"] == e["key"]} for e in read["estimands"])
     assert {r["key"]: r["context"] for r in read["records"]} == {
         "R1": {"design": "two-arm parallel RCT", "sample_size": "", "sample_size_found": False, "notes": ""},
@@ -773,7 +808,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
                      "Fetching example.org/rct2.pdf for the browser", "PDF, 1 KB",
                      "Extracting “Brief mindfulness training", "Reviewing “Mindfulness groups",
                      "Reading the estimand and model of “A mindfulness app for depressive", "1 result: 1 matches the planned estimand",
-                     "1 result: 1 differs", "Search finished"):
+                     "1 result: 1 differs from the planned estimand", "Search finished"):
         assert expected in timeline, expected
     page.click("#activity-filter button:has-text('Sonnet')")
     assert page.locator("#timeline li .who").all_inner_texts() == ["Sonnet 5.5"]
@@ -926,12 +961,12 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     # The SDs as printed, smallest and largest, each with the record it came from.
     chips = need.locator("p.comparison .cand").all_inner_texts()
     assert [c.split()[0] for c in chips] == ["3.8", "4.5"] and all(c.split()[1].startswith("R") for c in chips)
-    # One row per study arm, a column per statistic.
+    # One row per arm of each result, a column per statistic.
     arms = page.evaluate("""async () => {
         const { Store } = await import('/lib/store.js');
         const { summary } = await new Store().project(location.hash.slice(1));
         const values = new Map(summary.evidence.values.map((v) => [v.key, v]));
-        return new Set(summary.result.needs[0].values.map((k) => values.get(k)).map((v) => JSON.stringify([v.record, v.outcome, v.timepoint, v.group]))).size;
+        return new Set(summary.result.needs[0].values.map((k) => values.get(k)).map((v) => JSON.stringify([v.result, v.group]))).size;
     }""")
     assert need.locator("tbody tr").count() == arms
     assert need.locator("thead th").all_inner_texts() == ["Study", "Outcome", "Group", "Estimand", "n", "Mean", "SD", "Check"]
@@ -987,7 +1022,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     assert {r["paper_title"] for r in readings} == {r["paper_title"] for r in log if r["step"] == "extract"}
     pooled = next(r for r in readings if r["paper_title"].startswith("Mindfulness apps for depressive"))
     assert pooled["text"].startswith("Reading the estimand and model of “Mindfulness apps for depressive symptoms")
-    assert pooled["detail"] == "1 result: 1 differs\nNo sample-size calculation of its own."
+    assert pooled["detail"] == "1 result: 1 differs from the planned estimand\nNo sample-size calculation of its own."
     for title in {r["paper_title"] for r in readings}:
         steps_of = [r["step"] for r in log if r["paper_title"] == title and r["step"] in ("extract", "adjudicate", "context")]
         assert steps_of[-1] == "context", (title, steps_of)
@@ -1453,11 +1488,85 @@ def test_a_reading_the_key_may_not_make_stops_the_run_and_keeps_the_extraction(b
     }""")
     assert "did not accept the API key" in (found["project"]["error"] or ""), found["project"]
     extracted = [p for p in found["papers"] if p["status"] == "extracted"]
-    assert extracted and all(p["extraction"]["results"] and p["context"]["status"] == "error" for p in extracted)
-    assert all("did not accept the API key" in p["context"]["error"] for p in extracted)
+    assert extracted and all(p["extraction"]["results"] for p in extracted)
+    # A paper read before the run stopped keeps the reason its reading failed; one whose extraction
+    # landed after the stop is not read, as in the local edition, and no request is sent for it.
+    read = [p for p in extracted if p["context"] is not None]
+    assert read and all(p["context"]["status"] == "error" and "did not accept the API key" in p["context"]["error"] for p in read)
+    assert all(p["context"] is None for p in extracted if p not in read)
+    readings = [b for _, b in network.claude if (b.get("system") or [{"text": ""}])[0]["text"].startswith(prompts.CONTEXT)]
+    assert len(readings) == len(read)
     # The papers not yet started wait for Continue; the overlap check never ran.
     assert len(extracted) < 8 and found["project"]["overlap"] is None
     context.close()
+
+
+def test_the_browser_pipeline_reads_a_paper_as_the_local_edition_does(browser, site_url):
+    """As python/esf/pipeline.py: no reading once the run is stopping (the manager's review refused, or a
+    stop another paper set), one reading kept per result, and a reading again only in the text the
+    extraction used, never the abstract in its place."""
+    page = browser.new_page()
+    page.goto(site_url)
+    line = "PHQ-9 at 12 weeks: app 8.1 (SD 4.2, n = 50)."
+    waiting = [_paper(i, [], status="screened_in", abstract=line, extraction=None, verification=None) for i in (1, 2, 3)]
+    from_pmc = _paper(4, [("PHQ-9", "12 weeks", [("App", "mean", 8.1)])], abstract=line, fulltext_kind="pmc_xml",
+                      fulltext_url="https://pmc.ncbi.nlm.nih.gov/articles/PMC4/")
+    project_id = stored_search(page, [*waiting, from_pmc])
+    extraction = _extraction([_result([_value("App", "mean", 8.1, line), _value("App", "sd", 4.2, line)])]).model_dump()
+    study = FakeLLM().study_context(SPEC, {"title": "A trial"}, PaperExtraction.model_validate(extraction)).model_dump()
+    [first] = study["results"]
+    # The manager reads result 1 twice and a result 2 the extraction does not have: only its first reading is kept.
+    study["results"] = [first, {**first, "vs_plan": "different", "differences": ["completers"]}, {**first, "result": 2}]
+    result = page.evaluate("""async ([id, spec, extraction, study]) => {
+        const { Store } = await import('/lib/store.js');
+        const { Pipeline } = await import('/lib/pipeline.js');
+        const store = new Store();
+        const papers = await store.papers(id);
+        const paper = (title) => papers.find((p) => p.title === title).id;
+        const calls = [];
+        let refuse = true;
+        const llm = {
+          models: { manager: 'manager-model', worker: 'worker-model' },
+          extract: async () => { calls.push('extract'); return structuredClone(extraction); },
+          adjudicate: async (s, document, worker) => {
+            calls.push('adjudicate');
+            if (refuse) throw Object.assign(new Error('invalid x-api-key'), { status: 401 });
+            return worker;
+          },
+          studyContext: async () => { calls.push('context'); return structuredClone(study); },
+        };
+        const pipeline = new Pipeline({ store, llm, sources: null, settings: { auditFraction: 1 } });
+        const stop = { error: null };
+        const seen = {};
+        // The manager's review refused: the worker's extraction stands, unread, and the run stops.
+        await pipeline.extractPaper(id, spec, paper('Trial 1'), { stop });
+        seen.refused = { calls: calls.splice(0), stopped: Boolean(stop.error), paper: await store.paper(paper('Trial 1')) };
+        // Another paper extracted once the run is stopping is not read either.
+        refuse = false;
+        await pipeline.extractPaper(id, spec, paper('Trial 2'), { stop });
+        seen.stopping = { calls: calls.splice(0), paper: await store.paper(paper('Trial 2')) };
+        // Outside a run it is read, and one reading is kept per result.
+        await pipeline.extractPaper(id, spec, paper('Trial 3'));
+        seen.read = { calls: calls.splice(0), paper: await store.paper(paper('Trial 3')) };
+        // Read again with no copy of its PMC text kept, a paper is not read in its abstract instead.
+        await pipeline.readContext(id, paper('Trial 4'));
+        seen.again = { calls: calls.splice(0), paper: await store.paper(paper('Trial 4')) };
+        return seen;
+    }""", [project_id, SPEC.model_dump(), extraction, study])
+    refused = result["refused"]
+    assert refused["calls"] == ["extract", "adjudicate"] and refused["stopped"]
+    assert refused["paper"]["status"] == "extracted" and refused["paper"]["extracted_by"] == "worker" and refused["paper"]["context"] is None
+    stopping = result["stopping"]
+    assert stopping["calls"] == ["extract", "adjudicate"] and stopping["paper"]["status"] == "extracted"
+    assert stopping["paper"]["context"] is None
+    read = result["read"]
+    assert read["calls"] == ["extract", "adjudicate", "context"]
+    context = read["paper"]["context"]
+    assert context["status"] == "done" and context["result"]["results"] == [first] and len(context["checks"]["results"]) == 1
+    again = result["again"]
+    assert again["calls"] == []
+    assert again["paper"]["context"] == {"status": "error", "error": "Could not get the text: the text the extraction used could not be found again."}
+    page.close()
 
 
 STORE_SEARCH = """async ([papers, spec, fields]) => {
@@ -2186,7 +2295,7 @@ def test_the_recommendation_shows_what_its_source_result_estimates(browser, site
         return card, source, block, " ".join(card.inner_text().split())
 
     for reading, badge, status in [("same", "Same estimand as planned", "recommended"),
-                                   ("close", "Close to the planned estimand", "recommended"),
+                                   ("close", "Close to the planned estimand", "provisional"),
                                    ("different", "Different estimand", "provisional")]:
         card, source, block, said = shown(reading)
         assert card.get_attribute("data-status") == status, reading
@@ -2198,6 +2307,8 @@ def test_the_recommendation_shows_what_its_source_result_estimates(browser, site
         assert differences == {"same": [], "close": ["change from baseline rather than the value at 12 weeks"],
                                "different": ["completers rather than all randomized"]}[reading]
         assert ("as different from the planned one: completers rather than all randomized." in said) == (reading == "different")
+        assert ("as close to, not the same as, the planned one: change from baseline rather than the value at 12 weeks."
+                in said) == (reading == "close")
         # The need: its estimands, then how they compare; a column of fits in its table.
         assert block.locator("h4.label").all_text_contents() == ["Estimands", "How they compare"]
         assert block.locator("p.estimands .cand").count() == 2 and block.locator("p.comparison .cand").count() == 2
@@ -2217,6 +2328,79 @@ def test_the_recommendation_shows_what_its_source_result_estimates(browser, site
     assert card.get_attribute("data-status") == "recommended" and source.count() == 0 and "Estimand" not in said
     assert block.locator("h4.label").count() == 0 and block.locator("p").first.inner_text() == "The SDs are 4 R1 and 4 R1."
     assert "Estimand" not in block.locator("thead th").all_inner_texts()
+    page.close()
+
+
+def test_a_results_estimand_says_when_its_model_quote_or_its_reading_is_missing(browser, site_url):
+    """The model of a result whose quote was not found in the paper is marked where it is stated, and its
+    quote counts among those to check; a result the manager's reading leaves out says its estimand was not
+    read. A paper not read at all shows no estimand on its results."""
+    page = browser.new_page()
+    page.goto(site_url)
+    paper = _paper(1, [("PHQ-9", "12 weeks", [("App", "mean", 8.1), ("App", "sd", 4.2)]), ("GAD-7", "12 weeks", [("App", "mean", 6.0)])])
+    paper["context"] = _context({1: ("same", [])})
+    paper["context"]["result"]["results"][0].update(quote="A linear mixed model with random intercepts for site.", location="Methods")
+
+    def shown(check, context=True):
+        paper["context"]["checks"]["results"] = [check]
+        return page.evaluate("""async (paper) => {
+            const { resultBox } = await import('/lib/review-view.js');
+            const root = document.createElement('main');
+            document.body.replaceChildren(root);
+            paper.extraction.results.forEach((r, i) => root.append(resultBox(paper, r, i, {}, () => {})));
+            return [...root.querySelectorAll('section.result')].map((box) => ({
+                fit: box.querySelector('.estimand')?.dataset.fit ?? null,
+                badge: box.querySelector('.estimand .fit .badge')?.textContent ?? null,
+                model: box.querySelector('.estimand dl > div:nth-child(2) dd')?.textContent ?? null,
+                meta: box.querySelector('.result-head .meta')?.textContent ?? null,
+            }));
+        }""", paper if context else {**paper, "context": None})
+
+    missing, unread = shown("missing")
+    assert (missing["fit"], missing["badge"]) == ("same", "Same estimand as planned")
+    assert "quote not found" in missing["model"] and missing["meta"] == "2 quotes to check"
+    assert unread == {"fit": "unread", "badge": "Estimand not read", "model": None, "meta": None}
+    exact, _ = shown("exact")
+    assert "quote not found" not in exact["model"] and exact["meta"] == "1 quote to check"
+    near, _ = shown("approximate")
+    assert "near match" not in near["model"] and near["meta"] == "2 quotes to check"
+    assert [box["fit"] for box in shown("missing", context=False)] == [None, None]
+    page.close()
+
+
+def test_two_analyses_of_one_arm_are_two_rows_each_with_its_estimand(browser, site_url):
+    """A paper reports one arm under two analyses (all randomized, and completers), which the manager read
+    as the planned estimand and as a different one: the need's table gives each its own row and badge,
+    told apart by their analysis, so a completers SD is never shown as the planned estimand's."""
+    from esf.planning import finalize_summary
+    from test_planning import example, summary as make_summary, spec as make_spec
+
+    page = browser.new_page(viewport={"width": 900, "height": 1000})
+    page.goto(site_url)
+    evidence, plan, paper = example(), make_spec(), _paper(1, [])
+    for v in evidence["values"]:
+        v["analysis_population"] = "itt"
+    completers = [{**v, "key": f"V{7 + i}", "result": "R1:1", "estimand": "E2", "analysis_population": "completers", "value": value}
+                  for i, (v, value) in enumerate(zip(evidence["values"][::2], (7.4, 3.6, 41)))]
+    evidence["values"] += completers
+    evidence["estimands"].append({**evidence["estimands"][0], "key": "E2", "result": "R1:1", "vs_plan": "different",
+                                  "differences": ["completers rather than all randomized"]})
+    need = {"need": "The outcome SD", "values": ["V1", "V3", "V7", "V8"], "estimands": "[V3] is as planned; [V8] is not.",
+            "comparison": "[V3] and [V8]."}
+    result = finalize_summary({**make_summary(), "needs": [need]}, evidence, plan)
+    summary = {"status": "done", "result": result, "evidence": evidence, "basis": decisions_basis([paper], {}), "spec_basis": plan}
+    page.evaluate("""async ({summary, spec, papers}) => {
+        const { summaryView } = await import('/lib/review-view.js');
+        const root = document.createElement('main');
+        document.body.replaceChildren(root);
+        root.append(...summaryView({ summary, spec, papers, decisions: {}, overlap: null, linksOf: () => ({}) }));
+    }""", {"summary": summary, "spec": plan, "papers": [paper]})
+    rows = page.locator(".summary-block.need tbody tr")
+    assert rows.count() == 2
+    assert [rows.nth(i).locator("td:nth-child(4) .badge").inner_text() for i in range(2)] == ["Same as planned", "Different"]
+    assert [rows.nth(i).locator("td:nth-child(2) .sub").inner_text() for i in range(2)] == [
+        "12 weeks · ITT, unadjusted", "12 weeks · Completers, unadjusted"]
+    assert [rows.nth(i).locator("td.num").all_inner_texts() for i in range(2)] == [["8", "4"], ["7.4", "3.6"]]
     page.close()
 
 
