@@ -79,6 +79,18 @@ export function resolveChoice(choice, evidence) {
     formula, inputs: keys, input_values: nums };
 }
 
+// What the manager's reading of the selected result's estimand leaves open: no reading, or an estimand
+// that differs from the planned one.
+function estimandNotes(key, evidence) {
+  const reading = (evidence.estimands || []).find((e) => e.key === key);
+  if (!reading) return ["The manager has not read the selected result's estimand and model."];
+  if (reading.vs_plan === 'different') {
+    const how = (reading.differences || []).join('; ');
+    return [`The manager read the selected result's estimand as different from the planned one${how ? `: ${how}.` : '.'}`];
+  }
+  return [];
+}
+
 const empty = (outcome) => ({ outcome, status: 'insufficient_evidence', estimand: '', choice: null, resolved: null,
   justification: 'The head agent did not provide a defensible effect for this outcome.', clinical_importance: 'unknown',
   importance_basis: '', realism: '', evidence_quality: '', assumptions: [], sensitivity: [], nuisance_parameters: [],
@@ -120,6 +132,7 @@ export function finalizeSummary(raw, evidence, spec) {
       const normalize = (s) => s.toLowerCase().split(/\s+/).filter(Boolean).join(' ');
       if (![outcome.name, outcome.measure || ''].map(normalize).includes(normalize(resolved.outcome)) || normalize(resolved.timepoint) !== normalize(outcome.timepoint || '')) notes.push('The source outcome label or timepoint differs from the planned outcome; confirm equivalence.');
       if (source.study_type !== 'rct' || !source.matches_spec) notes.push('The selected report is not a confirmed matching randomized trial; assess applicability.');
+      notes.push(...estimandNotes(vs[0].estimand, evidence));
       if (notes.length) rec.status = 'provisional';
       rec.sensitivity = (rec.sensitivity || []).flatMap((scenario) => {
         try {

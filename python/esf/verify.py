@@ -10,7 +10,7 @@ import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
-from .schemas import OutcomeResult, PaperExtraction
+from .schemas import OutcomeResult, PaperExtraction, StudyContext
 
 _DASHES = dict.fromkeys(map(ord, "−‒–—‐‑﹣－"), "-")
 _NUMBER = re.compile(r"(?<![\d.])-?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)(?!\d)")
@@ -160,6 +160,18 @@ def verify(extraction: PaperExtraction, source_text: str, quotes_reliable: bool 
         report.values.append(checks)
         report.flags += [f"result {index + 1} ({result.outcome_measure}): {f}" for f in plausibility(result)]
     return report
+
+
+def check_context(context: StudyContext, source_text: str) -> dict:
+    """Whether the quotes in the manager's reading of a paper's context are in the paper: 'exact',
+    'approximate' or 'missing' for the sample-size calculation and for each result's model, in the
+    order of context.results; None where there is no quote."""
+    source = Source(source_text)
+
+    def found(quote: str) -> str | None:
+        return source.find_quote(quote) if quote.strip() else None
+
+    return {"sample_size": found(context.sample_size), "results": [found(r.quote) for r in context.results]}
 
 
 def escalation_reasons(extraction: PaperExtraction | None, report: Verification | None) -> list[str]:

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs
 
 import httpx
 
+from esf import prompts
 from esf.schemas import (
     Comparator,
     Criterion,
@@ -23,13 +24,17 @@ from esf.schemas import (
     OutcomeResult,
     PaperExtraction,
     Population,
+    ResultContext,
     ReportedValue,
     ScreenDecision,
     SearchLevel,
     SearchPlan,
     SearchSpec,
+    StudyContext,
     TermGroup,
 )
+
+CONTEXT_INPUT = prompts.CONTEXT_INPUT
 
 PUBMED_XML = """<?xml version="1.0" ?>
 <!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">
@@ -518,6 +523,31 @@ class FakeLLM:
             _value("Mindfulness", "n", 20, ABSTRACT_LINE, "Abstract"),
         ], concerns=["pilot study"])])
 
+    def study_context(self, spec, document, extraction, sink=None):
+        """Reads every result as an ITT ANCOVA, quoting the methods where the fixture has them: the PMC
+        paper says its analyses followed the intention-to-treat principle; the others quote nothing."""
+        self.calls.append("context")
+        pmc = document["title"].startswith("A mindfulness app")
+        review = document["title"].startswith("Mindfulness apps for depressive symptoms")
+        return StudyContext(
+            design="meta-analysis of randomized trials" if review else "two-arm parallel RCT, individually randomized",
+            sample_size="", sample_size_location="",
+            results=[ResultContext(
+                result=i + 1, population="all randomized (ITT)", treatments="mindfulness app vs waitlist",
+                variable=f"{r.outcome_measure} at {r.timepoint}", intercurrent_events="not stated",
+                summary_measure="pooled standardized mean difference" if review else "difference in mean PHQ-9",
+                model="random-effects meta-analysis" if review else "ANCOVA adjusted for baseline",
+                missing_data="not stated",
+                quote="Analyses followed the intention-to-treat principle." if pmc else "",
+                location="Methods" if pmc else "",
+                numbers_are="a standardized effect, no SD" if review else "observed means and SDs at 12 weeks",
+                vs_plan="different" if review else "same",
+                differences=["standardized scale, not PHQ-9 points"] if review else [],
+                use="Gives no SD on the PHQ-9 scale." if review else "The SDs can serve as the outcome SD.",
+            ) for i, r in enumerate(extraction.results)],
+            notes="",
+        )
+
     def check_overlap(self, spec, records, sink=None):
         """Finds what the fixtures hold: a trial and its registry record share a registration number,
         and the meta-analysis cites trials that are also in the set."""
@@ -547,12 +577,17 @@ class FakeLLM:
         self.evidence = evidence
         direct_sds = sorted((v for v in evidence["values"] if v["statistic"] == "sd" and v["relevance"] == "direct"),
                             key=lambda v: v["value"])
+        estimands_by_key = {e["key"]: e for e in evidence["estimands"]}
         needs = []
         for need in spec.statistics_needed:
             keys = [v["key"] for v in evidence["values"] if v["statistic"] in need.statistics and v["relevance"] == "direct"]
             sds = sorted((v for v in evidence["values"] if v["key"] in keys and v["statistic"] == "sd"), key=lambda v: v["value"])
             comparison = f"The SDs run from [{sds[0]['key']}] to [{sds[-1]['key']}]." if sds else "No SD is reported."
-            needs.append(NeedSummary(need=need.purpose, values=keys, comparison=comparison))
+            same = [v["key"] for v in evidence["values"]
+                    if v["key"] in keys and v["estimand"] and estimands_by_key[v["estimand"]]["vs_plan"] == "same"]
+            estimands = (f"[{same[0]}] estimates the planned difference in mean PHQ-9 with an ANCOVA."
+                         if same else "No value estimates the planned quantity.")
+            needs.append(NeedSummary(need=need.purpose, values=keys, estimands=estimands, comparison=comparison))
         effects = [v for v in evidence["values"] if v["statistic"] == "standardized_mean_difference" and v["quote_found"]]
         recommendations = []
         for outcome in spec.outcomes:
@@ -682,6 +717,11 @@ class FakeOpenAI:
             if "Junior reviewer's extraction" in text:
                 return self.llm.adjudicate(SPEC, document, None, ["a flag"])
             return self.llm.extract(SPEC, document)
+        if name == "StudyContext":
+            first = text.split("\n", 1)[0].removeprefix("Document: ").removesuffix(" (the text layer of its PDF)")
+            document = {"title": files[0]["filename"].removesuffix(".pdf") if files else first}
+            extraction = PaperExtraction.model_validate(json.loads(text.split(CONTEXT_INPUT, 1)[1]))
+            return self.llm.study_context(SPEC, document, extraction)
         if name == "OverlapReport":
             return self.llm.check_overlap(SPEC, json.loads(text.split("Records:\n", 1)[1]))
         if name == "EvidenceSummary":

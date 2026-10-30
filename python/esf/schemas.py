@@ -246,7 +246,9 @@ class ReportedValue(BaseModel):
         "Null for other statistics or when the level is not stated. Never assume 95%.",
     )
     describes: str = Field(
-        description="What the number is, e.g. 'PHQ-9 at 12 weeks', '95% CI of the mean difference'."
+        description="What the number is, precisely: observed or model-adjusted, an SD or an SE, the value at follow-up "
+        "or the change from baseline, e.g. 'observed PHQ-9 at 12 weeks', 'least-squares mean change from baseline to "
+        "12 weeks', '95% CI of the adjusted mean difference'."
     )
     quote: str = Field(description="Verbatim text from the document that contains this number.")
     location: str = Field(description="Where it is: 'Table 2', 'Abstract', 'Results, paragraph 3'.")
@@ -311,6 +313,77 @@ class PaperExtraction(BaseModel):
         return data
 
 
+class ResultContext(BaseModel):
+    """What one extracted result estimates and how, as the manager reads it from the paper."""
+
+    result: int = Field(description="Which result of the extraction this is about, by its number (1 for the first).")
+    population: str = Field(
+        description="Who the numbers are about as analyzed, e.g. 'all randomized, missing outcomes imputed', "
+        "'completers at 12 weeks'."
+    )
+    treatments: str = Field(description="The conditions compared, as the paper defines them.")
+    variable: str = Field(
+        description="The endpoint and when it was measured: the value at follow-up, the change from baseline or a "
+        "percent change, e.g. 'change in PHQ-9 from baseline to 8 weeks'."
+    )
+    intercurrent_events: str = Field(
+        description="How the paper handled stopping the intervention, rescue treatment, death and the like, and the "
+        "strategy that amounts to (treatment policy, hypothetical, composite, while on treatment, principal stratum); "
+        "'not stated' if the paper doesn't say."
+    )
+    summary_measure: str = Field(
+        description="The population-level summary the result reports, e.g. 'difference in adjusted mean PHQ-9', "
+        "'odds ratio', 'per-arm means and SDs, no contrast'."
+    )
+    model: str = Field(
+        description="The model or test behind the numbers, with its covariates, strata, random effects or covariance "
+        "structure, e.g. 'MMRM: arm, week, arm by week, baseline PHQ-9; unstructured covariance'; 'descriptive "
+        "summaries' when the numbers come from no model."
+    )
+    missing_data: str = Field(
+        description="How missing outcomes were handled, e.g. 'multiple imputation under MAR', 'complete cases', "
+        "'not stated'."
+    )
+    quote: str = Field(description="Verbatim text from the document's methods that describes the model; empty if it has none.")
+    location: str = Field(description="Where the quote is, e.g. 'Methods, Statistical analysis'; empty with no quote.")
+    numbers_are: str = Field(
+        description="What this result's printed numbers are in terms of the model, e.g. 'observed means and SDs of "
+        "those assessed; the difference and its CI are model-adjusted', 'least-squares means with model-based SEs, "
+        "not SDs'."
+    )
+    vs_plan: Literal["same", "close", "different"] = Field(
+        description="How its estimand compares with the planned study's: same: the same quantity; close: an attribute "
+        "differs in a way that changes little; different: it estimates another quantity."
+    )
+    differences: list[str] = Field(
+        description="Each attribute of the estimand or the model that differs from the plan, and how, e.g. "
+        "'completers rather than all randomized'; empty if none."
+    )
+    use: str = Field(
+        description="What these numbers can and cannot supply for the planned sample-size calculation, and what to "
+        "check or adjust first. Never a number of your own."
+    )
+
+
+class StudyContext(BaseModel):
+    """The statistical context of a paper's extracted numbers."""
+
+    design: str = Field(
+        description="The design as a statistician states it: allocation and its unit, arms and ratio, stratification "
+        "or blocking, blinding, follow-up, e.g. 'two-arm parallel RCT, individually randomized 1:1, stratified by "
+        "site, assessor-blinded, 12-week follow-up'."
+    )
+    sample_size: str = Field(
+        description="The paper's own sample-size calculation, quoted verbatim; empty if it reports none."
+    )
+    sample_size_location: str = Field(description="Where that quote is; empty with no quote.")
+    results: list[ResultContext] = Field(description="One per result of the extraction, in its order.")
+    notes: str = Field(
+        description="Anything else that bears on using these numbers: attrition and whether it differs between arms, "
+        "baseline imbalance, a change of primary outcome, multiplicity; empty if nothing."
+    )
+
+
 class OverlapGroup(BaseModel):
     records: list[str] = Field(description="The records involved, by key (R12, R40).")
     relation: Literal["same_study", "review_includes_study", "reviews_share_studies", "possible_overlap"] = Field(
@@ -333,12 +406,25 @@ class OverlapReport(BaseModel):
 class NeedSummary(BaseModel):
     need: str = Field(description="The effect size to find, as the specification describes it.")
     values: list[str] = Field(
-        description="Keys of the reported values that bear on it (V3, V7), the most directly relevant first; empty if none."
+        description="Keys of the reported values that bear on it (V3, V7), those whose estimand matches the plan first; "
+        "empty if none."
+    )
+    estimands: str = Field(
+        description="What these values estimate and with which model: which estimate the same quantity as the planned "
+        "estimand, how the others differ, and what each difference means for the planned calculation. Values by key "
+        "in brackets, e.g. [V3]."
     )
     comparison: str = Field(
-        description="How these values compare: how closely each matches the plan, how much they vary, the size and "
-        "reporting of their studies, shared participants. Values by key in brackets, e.g. [V3]."
+        description="How these values compare: how much they vary, the size and reporting of their studies, shared "
+        "participants. Values by key in brackets, e.g. [V3]."
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_estimands(cls, data):
+        if isinstance(data, dict) and "estimands" not in data:
+            return {**data, "estimands": ""}
+        return data
 
 
 class EffectChoice(BaseModel):

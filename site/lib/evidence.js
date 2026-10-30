@@ -9,7 +9,9 @@
 // reported more than once (a same_study group) is marked with the record whose numbers to use
 // instead; reviews and the studies they pool are separate studies and are not marked. Nothing is
 // combined across studies. Claude refers to values by key, so every number in a summary comes
-// from here, never from the model.
+// from here, never from the model. Where the manager has read a paper's statistical context, its kept
+// results carry their estimands (E1, E2, ...), each value names its result's, and its record carries the
+// design and the paper's own sample-size calculation as the manager stated them.
 
 const PAPER = -1; // result_index of a decision about the whole paper
 
@@ -49,6 +51,25 @@ function decisionOf(decisions, paperId, index) {
   return chosen ? chosen.decision : null;
 }
 
+// The manager's reading of a paper's statistical context (a StudyContext), when it has one.
+const contextOf = (paper) => (paper.context?.status === 'done' ? paper.context.result : null);
+
+// What the summary is told about a result's estimand, from the manager's reading (ResultContext).
+const ESTIMAND_FIELDS = [
+  'population', 'treatments', 'variable', 'intercurrent_events', 'summary_measure', 'model', 'missing_data',
+  'numbers_are', 'vs_plan', 'differences', 'use',
+];
+
+// The manager's statement of a record's design and its own sample-size calculation, if it read them.
+function recordContext(paper) {
+  const context = contextOf(paper);
+  if (!context) return null;
+  return {
+    design: context.design || '', sample_size: context.sample_size || '',
+    sample_size_found: ['exact', 'approximate'].includes(paper.context.checks?.sample_size), notes: context.notes || '',
+  };
+}
+
 export function buildEvidence(papers, decisions, overlap) {
   const useInstead = new Map(); // record -> the record of the same participants to use instead
   for (const group of overlap?.groups || []) {
@@ -57,12 +78,23 @@ export function buildEvidence(papers, decisions, overlap) {
   }
 
   const values = [];
+  const estimands = [];
   for (const p of extracted(papers)) {
     const checks = p.verification?.values || [];
+    const read = new Map((contextOf(p)?.results || []).map((c) => [c.result, c]));
     p.extraction.results.forEach((r, i) => {
       if (decisionOf(decisions, p.id, i) === 'exclude') return;
       const row = checks[i] || [];
       const sizes = new Map(r.values.filter((v) => v.statistic === 'n').map((v) => [v.group, v.value]));
+      let estimand = null;
+      if (read.has(i + 1)) {
+        estimand = `E${estimands.length + 1}`;
+        const c = read.get(i + 1);
+        estimands.push({
+          key: estimand, record: recordKey(p), result: `${recordKey(p)}:${i}`, outcome: r.outcome_measure, timepoint: r.timepoint,
+          ...Object.fromEntries(ESTIMAND_FIELDS.map((name) => [name, c[name] ?? null])),
+        });
+      }
       r.values.forEach((v, j) => {
         const check = row[j] || null;
         values.push({
@@ -90,6 +122,7 @@ export function buildEvidence(papers, decisions, overlap) {
           location: v.location,
           quote_found: Boolean(check && check.quote !== 'missing' && check.number_in_quote && check.number_in_source),
           same_participants_as: useInstead.get(recordKey(p)) ?? null,
+          estimand,
         });
       });
     });
@@ -108,16 +141,22 @@ export function buildEvidence(papers, decisions, overlap) {
       fulltext_kind: paper.fulltext_kind ?? null, study_type: paper.screen?.study_type ?? null,
       matches_spec: x.matches_spec ?? false, mismatch_reasons: x.mismatch_reasons || [], notes: x.notes || '',
       appraisal: (x.appraisal || []).map((a, i) => ({ ...a, quote_found: ['exact', 'approximate'].includes(paper.verification?.appraisal?.[i]) })),
+      context: recordContext(paper),
     });
   }
-  return { records, values };
+  return { records, estimands: estimands.filter((e) => kept.has(e.record)), values };
 }
 
 // What a summary was based on, to tell when it is out of date: each extracted record, its decisions,
-// and the values it reports (a re-extraction changes them).
+// and the values it reports (a re-extraction changes them), and the manager's reading of its
+// statistical context once there is one.
 export function decisionsBasis(papers, decisions) {
-  return structuredClone(extracted(papers).map((p) => [p.id, p.status,
-    Object.entries(decisions[p.id] || {}).map(([k, d]) => [Number(k), d.decision]).sort((a, b) => a[0] - b[0]),
-    p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value, v.ci_level ?? null])]),
-    p.extraction, p.verification ?? null, p.fulltext_kind ?? null, p.screen ?? null]));
+  return structuredClone(extracted(papers).map((p) => {
+    const row = [p.id, p.status,
+      Object.entries(decisions[p.id] || {}).map(([k, d]) => [Number(k), d.decision]).sort((a, b) => a[0] - b[0]),
+      p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value, v.ci_level ?? null])]),
+      p.extraction, p.verification ?? null, p.fulltext_kind ?? null, p.screen ?? null];
+    if (contextOf(p)) row.push(contextOf(p)); // a summary written before then goes out of date when it is read
+    return row;
+  }));
 }

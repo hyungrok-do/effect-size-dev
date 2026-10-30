@@ -115,6 +115,18 @@ def resolve_choice(choice: dict, evidence: dict) -> dict:
             "formula": formula, "inputs": keys, "input_values": nums}
 
 
+def _estimand_notes(key: str | None, evidence: dict) -> list[str]:
+    """What the manager's reading of the selected result's estimand leaves open: no reading, or an
+    estimand that differs from the planned one."""
+    reading = next((e for e in evidence.get("estimands") or [] if e["key"] == key), None)
+    if reading is None:
+        return ["The manager has not read the selected result's estimand and model."]
+    if reading.get("vs_plan") == "different":
+        how = "; ".join(reading.get("differences") or [])
+        return ["The manager read the selected result's estimand as different from the planned one" + (f": {how}." if how else ".")]
+    return []
+
+
 def _empty(outcome: str) -> dict:
     return {"outcome": outcome, "status": "insufficient_evidence", "estimand": "",
             "choice": None, "resolved": None, "justification": "The head agent did not provide a defensible effect for this outcome.",
@@ -180,6 +192,7 @@ def finalize_summary(result: dict, evidence: dict, spec: dict) -> dict:
                 notes.append("The source outcome label or timepoint differs from the planned outcome; confirm equivalence.")
             if source.get("study_type") != "rct" or not source.get("matches_spec"):
                 notes.append("The selected report is not a confirmed matching randomized trial; assess applicability.")
+            notes += _estimand_notes(vs[0].get("estimand"), evidence)
             if notes:
                 rec["status"] = "provisional"
             scenarios = []

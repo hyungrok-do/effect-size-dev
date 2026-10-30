@@ -137,6 +137,15 @@ export function verify(extraction, sourceText, quotesReliable = true) {
   return report;
 }
 
+// Whether the quotes in the manager's reading of a paper's context are in the paper: 'exact',
+// 'approximate' or 'missing' for the sample-size calculation and for each result's model, in the order
+// of context.results; null where there is no quote.
+export function checkContext(context, sourceText) {
+  const source = new Source(sourceText);
+  const found = (quote) => (quote.trim() ? source.findQuote(quote) : null);
+  return { sample_size: found(context.sample_size), results: context.results.map((r) => found(r.quote)) };
+}
+
 // Why a worker extraction should go to the manager; empty if it can stand.
 export function escalationReasons(extraction, report) {
   if (!extraction || !report) return ['the worker could not complete the extraction'];

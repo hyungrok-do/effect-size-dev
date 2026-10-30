@@ -21,12 +21,15 @@ def example(binary=False):
     values = [dict(key=f'V{i+1}', record='R1', result='R1:0', outcome='PHQ-9' if not binary else 'Response',
                    timepoint='12 weeks', group=g, statistic=st, value=n, describes='Endpoint', quote_found=True,
                    flags=[], decision='include', independent_groups=True, adjusted='unadjusted',
-                   outcome_type='binary' if binary else 'continuous', relevance='direct', confidence='high', concerns=[])
+                   outcome_type='binary' if binary else 'continuous', relevance='direct', confidence='high', concerns=[],
+                   estimand='E1')
               for i, (g, st, n) in enumerate(data)]
+    # The manager's reading of the result: the same estimand as planned.
+    estimands = [dict(key='E1', record='R1', result='R1:0', vs_plan='same', differences=[])]
     records = [dict(key='R1', design='parallel RCT', fulltext_kind='pmc_xml', study_type='rct', matches_spec=True,
                     appraisal=[dict(domain=d, quote_found=True) for d in
                                ['randomization', 'deviations', 'missing_outcomes', 'measurement', 'selective_reporting']])]
-    return {'records': records, 'values': values}
+    return {'records': records, 'estimands': estimands, 'values': values}
 
 
 def choice(method='mean_difference', target=None):
@@ -142,9 +145,12 @@ def test_planning_judgment_is_separate_from_observed_effect():
         resolve_choice(choice('risk_difference', target=-2), example(True))
 
 
-@pytest.mark.parametrize('change', ['none', 'importance', 'unreviewed', 'abstract', 'outcome', 'invalid', 'noninferiority', 'omitted'])
+@pytest.mark.parametrize('change', ['none', 'importance', 'unreviewed', 'abstract', 'outcome', 'invalid', 'noninferiority', 'omitted',
+                                    'unread', 'different_estimand'])
 def test_final_recommendation_validation_and_browser_parity(change):
     evidence, plan, raw = example(), spec(), summary()
+    if change == 'unread': evidence['estimands'] = []
+    if change == 'different_estimand': evidence['estimands'][0].update(vs_plan='different', differences=['completers rather than all randomized'])
     if change == 'importance': plan['planning']['clinical_importance'] = ''
     if change == 'unreviewed': evidence['values'][0]['decision'] = None
     if change == 'abstract': evidence['records'][0]['fulltext_kind'] = 'abstract'
@@ -159,6 +165,11 @@ def test_final_recommendation_validation_and_browser_parity(change):
     assert rec['status'] == expected
     assert (rec['resolved'] is None) == (expected == 'insufficient_evidence')
     assert actual['overview'] == raw['overview']
+    if change == 'unread':
+        assert "has not read the selected result's estimand and model" in rec['validation_notes'][-1]
+    if change == 'different_estimand':
+        assert rec['validation_notes'][-1] == ("The manager read the selected result's estimand as different from the planned one: "
+                                               "completers rather than all randomized.")
 
 
 def test_scenarios_match_metric_and_keep_their_assumptions():

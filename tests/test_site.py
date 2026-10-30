@@ -26,10 +26,10 @@ from esf.config import REPO_ROOT
 from esf.jats import jats_to_text
 from esf.sources import clean_affiliations, europepmc_pmid, europepmc_record, europepmc_url, parse_pubmed_xml, trial_results_text
 from esf.evidence import build_evidence, decisions_basis, overlap_records
-from esf.schemas import upgrade_spec
+from esf.schemas import PaperExtraction, upgrade_spec
 from esf.verify import in_audit_sample, numbers_in, verify
 from fixtures import (
-    ABSTRACT_LINE, EUROPEPMC, EUROPEPMC_QUERY, JATS, PDF_LINE, PLAN, PMC_ONLY, PREPRINT, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL,
+    ABSTRACT_LINE, CONTEXT_INPUT, EUROPEPMC, EUROPEPMC_QUERY, JATS, PDF_LINE, PLAN, PMC_ONLY, PREPRINT, PUBMED_XML, REVIEW_FILTER, SPEC, TRIAL,
     FakeLLM, FakeOpenAI, LiteratureAPIs, _extraction, _result, _value, make_pdf, streamed,
 )
 
@@ -223,6 +223,9 @@ class Network:
             return self.llm.extract(None, content[0]).model_dump()
         if system.startswith(prompts.ADJUDICATE):
             return self.llm.adjudicate(None, content[0], None, ["flag"]).model_dump()
+        if system.startswith(prompts.CONTEXT):
+            extraction = PaperExtraction.model_validate(json.loads(content[1]["text"].split(CONTEXT_INPUT, 1)[1]))
+            return self.llm.study_context(SPEC, content[0], extraction).model_dump()
         raise AssertionError(f"unexpected prompt: {system[:60]}")
 
     def search_turn(self, body):

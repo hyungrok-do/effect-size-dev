@@ -10,6 +10,10 @@ reviews and the studies they pool are separate studies and are not marked. Nothi
 studies. Claude refers to values by key, so every number in a summary comes from
 here, never from the model.
 
+Where the manager has read a paper's statistical context, its kept results carry their estimands
+(E1, E2, ...), each value names its result's, and its record carries the design and the paper's own
+sample-size calculation as the manager stated them.
+
 Mirrors site/lib/evidence.js; the tests require identical output.
 """
 
@@ -65,6 +69,19 @@ def _decision(decisions: dict, paper_id: Any, index: int) -> str | None:
     return chosen.get("decision") if chosen else None
 
 
+def _context(paper: dict) -> dict | None:
+    """The manager's reading of a paper's statistical context (a StudyContext), when it has one."""
+    context = paper.get("context") or {}
+    return context.get("result") if context.get("status") == "done" else None
+
+
+# What the summary is told about a result's estimand, from the manager's reading (ResultContext).
+ESTIMAND_FIELDS = (
+    "population", "treatments", "variable", "intercurrent_events", "summary_measure", "model", "missing_data",
+    "numbers_are", "vs_plan", "differences", "use",
+)
+
+
 def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) -> dict:
     use_instead: dict[str, str] = {}  # record -> the record of the same participants to use instead
     for group in (overlap or {}).get("groups") or []:
@@ -74,13 +91,23 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                     use_instead.setdefault(r, group["use"])
 
     values: list[dict] = []
+    estimands: list[dict] = []
     for p in _extracted(papers):
         checks = (p.get("verification") or {}).get("values") or []
+        read = {c["result"]: c for c in (_context(p) or {}).get("results") or []}
         for i, r in enumerate(p["extraction"]["results"]):
             if _decision(decisions, p["id"], i) == "exclude":
                 continue
             row = checks[i] if i < len(checks) else []
             sizes = {v["group"]: v["value"] for v in r["values"] if v["statistic"] == "n"}
+            estimand = None
+            if i + 1 in read:
+                estimand = f"E{len(estimands) + 1}"
+                estimands.append({
+                    "key": estimand, "record": record_key(p), "result": f"{record_key(p)}:{i}",
+                    "outcome": r["outcome_measure"], "timepoint": r["timepoint"],
+                    **{name: read[i + 1].get(name) for name in ESTIMAND_FIELDS},
+                })
             for j, v in enumerate(r["values"]):
                 check = row[j] if j < len(row) else None
                 values.append({
@@ -109,6 +136,7 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                     "quote_found": bool(check and check["quote"] != "missing" and check["number_in_quote"]
                                         and check["number_in_source"]),
                     "same_participants_as": use_instead.get(record_key(p)),
+                    "estimand": estimand,
                 })
     kept = {v["record"] for v in values}
     # Importance/anchor studies can contribute methodological evidence without a usable effect.
@@ -132,15 +160,33 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
             "notes": extraction.get("notes") or "",
             "appraisal": [{**a, "quote_found": i < len(checks) and checks[i] in ("exact", "approximate")}
                           for i, a in enumerate(extraction.get("appraisal") or [])],
+            "context": _record_context(paper),
         })
-    return {"records": records, "values": values}
+    return {"records": records, "estimands": [e for e in estimands if e["record"] in kept], "values": values}
+
+
+def _record_context(paper: dict) -> dict | None:
+    """The manager's statement of a record's design and its own sample-size calculation, if it read them."""
+    context = _context(paper)
+    if context is None:
+        return None
+    found = ((paper.get("context") or {}).get("checks") or {}).get("sample_size")
+    return {"design": context.get("design") or "", "sample_size": context.get("sample_size") or "",
+            "sample_size_found": found in ("exact", "approximate"), "notes": context.get("notes") or ""}
 
 
 def decisions_basis(papers: list[dict], decisions: dict) -> list:
     """What a summary was based on, to tell when it is out of date: each extracted record, its
-    decisions, and the values it reports (a re-extraction changes them)."""
-    return deepcopy([[p["id"], p["status"], _decision_list(decisions, p["id"]), _values_of(p), p["extraction"],
-                      p.get("verification"), p.get("fulltext_kind"), p.get("screen")] for p in _extracted(papers)])
+    decisions, and the values it reports (a re-extraction changes them), and the manager's reading of
+    its statistical context once there is one."""
+    rows = []
+    for p in _extracted(papers):
+        row = [p["id"], p["status"], _decision_list(decisions, p["id"]), _values_of(p), p["extraction"],
+               p.get("verification"), p.get("fulltext_kind"), p.get("screen")]
+        if _context(p) is not None:  # a summary written before then goes out of date when it is read
+            row.append(_context(p))
+        rows.append(row)
+    return deepcopy(rows)
 
 
 def _values_of(paper: dict) -> list:
