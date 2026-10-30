@@ -1,12 +1,12 @@
 """OpenAI models through the Responses API: the same steps, prompts and schemas as ClaudeLLM.
 
-The manager model reads the problem, plans the search, checks overlap, summarizes and adjudicates;
-the worker model screens every record and extracts every paper. In the local edition the calls run
-on the user's ChatGPT plan (Sign in with ChatGPT, see chatgpt.py), so every request keeps to what
-plan usage accepts: not stored and streamed, the system prompt in `instructions`, no cap on output
-tokens or sampling settings, and the search agent's tools grouped in a namespace. An ordinary API
-key accepts the same requests. As with Claude, the models only read and quote; code does any
-arithmetic.
+The manager model reads the problem, plans the search, checks overlap, summarizes, adjudicates and
+reads each paper's statistical context; the worker model screens every record and extracts every
+paper. In the local edition the calls run on the user's ChatGPT plan (Sign in with ChatGPT, see
+chatgpt.py), so every request keeps to what plan usage accepts: not stored and streamed, the system
+prompt in `instructions`, no cap on output tokens or sampling settings, and the search agent's tools
+grouped in a namespace. An ordinary API key accepts the same requests. As with Claude, the models
+only read and quote; code does any arithmetic.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from pydantic import BaseModel
 from . import prompts
 from .config import Settings
 from .fulltext import FullText
-from .llm import ModelDeclined, ModelTruncated, SearchToolbox, UsageSink, output_schema, search_tools
-from .schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchPlan, SearchSpec
+from .llm import ModelDeclined, ModelTruncated, SearchToolbox, UsageSink, context_input, output_schema, search_tools, summary_input
+from .schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchPlan, SearchSpec, StudyContext
 
 API = "https://api.openai.com/v1"
 TOOL_NAMESPACE = "literature"
@@ -419,8 +419,8 @@ class OpenAILLM:
         return output_format.model_validate_json(output_text(response))
 
     def document(self, fulltext: FullText, title: str) -> dict:
-        """The paper for extract() and adjudicate(): Claude's document block, with a PDF's text layer
-        kept beside it for when plan usage won't take the file."""
+        """The paper for extract(), adjudicate() and study_context(): Claude's document block, with a
+        PDF's text layer kept beside it for when plan usage won't take the file."""
         block = fulltext.document_block(title)
         if fulltext.pdf is not None:
             block["text"] = fulltext.text
@@ -472,12 +472,11 @@ class OpenAILLM:
         )
 
     def summarize(self, spec: SearchSpec, overlap: dict, evidence: dict, sink: UsageSink | None = None) -> EvidenceSummary:
-        data = {"records": evidence["records"], "overlap": overlap, "values": evidence["values"]}
         return self._parse(
             step="summarize",
             manager=True,
             system=prompts.SUMMARIZE + "\n\nSpecification:\n" + spec.model_dump_json(indent=2),
-            content=[{"type": "text", "text": "Records, the overlap check and the values:\n" + json.dumps(data, indent=1, ensure_ascii=False)}],
+            content=[{"type": "text", "text": summary_input(overlap, evidence)}],
             output_format=EvidenceSummary,
             effort="high",
             sink=sink,
@@ -500,6 +499,19 @@ class OpenAILLM:
             content=[document, {"type": "text", "text": text}],
             output_format=PaperExtraction,
             effort="xhigh",
+            sink=sink,
+        )
+
+    def study_context(
+        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None
+    ) -> StudyContext:
+        return self._parse(
+            step="context",
+            manager=True,
+            system=prompts.CONTEXT + "\n\nSpecification:\n" + spec.model_dump_json(indent=2),
+            content=[document, {"type": "text", "text": context_input(extraction)}],
+            output_format=StudyContext,
+            effort="high",
             sink=sink,
         )
 

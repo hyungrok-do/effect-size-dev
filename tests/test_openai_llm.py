@@ -8,18 +8,20 @@ import json
 import httpx
 import pytest
 
+from esf import prompts
 from esf.config import Settings
 from esf.fulltext import FullText
-from esf.llm import ModelDeclined, ModelTruncated, describe_error, output_schema, search_tools
+from esf.llm import ModelDeclined, ModelTruncated, context_input, describe_error, output_schema, search_tools
 from esf.openai_llm import OpenAIError, OpenAILLM, at_most, effort_for, function_tools, input_content, strict_schema
 from esf.pipeline import Pipeline
-from esf.schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchSpec
+from esf.schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchSpec, StudyContext
 from esf.sources import Sources
 from esf.store import Store
 from fixtures import (
     EUROPEPMC_QUERY,
     PLAN,
     SPEC,
+    FakeLLM,
     FakeOpenAI,
     LiteratureAPIs,
     function_call_item,
@@ -107,6 +109,45 @@ def test_manager_steps_run_on_the_manager_model_at_the_effort_it_takes():
     assert spec["reasoning"] == {"effort": "high"} and adjudicate["reasoning"] == {"effort": "high"}
     assert "None: the junior reviewer" in adjudicate["input"][0]["content"][1]["text"]
     assert effort_for("xhigh", None) == "xhigh" and effort_for("medium", ["high", "xhigh"]) == "high"
+
+
+@pytest.mark.parametrize("plan", [True, False])
+def test_the_manager_reads_the_context_from_the_document_then_the_numbered_extraction(plan):
+    extraction = PaperExtraction.model_validate(EXTRACTION)
+    reading = FakeLLM().study_context(SPEC, {"title": "A trial"}, extraction)
+    api = Scripted([answer(reading.model_dump(), "gpt-6.1-sol")])
+    llm = make_llm(api, namespaced_tools=plan)
+    document = {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "PHQ-9 8.1 (4.2)"}, "title": "A trial"}
+    usage = []
+    assert llm.study_context(SPEC, document, extraction, sink=lambda step, model, u: usage.append((step, model))) == reading
+    [(_, body)] = api.requests
+    check_plan_usage_rules(body)
+    assert body["model"] == "gpt-6.1-sol" and body["reasoning"] == {"effort": "high"}
+    assert body["text"]["format"] == {"type": "json_schema", "name": "StudyContext", "schema": output_schema(StudyContext), "strict": True}
+    assert body["instructions"] == prompts.CONTEXT + "\n\nSpecification:\n" + SPEC.model_dump_json(indent=2)
+    assert body["input"] == [{"role": "user", "content": [
+        {"type": "input_text", "text": "Document: A trial\n\nPHQ-9 8.1 (4.2)"},
+        {"type": "input_text", "text": context_input(extraction)},
+    ]}]
+    assert context_input(extraction).startswith(prompts.CONTEXT_INPUT + '{\n "study_design": "RCT"')
+    assert '"results": [\n  {\n   "result": 1,\n   "outcome_measure": "PHQ-9"' in context_input(extraction)
+    assert usage == [("context", "gpt-6.1-sol")]
+
+
+def test_the_summary_is_given_the_estimands_of_the_results():
+    summary = {"overview": "One trial.", "needs": [], "overlap": "", "caveats": [], "gaps": []}
+    api = Scripted([answer(summary, "gpt-6.1-sol")])
+    evidence = {"records": [{"key": "R1", "context": {"design": "RCT", "sample_size": "", "sample_size_found": False, "notes": ""}}],
+                "estimands": [{"key": "E1", "record": "R1", "result": "R1:0"}],
+                "values": [{"key": "V1", "result": "R1:0", "estimand": "E1"}]}
+    make_llm(api).summarize(SPEC, {"groups": [], "notes": ""}, evidence)
+    [(_, body)] = api.requests
+    assert body["model"] == "gpt-6.1-sol" and body["instructions"].startswith(prompts.SUMMARIZE)
+    [part] = body["input"][0]["content"]
+    header, data = part["text"].split("\n", 1)
+    assert header == "Records, the estimands of their results, the overlap check and the values:"
+    assert list(json.loads(data)) == ["records", "estimands", "overlap", "values"]
+    assert json.loads(data)["estimands"] == evidence["estimands"] and json.loads(data)["records"] == evidence["records"]
 
 
 @pytest.mark.parametrize("plan", [True, False])
@@ -296,7 +337,7 @@ def test_tools_can_go_without_a_namespace_for_an_api_key():
 
 def test_strict_schemas():
     # The structured outputs already meet strict mode, so they go as Claude gets them.
-    for model in (SearchSpec, ScreenDecision, PaperExtraction, OverlapReport, EvidenceSummary):
+    for model in (SearchSpec, ScreenDecision, PaperExtraction, StudyContext, OverlapReport, EvidenceSummary):
         assert strict_schema(output_schema(model)) == output_schema(model), model.__name__
     schema = {"type": "object", "properties": {"q": {"type": "string"}, "n": {"type": "integer", "default": 20},
                                                "level": {"$ref": "#/$defs/L"}},
@@ -334,6 +375,14 @@ def test_a_whole_search_runs_on_openai_models(tmp_path):
     assert api.tool_outputs["c1"].startswith("#1 4 | mindfulness[tiab]")
     assert "| PPR | preprint |" in api.tool_outputs["c2"] and EUROPEPMC_QUERY
     assert api.llm.calls.count("screen") == 9 and api.llm.calls.count("extract") == 8 and api.llm.calls.count("search-turn") == 3
+    # The manager read every extracted paper's context, the PDF's too, and named the model it ran on.
+    assert api.llm.calls.count("context") == 8
+    contexts = {key: p["context"] for key, p in papers.items() if p["status"] == "extracted"}
+    assert all(c["status"] == "done" and c["model"] == "gpt-6.1-sol" for c in contexts.values())
+    assert contexts["11111111"]["checks"] == {"sample_size": None, "results": ["exact"]}
+    pdf = [p for _, body in api.requests if body.get("text", {}).get("format", {}).get("name") == "StudyContext"
+           for p in body["input"][0]["content"] if p["type"] == "input_file"]
+    assert len(pdf) == 1 and pdf[0]["filename"].startswith("Brief mindfulness")
 
     # The open-access PDF went as a file.
     files = [p for _, body in api.requests if "text" in body for p in body["input"][0]["content"] if p["type"] == "input_file"]
@@ -342,10 +391,13 @@ def test_a_whole_search_runs_on_openai_models(tmp_path):
         check_plan_usage_rules(body)
     models = {(u["step"], u["model"]) for u in store.usage(project_id)}
     assert ("screen", "gpt-6-luna") in models and ("spec", "gpt-6.1-sol") in models and ("adjudicate", "gpt-6.1-sol") in models
+    assert ("context", "gpt-6.1-sol") in models
 
     pipeline.check_overlap(project_id)
     pipeline.summarize(project_id)
-    assert store.project(project_id)["summary"]["status"] == "done"
+    summary = store.project(project_id)["summary"]
+    assert summary["status"] == "done" and summary["evidence"]["estimands"]
+    assert summary["result"]["needs"][0]["estimands"].startswith("[V")
 
 
 def test_a_used_up_plan_stops_the_run(tmp_path):

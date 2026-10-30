@@ -244,10 +244,17 @@ def _links(paper: dict) -> dict[str, str]:
 
 EXPORT_COLUMNS = [
     "paper_id", "source", "id", "doi", "title", "year", "text_used", "extracted_by", "result", "outcome_measure",
-    "timepoint", "analysis_population", "adjusted", "relevance", "confidence", "group", "statistic", "value",
-    "ci_level", "describes", "quote", "location", "quote_check", "number_in_quote", "concerns", "flags", "decision",
-    "decision_reason",
+    "timepoint", "analysis_population", "adjusted", "relevance", "confidence", "design", "estimand_population",
+    "estimand_treatments", "estimand_variable", "intercurrent_events", "summary_measure", "model", "missing_data",
+    "numbers_are", "vs_plan", "differences", "group", "statistic", "value", "ci_level", "describes", "quote", "location",
+    "quote_check", "number_in_quote", "concerns", "flags", "decision", "decision_reason",
 ]
+# The export's columns from the manager's reading of a result (ResultContext), by the field they come from.
+CONTEXT_COLUMNS = {
+    "estimand_population": "population", "estimand_treatments": "treatments", "estimand_variable": "variable",
+    "intercurrent_events": "intercurrent_events", "summary_measure": "summary_measure", "model": "model",
+    "missing_data": "missing_data", "numbers_are": "numbers_are", "vs_plan": "vs_plan",
+}
 
 
 # A spreadsheet runs a cell that starts with one of these as a formula, so such text (a quote from a
@@ -271,11 +278,21 @@ def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict
         checks = (paper["verification"] or {}).get("values", [])
         flags = (paper["verification"] or {}).get("flags", [])
         paper_decisions = decisions.get(paper["id"], {})
+        context = paper.get("context") or {}
+        study = context["result"] if context.get("status") == "done" else {}
+        read = {c["result"]: c for c in study.get("results") or []}
         for index, result in enumerate(extraction.get("results", [])):
             decision = effective_decision(paper_decisions, index)
             if included_only and (decision or {}).get("decision") != "include":
                 continue
             prefix = f"result {index + 1} "
+            # The manager's reading of the study and of this result; empty where it has none.
+            reading = read.get(index + 1)
+            statistics = {
+                "design": study["design"] if reading else "",
+                **{column: reading[field] if reading else "" for column, field in CONTEXT_COLUMNS.items()},
+                "differences": "; ".join(reading["differences"]) if reading else "",
+            }
             for value_index, value in enumerate(result["values"]):
                 check = checks[index][value_index] if index < len(checks) and value_index < len(checks[index]) else {}
                 rows.append(
@@ -295,6 +312,7 @@ def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict
                         "adjusted": result["adjusted"],
                         "relevance": result["relevance"],
                         "confidence": result["confidence"],
+                        **statistics,
                         "group": value["group"],
                         "statistic": value["statistic"],
                         "value": value["value"],
@@ -667,8 +685,32 @@ def create_app(
         spec = SearchSpec.model_validate(upgrade_spec(project["spec"]))
         job = pipeline_for(agents)
         store.clear_decisions(paper_id)
-        store.update_paper(paper_id, status="fetching", error=None)
+        store.update_paper(paper_id, status="fetching", error=None, context=None)
         submit(f"paper-{paper_id}", lambda: job.extract_paper(project_id, spec, paper_id))
+        return {"ok": True}
+
+    @app.post("/api/projects/{project_id}/papers/{paper_id}/context", status_code=202)
+    def read_context(project_id: str, paper_id: int, agents: Agents = Depends(agents_headers)) -> dict:
+        """The manager reads the estimands and models of a paper extracted without them: in an older
+        project, or after the reading failed."""
+        project = get_project(project_id)
+        paper = get_paper(project_id, paper_id)
+        if project["status"] in RUNNING:
+            raise HTTPException(409, "Wait until the current run finishes.")
+        if paper["status"] != "extracted":
+            raise HTTPException(400, "Extract this paper first.")
+        if not (paper["extraction"] or {}).get("results"):
+            raise HTTPException(400, "This paper's extraction has no results to read.")
+        if (paper.get("context") or {}).get("status") == "running":
+            raise HTTPException(409, "The manager is already reading this paper.")
+        job = pipeline_for(agents)
+        store.update_paper(paper_id, context={"status": "running"})
+        try:
+            # The same job key as extraction: the paper is read or extracted, not both at once.
+            submit(f"paper-{paper_id}", lambda: job.read_context(project_id, paper_id))
+        except HTTPException:
+            store.update_paper(paper_id, context=paper.get("context"))
+            raise
         return {"ok": True}
 
     @app.get("/api/projects/{project_id}/papers/{paper_id}/authors")
