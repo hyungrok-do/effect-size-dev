@@ -1,7 +1,8 @@
 // The review, one paper at a time, what the overlap check found, and the summary, drawn for both
-// pages (site/app.js and web/app.js), which share the markup they fill. Every number in a summary
-// comes from the papers through evidence.js: the model's text refers to values by key, e.g. [V3],
-// and is shown here with their numbers. Styles are in review.css.
+// pages (site/app.js and web/app.js), which share the markup they fill. Each result shows what it
+// estimates and with which model, as the manager read them, before its numbers. Every number in a
+// summary comes from the papers through evidence.js: the model's text refers to values by key, e.g.
+// [V3], and is shown here with their numbers. Styles are in review.css.
 
 import { cleanAffiliations } from './affiliations.js';
 import { decisionsBasis } from './evidence.js';
@@ -136,6 +137,86 @@ export function overlapNote(paper, report, papers) {
       `${RELATIONS[g.relation]?.[0] || g.relation}: ${others.join(', ')}. `,
       g.use === mine ? 'Use this record’s numbers.' : g.use ? `Use the numbers of ${g.use} instead.` : '');
   }));
+}
+
+// -- a paper's statistical context ---------------------------------------------------------
+
+// How a result's estimand compares with the planned one, as the manager judged it: on the result, and
+// in the summary, beside a recommendation's calculation and in its tables.
+const FIT = {
+  same: ['Same estimand as planned', 'Same as planned', 'ok'],
+  close: ['Close to the planned estimand', 'Close to planned', 'warn'],
+  different: ['Different estimand', 'Different', 'err'],
+};
+// The attributes of an estimand (ICH E9(R1)).
+const ATTRIBUTES = [
+  ['population', 'Population'], ['treatments', 'Treatments'], ['variable', 'Variable'],
+  ['intercurrent_events', 'Intercurrent events'], ['summary_measure', 'Summary measure'],
+];
+
+// Whether a quote of the manager's was found in the paper (checkContext in verify.js); nothing without one.
+function contextCheck(found) {
+  if (found === 'exact') return badge('quote found', 'ok');
+  if (found === 'approximate') return badge('near match', 'warn');
+  return found === 'missing' ? badge('quote not found', 'err') : null;
+}
+
+// The manager's reading of one result ({read, check}: its ResultContext and its quote's check), or null.
+function contextOf(paper, index) {
+  if (paper.context?.status !== 'done') return null;
+  const results = paper.context.result.results;
+  const at = results.findIndex((c) => c.result === index + 1);
+  return at < 0 ? null : { read: results[at], check: paper.context.checks?.results?.[at] ?? null };
+}
+
+// A paper's statistical context, under its header: the design as a statistician states it, the paper's
+// own sample-size calculation, quoted with where it is and whether the quote was found, and anything
+// else that bears on using its numbers. Until the manager has read it (paper.context), a line says it
+// is reading it, or a button asks it to: `read()`, null while the page may not start that (a search
+// is running). Nothing for a paper with no results.
+export function studyContext(paper, { read = null } = {}) {
+  if (paper.status !== 'extracted' || !paper.extraction?.results.length) return null;
+  const context = paper.context;
+  const ask = (label) => read && h('button', { type: 'button', class: 'secondary small', onclick: read }, label);
+  if (context?.status === 'done') {
+    const c = context.result;
+    const row = (term, ...value) => h('div', {}, h('dt', {}, term), h('dd', {}, ...value));
+    return h('dl', { class: 'study-context' },
+      row('Design', c.design),
+      c.sample_size && row('Sample-size calculation', h('q', {}, c.sample_size), ' ',
+        c.sample_size_location && h('span', { class: 'where' }, c.sample_size_location), ' ', contextCheck(context.checks?.sample_size)),
+      c.notes && row('Notes', c.notes));
+  }
+  if (context?.status === 'running') {
+    return h('p', { class: 'study-context pending', role: 'status' }, 'The manager is reading the estimand and model…');
+  }
+  if (context?.status === 'error') {
+    return h('div', { class: 'study-context pending' },
+      h('p', {}, badge('Not read', 'warn'), ` Reading the estimand and model failed: ${context.error}`),
+      ask('Read the estimand and model again'));
+  }
+  return h('div', { class: 'study-context pending' },
+    h('p', {}, 'The manager has not yet read what these results estimate, or with which model.'),
+    ask('Read the estimand and model'));
+}
+
+// What a result estimates and with which model, under its heading and before its numbers: how its
+// estimand compares with the planned one and how it differs, its five attributes, the model and its
+// handling of missing data, what the printed numbers are in terms of that model, and what they can do
+// for the planned calculation.
+function estimandBlock(read) {
+  const [label, , kind] = FIT[read.vs_plan] || [read.vs_plan, '', ''];
+  const row = (term, ...value) => h('div', {}, h('dt', {}, term), h('dd', {}, ...value));
+  return h('div', { class: 'estimand', 'data-fit': read.vs_plan },
+    h('div', { class: 'fit' }, badge(label, kind),
+      read.differences.length > 0 && h('ul', { class: 'differences' }, read.differences.map((d) => h('li', {}, d)))),
+    h('dl', {},
+      row('Estimand', h('span', { class: 'attributes' }, ATTRIBUTES.map(([key, name]) => h('span', {},
+        h('span', { class: 'k' }, name), h('span', {}, read[key] || '—'))))),
+      row('Model', read.model,
+        read.missing_data && h('span', { class: 'missing-data' }, h('span', { class: 'k' }, 'Missing data'), ' ', read.missing_data)),
+      row('The numbers are', read.numbers_are),
+      row('For the planned calculation', read.use)));
 }
 
 // -- a paper's citation ----------------------------------------------------------------
@@ -352,8 +433,9 @@ function checkBadge(check) {
   return check.number_in_source ? badge('number in text, quote not matched', 'warn') : badge('not found', 'err');
 }
 
-// A result for review: what was measured and when, Include and Exclude, a line per group (mean ± SD,
-// n), and a warning only when there is one; the quotes and their checks are folded away.
+// A result for review: what was measured and when, Include and Exclude, what it estimates and with
+// which model (once the manager has read them), a line per group (mean ± SD, n), and a warning only
+// when there is one; the quotes and their checks, the model's among them, are folded away.
 // `decisions` is the paper's {resultIndex: {decision, reason}}; `decide(index, decision, reason)`
 // records one (a null decision clears it).
 export function resultBox(paper, result, index, decisions, decide) {
@@ -365,6 +447,7 @@ export function resultBox(paper, result, index, decisions, decide) {
     .map((f) => f.replace(/^result \d+ \([^)]*\): /, ''));
   const notes = [...result.concerns, ...flags];
   const unchecked = toCheck(checks);
+  const context = contextOf(paper, index);
 
   const reason = h('select', {
     'aria-label': 'Reason for excluding', hidden: decision !== 'exclude' || null,
@@ -399,11 +482,14 @@ export function resultBox(paper, result, index, decisions, decide) {
 
   return h('section', { class: 'result', 'data-decision': decision || null },
     head,
+    context && estimandBlock(context.read),
     resultLines(result),
     notes.length > 0 && h('p', { class: 'flags' }, notes.join(' · ')),
     foldable(`quotes:${paper.id}:${index}`, { class: 'quotes' }, 'Quotes',
       h('p', { class: 'reason' }, [POPULATIONS[result.analysis_population] || result.analysis_population,
         result.adjusted !== 'unclear' && result.adjusted, `${result.confidence} confidence`].filter(Boolean).join(' · ')),
+      context?.read.quote && h('p', { class: 'model-quote' }, h('span', { class: 'k' }, 'Model'), ' ', h('q', {}, context.read.quote), ' ',
+        context.read.location && h('span', { class: 'where' }, context.read.location), ' ', contextCheck(context.check)),
       h('div', { class: 'table-wrap' }, h('table', {},
         h('thead', {}, h('tr', {}, ['Group', 'Statistic', 'Value', 'Quote', 'Check'].map((t) => h('th', { scope: 'col' }, t)))),
         h('tbody', {}, rows)))));
@@ -454,10 +540,40 @@ function withValues(text, values, study) {
   });
 }
 
+// A value's estimand (`estimands` maps E1, E2, ... to the evidence's estimands): how it compares with
+// the planned one, with how it differs and the model on hover. A dash for a value from a result the
+// manager has not read.
+function estimandCell(v, estimands) {
+  const e = estimands.get(v.estimand);
+  if (!e) return h('td', { class: 'muted', title: 'Not read' }, '—');
+  const [, label, kind] = FIT[e.vs_plan] || ['', e.vs_plan, ''];
+  const why = e.differences?.length ? e.differences
+    : [e.vs_plan === 'same' ? 'The same quantity as the planned estimand' : 'No difference listed'];
+  return h('td', {}, h('span', { class: `badge fit ${kind}`.trim(), title: [...why, e.model && `Model: ${e.model}`].filter(Boolean).join('\n') }, label));
+}
+
+// What a recommendation's source result estimates, as the manager read it, beside its calculation: how
+// its estimand compares with the planned one, how it differs, and the model behind its numbers; or that
+// the manager has not read it. `readings` maps E1, E2, ... to the evidence's estimands, and is null for
+// a summary written before the manager read them, which shows nothing here.
+function sourceEstimand(effect, values, readings) {
+  if (!readings) return null;
+  const e = readings.get(values.get(effect.inputs[0])?.estimand);
+  if (!e) {
+    return h('div', { class: 'source-estimand', 'data-fit': 'unread' }, h('div', { class: 'fit' },
+      badge('Estimand not read', 'warn'), h('span', { class: 'muted small' }, 'What the source result estimates, and with which model, is unknown.')));
+  }
+  const [label, , kind] = FIT[e.vs_plan] || [e.vs_plan, '', ''];
+  return h('div', { class: 'source-estimand', 'data-fit': e.vs_plan },
+    h('div', { class: 'fit' }, badge(label, kind),
+      e.differences?.length > 0 && h('ul', { class: 'differences' }, e.differences.map((d) => h('li', {}, d)))),
+    e.model && h('p', { class: 'model' }, h('span', { class: 'k' }, 'Model'), ' ', e.model));
+}
+
 // The values for one effect size to find, one row per study arm (record, outcome, timepoint and group)
-// and a column per statistic, in the order the summary lists them. A value whose quote was not found
-// is marked in its cell and in the row's check.
-function armTable(list, study) {
+// and a column per statistic, in the order the summary lists them, with the estimand of each when the
+// manager has read them. A value whose quote was not found is marked in its cell and in the row's check.
+function armTable(list, study, estimands) {
   const rows = new Map();
   for (const v of list) {
     const id = JSON.stringify([v.record, v.outcome, v.timepoint, v.group]);
@@ -468,13 +584,15 @@ function armTable(list, study) {
   }
   const statistics = Object.keys(STATISTICS).filter((st) => list.some((v) => v.statistic === st));
   return h('div', { class: 'table-wrap' }, h('table', { class: 'value-table' },
-    h('thead', {}, h('tr', {}, ['Study', 'Outcome', 'Group', ...statistics.map((st) => STATISTICS[st]), 'Check'].map((t) => h('th', {}, t)))),
+    h('thead', {}, h('tr', {}, ['Study', 'Outcome', 'Group', ...(estimands ? ['Estimand'] : []), ...statistics.map((st) => STATISTICS[st]), 'Check']
+      .map((t) => h('th', {}, t)))),
     h('tbody', {}, [...rows.values()].map(({ first, cells }) => {
       const unchecked = statistics.filter((st) => (cells.get(st) || []).some((v) => !v.quote_found));
       return h('tr', {},
         h('td', {}, study.link(first.record)),
         h('td', {}, first.outcome, first.timepoint ? h('span', { class: 'sub' }, first.timepoint) : null),
         h('td', {}, first.group),
+        estimands && estimandCell(first, estimands),
         statistics.map((st) => h('td', { class: 'num' }, (cells.get(st) || []).flatMap((v, i) => [
           i ? ' / ' : '',
           h('span', { title: `${v.key}: ${v.describes}`, class: v.quote_found ? null : 'unchecked' }, String(v.value)),
@@ -485,15 +603,17 @@ function armTable(list, study) {
     }))));
 }
 
-// Every value, one row each, with its key.
-function valueTable(list, study) {
+// Every value, one row each, with its key (and its estimand, when the manager has read them).
+function valueTable(list, study, estimands) {
   return h('div', { class: 'table-wrap' }, h('table', { class: 'value-table' },
-    h('thead', {}, h('tr', {}, ['Key', 'Study', 'Outcome', 'Group', 'Statistic', 'Value', 'n', 'Check'].map((t) => h('th', {}, t)))),
+    h('thead', {}, h('tr', {}, ['Key', 'Study', 'Outcome', 'Group', ...(estimands ? ['Estimand'] : []), 'Statistic', 'Value', 'n', 'Check']
+      .map((t) => h('th', {}, t)))),
     h('tbody', {}, list.map((v) => h('tr', {},
       h('td', {}, v.key),
       h('td', {}, study.link(v.record)),
       h('td', {}, v.outcome, v.timepoint ? h('span', { class: 'sub' }, v.timepoint) : null),
       h('td', {}, v.group),
+      estimands && estimandCell(v, estimands),
       h('td', {}, STATISTICS[v.statistic] || v.statistic),
       h('td', { class: 'num' }, String(v.value)),
       h('td', { class: 'num' }, v.n == null ? '' : String(v.n)),
@@ -501,19 +621,28 @@ function valueTable(list, study) {
         v.same_participants_as && [' ', badge(`same participants as ${v.same_participants_as}`, 'warn')]))))));
 }
 
-// The head agent's recommendation, with code-resolved arithmetic and the source evidence below it.
+// The head agent's recommendation for each outcome, with code-resolved arithmetic and, beside it, what
+// its source result estimates as the manager read it; then, for each effect size the plan needs, what
+// its values estimate and with which models, how they compare, and the values side by side; then
+// overlap, caveats, gaps and the source evidence. A summary written before the estimands were read
+// shows as it did.
 // Each study is linked to its page through `linksOf(paper)`, {label: url}. `decisions` is
 // {paperId: {resultIndex: {decision}}}, to tell when the summary is out of date.
 export function summaryView({ summary, spec, overlap, papers, decisions, linksOf }) {
   const { result, evidence } = summary;
   const values = new Map(evidence.values.map((v) => [v.key, v]));
+  // The manager's readings of the kept results' estimands (E1, E2, ...): none in a summary written before it
+  // read them; the tables get a column for them once there is one.
+  const readings = evidence.estimands ? new Map(evidence.estimands.map((e) => [e.key, e])) : null;
+  const estimands = readings?.size ? readings : null;
   const study = studies(papers, linksOf);
   const stale = JSON.stringify(decisionsBasis(papers, decisions)) !== JSON.stringify(summary.basis)
     || (spec && summary.spec_basis && JSON.stringify(spec) !== JSON.stringify(summary.spec_basis));
   const text = (t) => withValues(t, values, study);
   const groups = overlap?.groups || [];
   return [
-    stale && h('p', { class: 'notice stale' }, 'Your decisions have changed since this was written, or the study specification or evidence has changed. Write it again before using the recommendation.'),
+    stale && h('p', { class: 'notice stale' }, 'Your decisions have changed since this was written, or the study specification or evidence '
+      + '(the manager’s reading of the papers among it) has changed. Write it again before using the recommendation.'),
     result.planning_version !== PLANNING_VERSION && h('p', { class: 'notice' },
       'This saved summary predates planning recommendations. Write it again to ask the head agent for a final effect size and justification.'),
     ...(result.recommendations || []).map((rec) => {
@@ -531,6 +660,7 @@ export function summaryView({ summary, spec, overlap, papers, decisions, linksOf
         effect && h('p', { class: 'planning-effect' }, h('strong', {},
           `${effect.metric === 'cohen_d' ? 'Cohen d' : (STATISTICS[effect.metric] || effect.metric)} = ${number(effect.value)}`)),
         effect && calc(effect),
+        effect && sourceEstimand(effect, values, readings),
         rec.estimand && h('p', {}, h('strong', {}, 'Target effect: '), text(rec.estimand)),
         h('p', {}, h('strong', {}, 'Justification: '), text(rec.justification)),
         rec.choice?.rationale && h('p', {}, text(rec.choice.rationale)),
@@ -551,8 +681,11 @@ export function summaryView({ summary, spec, overlap, papers, decisions, linksOf
     ...result.needs.map((need) => {
       const list = need.values.map((k) => values.get(k)).filter(Boolean);
       return h('div', { class: 'summary-block need' }, h('h3', {}, need.need),
-        h('p', {}, text(need.comparison)),
-        list.length ? armTable(list, study) : h('p', { class: 'muted' }, 'No reported value bears on this.'));
+        need.estimands ? [
+          h('h4', { class: 'label' }, 'Estimands'), h('p', { class: 'estimands' }, text(need.estimands)),
+          h('h4', { class: 'label' }, 'How they compare'), h('p', { class: 'comparison' }, text(need.comparison)),
+        ] : h('p', {}, text(need.comparison)),
+        list.length ? armTable(list, study, estimands) : h('p', { class: 'muted' }, 'No reported value bears on this.'));
     }),
     (groups.length > 0 || result.overlap) && h('div', { class: 'summary-block' }, h('h3', {}, 'Overlap'),
       result.overlap && h('p', {}, text(result.overlap)),
@@ -566,7 +699,7 @@ export function summaryView({ summary, spec, overlap, papers, decisions, linksOf
       h('ul', {}, result.gaps.map((x) => h('li', {}, text(x))))),
     foldable('summary:every-value', { class: 'summary-block' },
       `Every value kept (${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')})`,
-      valueTable(evidence.values, study)),
+      valueTable(evidence.values, study, estimands)),
     foldable('summary:appraisal', { class: 'summary-block' }, 'Methodological evidence used by the head agent',
       ...evidence.records.map((record) => h('div', { class: 'summary-block' }, study.link(record.key),
         h('p', { class: 'muted small' }, record.fulltext_kind || 'Source type unknown'),

@@ -2,7 +2,7 @@
 
 import { decisionsBasis } from '/lib/evidence.js';
 import { download } from '/lib/export.js';
-import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from '/lib/review-view.js';
+import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, studyContext, summaryView } from '/lib/review-view.js';
 import { keyKind, keyProblem, LEGACY_MODELS, MODEL_CHOICES, modelLabel, PROVIDERS, ROLE_INFO, roleNames } from '/lib/providers.js';
 import { searchMap } from '/lib/search-map.js';
 import { SpecPanel } from '/lib/spec-panel.js';
@@ -23,6 +23,7 @@ const state = {
   provider: 'anthropic', models: {}, chatgpt: null, signInTimer: null, agentsOpen: false, scrollY: 0, namesKey: '',
   id: null, project: null, papers: [], tab: 'extracted', timer: null, specKey: '', papersKey: '', config: {},
   reviewAt: {}, // tab -> the paper id shown there
+  askedUntil: 0, // keep refreshing until then: work just asked of the server may not show at once
   accessKey: '', locked: false, // the server's access key, and whether the server turned the page away without it
 };
 // The access key `esf serve` prints in the page's address (#key=...): kept on this browser for this
@@ -222,7 +223,10 @@ function names() {
 // The roles' names for a search: the models that served each role in it (the usage since it last
 // started, and reading the problem), so past work is credited to the models that did it; the chosen
 // ones for roles it has not used yet.
-const STEP_ROLE = { spec: 'manager', search: 'manager', adjudicate: 'manager', overlap: 'manager', summarize: 'manager', screen: 'worker', extract: 'worker' };
+const STEP_ROLE = {
+  spec: 'manager', search: 'manager', adjudicate: 'manager', context: 'manager', overlap: 'manager', summarize: 'manager',
+  screen: 'worker', extract: 'worker',
+};
 const runUsage = (project) => project?.run_usage || project?.usage || [];
 function searchNames(project) {
   const n = { ...names() };
@@ -667,8 +671,8 @@ async function refresh() {
   if (hasPapers) renderReview();
   else $('#review').hidden = true;
   renderSummary(project);
-  const extracting = state.papers.some((p) => p.status === 'fetching' || p.status === 'extracting');
-  const busy = RUNNING.has(project.status) || extracting || project.summary?.status === 'running';
+  const extracting = state.papers.some((p) => p.status === 'fetching' || p.status === 'extracting' || p.context?.status === 'running');
+  const busy = RUNNING.has(project.status) || extracting || project.summary?.status === 'running' || Date.now() < state.askedUntil;
   if (busy) {
     clearTimeout(state.timer);
     state.timer = setTimeout(() => refresh().catch(() => {}), 2500);
@@ -847,8 +851,8 @@ function groupOf(paper) {
 
 // The review shows one paper at a time: a progress line, a chip per paper to jump to, and the paper.
 function renderReview() {
-  const key = JSON.stringify([state.papers.map((p) => [p.id, p.status, p.decisions, p.extracted_by]), state.tab, state.project.status,
-    state.reviewAt, state.project.overlap]);
+  const key = JSON.stringify([state.papers.map((p) => [p.id, p.status, p.decisions, p.extracted_by, p.context?.status]), state.tab,
+    state.project.status, state.reviewAt, state.project.overlap]);
   if (key === state.papersKey) return;
   state.papersKey = key;
   $('#review').hidden = false;
@@ -876,7 +880,7 @@ function renderReview() {
   // The paper shown stays shown when others join the list, and its card is redrawn only when it
   // changes, so what the reader has open (an author table, quotes) stays open while the search runs.
   state.reviewAt[state.tab] = current.id;
-  const cardKey = JSON.stringify([current.id, current.status, current.extracted_by, current.error, current.fulltext_kind,
+  const cardKey = JSON.stringify([current.id, current.status, current.extracted_by, current.error, current.fulltext_kind, current.context,
     current.decisions, state.project.overlap?.report, RUNNING.has(state.project.status),
     (current.nct_ids || []).map((nct) => trials.get(nct))]);
   if (cardKey !== state.cardKey) {
@@ -928,6 +932,8 @@ function paperCard(paper, trials) {
       ],
     }),
     overlap,
+    // What the study is, statistically: its design, its own sample-size calculation, notes.
+    studyContext(paper, { read: running ? null : () => readContext(paper) }),
   ];
 
   const screen = paper.screen;
@@ -938,7 +944,8 @@ function paperCard(paper, trials) {
       paper.fulltext_kind && badge(TEXT_KIND[paper.fulltext_kind] || paper.fulltext_kind),
       paper.extracted_by === 'manager' && badge(`Reviewed by ${extractor(paper)}`, 'accent'),
       paper.extracted_by === 'worker' && badge(`Extracted by ${extractor(paper)}`),
-      paper.escalation?.audit && badge('Audit sample')),
+      paper.escalation?.audit && badge('Audit sample'),
+      paper.context?.status === 'done' && paper.context.model && badge(`Estimands read by ${planName(paper.context.model)}`, 'accent')),
     extracted && screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
     reasons.length > 0 && h('p', { class: 'reason' }, `Flagged for review: ${reasons.join('; ')}`),
     differs && h('p', { class: 'reason' }, `Differs from the plan: ${paper.extraction.mismatch_reasons.join('; ')}`),
@@ -993,6 +1000,19 @@ async function extractAnyway(paper) {
     await refresh();
   } catch (error) {
     alert(`Could not start the extraction: ${error.message}`);
+  }
+}
+
+// The manager reads the estimand and model of a paper extracted without them, or whose reading failed.
+async function readContext(paper) {
+  if (!agentsReady()) return;
+  try {
+    await api(`/api/projects/${state.id}/papers/${paper.id}/context`, { method: 'POST', withAgents: true });
+    state.askedUntil = Date.now() + 5000;
+    state.papersKey = '';
+    await refresh();
+  } catch (error) {
+    alert(`Could not start reading the estimand and model: ${error.message}`);
   }
 }
 

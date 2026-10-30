@@ -1,6 +1,7 @@
 // The model roles and the names people see for them, for both editions.
 //
-//   manager  reads the problem, plans the search, checks overlap, summarizes, reviews flagged extractions
+//   manager  reads the problem, plans the search, checks overlap, summarizes, reviews flagged extractions,
+//            reads each paper's estimands and models
 //   fetcher  downloads what the browser may not (Claude only: OpenAI has no server-side fetch)
 //   worker   screens every record and reads every paper
 //   code     runs the searches, gets the text, checks every quote
@@ -102,7 +103,8 @@ export const MODEL_CHOICES = {
 
 // What each role does, for the Agents page and the cards.
 export const ROLE_INFO = {
-  manager: ['Manager', 'Reads the problem, plans the search, reviews flagged extractions, checks overlap, writes the summary'],
+  manager: ['Manager', 'Reads the problem, plans the search, reviews flagged extractions, reads each paper’s estimands and models, '
+    + 'checks overlap, writes the summary'],
   fetcher: ['Fetcher', 'Downloads what the browser may not read (Claude only)'],
   worker: ['Workers', 'Screen every record and extract every paper'],
   code: ['Code', 'Runs the searches, gets the text, checks every quote'],

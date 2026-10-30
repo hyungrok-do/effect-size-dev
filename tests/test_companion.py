@@ -11,7 +11,7 @@ from esf.openai_llm import OpenAILLM
 from fixtures import FakeOpenAI
 from test_chatgpt import signed_in
 from test_server import BASE, make_client
-from test_site import Network, SITE, browser, site_url
+from test_site import Network, SITE, _paper, browser, site_url, stored_search
 from test_web import ACCESS_TOKEN, PARAGRAPH, serving
 
 
@@ -209,4 +209,44 @@ def test_subscription_pdf_falls_back_to_its_text_layer(browser, site_url):
     assert result["answer"] == {"ok": True} and result["missing"] == "pdf_not_readable"
     assert result["calls"][0]["input"][0]["content"][0]["type"] == "input_file"
     assert result["calls"][1]["input"][0]["content"] == [{"type": "input_text", "text": "Document: Trial\n\nMeasured change: -2.1"}]
+    page.close()
+
+
+def test_the_manager_reads_a_pdf_in_its_text_layer_on_the_subscription(browser, site_url):
+    """A ChatGPT plan that does not accept files: the manager's reading of a paper extracted from a PDF
+    falls back to the PDF's text layer, as its extraction does."""
+    page = browser.new_page()
+    page.goto(site_url)
+    paper = _paper(1, [("PHQ-9", "12 weeks", [("App", "mean", 8.1)])], ext_id="1001", extracted_by="worker", fulltext_kind="upload")
+    project_id = stored_search(page, [paper])
+    reading = {"design": "two-arm parallel RCT", "sample_size": "", "sample_size_location": "", "notes": "", "results": [{
+        "result": 1, "population": "all randomized", "treatments": "app vs waitlist", "variable": "PHQ-9 at 12 weeks",
+        "intercurrent_events": "not stated", "summary_measure": "difference in means", "model": "ANCOVA adjusted for baseline",
+        "missing_data": "not stated", "quote": "Analyses followed the intention-to-treat principle.", "location": "Methods",
+        "numbers_are": "observed means", "vs_plan": "same", "differences": [], "use": "The means give the difference."}]}
+    result = page.evaluate("""async ([id, reading]) => {
+        const { Store } = await import('/lib/store.js');
+        const { Pipeline } = await import('/lib/pipeline.js');
+        const { ChatGPT } = await import('/lib/chatgpt.js');
+        const { OpenAIError } = await import('/lib/openai.js');
+        const store = new Store();
+        const paper = (await store.papers(id))[0];
+        await store.saveDocument(id, paper.id, { kind: 'upload', url: 'trial-1.pdf', pdf: 'Zg==',
+          text: 'Trial 1. Analyses followed the intention-to-treat principle.' });
+        const calls = [];
+        const connection = { request: async (method, body) => {
+          calls.push(body);
+          if (calls.length === 1) throw new OpenAIError('subscription_sharing_unsupported_capability', 'files unsupported');
+          return { output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(reading) }] }] };
+        } };
+        const llm = new ChatGPT({ connection, models: { manager: 'gpt-test', worker: 'gpt-test' } });
+        await new Pipeline({ store, llm, sources: null }).readContext(id, paper.id);
+        return { calls, context: (await store.paper(paper.id)).context };
+    }""", [project_id, reading])
+    first, second = (call["input"][0]["content"] for call in result["calls"])
+    assert first[0]["type"] == "input_file" and result["calls"][0]["text"]["format"]["name"] == "StudyContext"
+    assert second[0] == {"type": "input_text", "text": "Document: Trial 1\n\nTrial 1. Analyses followed the intention-to-treat principle."}
+    context = result["context"]
+    assert context["status"] == "done" and context["result"] == reading and context["model"] == "gpt-test"
+    assert context["checks"] == {"sample_size": None, "results": ["exact"]}
     page.close()

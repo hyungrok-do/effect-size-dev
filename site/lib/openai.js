@@ -1,6 +1,7 @@
 // OpenAI models, called from the browser with the user's own API key.
 //
-//   manager  reads the problem, plans the search, checks overlap, summarizes, re-extracts escalated papers
+//   manager  reads the problem, plans the search, checks overlap, summarizes, re-extracts escalated papers,
+//            reads each paper's estimands and models
 //   workers  screen every record and read every paper
 //
 // The same steps, prompts and schemas as claude.js (generated.js comes from the Python package), and
@@ -9,7 +10,7 @@
 // no counterpart to Claude's server-side fetch, so there is no fetcher: a PDF the browser may not
 // download is left for the user to upload. The models only read and quote; code does any arithmetic.
 
-import { ModelDeclined, ModelTruncated, searchRunners } from './claude.js';
+import { contextInput, ModelDeclined, ModelTruncated, searchRunners } from './claude.js';
 import { OPENAI_TOOLS, PROMPTS, SCHEMAS, TOOL_NAMESPACE } from './generated.js';
 import { modelLabel } from './providers.js';
 
@@ -272,10 +273,10 @@ export class OpenAI {
   }
 
   summarize(spec, overlap, evidence, { sink } = {}) {
-    const data = { records: evidence.records, overlap, values: evidence.values };
+    const data = { records: evidence.records, estimands: evidence.estimands, overlap, values: evidence.values };
     return this.parse({
       step: 'summarize', manager: true, system: withSpec(PROMPTS.SUMMARIZE, spec),
-      content: [{ type: 'text', text: `Records, the overlap check and the values:\n${JSON.stringify(data, null, 1)}` }],
+      content: [{ type: 'text', text: `Records, the estimands of their results, the overlap check and the values:\n${JSON.stringify(data, null, 1)}` }],
       schema: SCHEMAS.EvidenceSummary, name: 'EvidenceSummary', effort: 'high', sink,
     });
   }
@@ -286,6 +287,13 @@ export class OpenAI {
     return this.parse({
       step: 'adjudicate', manager: true, system: withSpec(PROMPTS.ADJUDICATE, spec),
       content: [document, { type: 'text', text }], schema: SCHEMAS.PaperExtraction, name: 'PaperExtraction', effort: 'xhigh', sink,
+    });
+  }
+
+  studyContext(spec, document, extraction, { sink } = {}) {
+    return this.parse({
+      step: 'context', manager: true, system: withSpec(PROMPTS.CONTEXT, spec),
+      content: [document, { type: 'text', text: contextInput(extraction) }], schema: SCHEMAS.StudyContext, name: 'StudyContext', effort: 'high', sink,
     });
   }
 

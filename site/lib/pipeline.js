@@ -3,7 +3,8 @@
 //   spec (manager) -> search plan (manager + tools) -> run the levels from the top down -> screen (workers)
 //   -> add what the included reviews cite -> screen those (workers)
 //   -> full text (browser, or Claude's fetcher when the browser may not) -> extract (workers)
-//   -> verify (code) -> adjudicate escalations (manager) -> review (you)
+//   -> verify (code) -> adjudicate escalations (manager) -> each result's estimand and model (manager)
+//   -> review (you)
 //
 // A port of python/esf/pipeline.py. Everything is stored in IndexedDB as it happens, so a run that
 // is cut short (the tab closed) can be continued.
@@ -18,7 +19,7 @@ import { pdfText } from './pdf.js';
 import {
   bytesToBase64, europepmcPmid, europepmcRecord, europepmcUrl, SourceError, trialRecord, trialResultsText,
 } from './sources.js';
-import { escalationReasons, inAuditSample, verify } from './verify.js';
+import { checkContext, escalationReasons, inAuditSample, verify } from './verify.js';
 
 export const DEFAULTS = {
   auditFraction: 0.1, perQueryLimit: 100, maxCandidates: 300, maxReviewsFollowed: 10, maxCited: 150,
@@ -44,6 +45,16 @@ const found = (x) => [
     + `${r.values.map((v) => `${v.group} ${v.statistic.replaceAll('_', ' ')} ${v.value}`).join(', ')}`),
 ].join('\n');
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+// What the manager's reading of a paper found, without the paper's numbers: "2 results: 1 matches the
+// planned estimand, 1 differs".
+const FITS = [['same', 'matches the planned estimand', 'match the planned estimand'], ['close', 'is close to it', 'are close to it'],
+  ['different', 'differs', 'differ']];
+const contextFound = (c) => {
+  const fits = FITS.map(([fit, one, many]) => [c.results.filter((r) => r.vs_plan === fit).length, one, many])
+    .filter(([n]) => n).map(([n, one, many]) => `${n} ${n === 1 ? one : many}`);
+  return [`${plural(c.results.length, 'result')}${fits.length ? `: ${fits.join(', ')}` : ''}`,
+    c.sample_size ? 'Its own sample-size calculation is quoted.' : 'No sample-size calculation of its own.'].join('\n');
+};
 const PROCESSED = new Set(['extracted', 'needs_manual', 'no_fulltext', 'error']);
 
 // Errors after which every later model call fails the same way (a refused key, a model the key may
@@ -569,7 +580,7 @@ export class Pipeline {
     const paper = await this.store.paper(paperId);
     const sink = this.sink(projectId);
     const title = short(paper.title || paper.ext_id);
-    await this.store.updatePaper(paperId, { status: 'fetching', error: null });
+    await this.store.updatePaper(paperId, { status: 'fetching', error: null, context: null });
     let doc;
     if (upload) {
       doc = { kind: 'upload', text: await pdfText(upload), url: uploadName, pdf: bytesToBase64(upload) };
@@ -596,8 +607,7 @@ export class Pipeline {
       status: 'extracting', fulltext_kind: doc.kind, fulltext_url: doc.url, fetched_by: doc.fetched_by || null, fulltext_note: doc.note || null,
     });
 
-    const document = documentBlock(doc, paper.title || paper.ext_id);
-    if (doc.pdf && this.llm.pdfTextFallback) document.text = doc.text;
+    const document = this.documentOf(doc, paper.title || paper.ext_id);
     const quotesReliable = !doc.pdf && Boolean(doc.text.trim());
     let worker = null;
     let report = null;
@@ -659,7 +669,68 @@ export class Pipeline {
       status: 'extracted', extraction: final, extracted_by: extractedBy, extracted_model: this.llm.models?.[extractedBy] || null,
       verification: finalReport,
       escalation: reasons.length ? { reasons, audit: audited } : null,
+      context: final.results.length ? { status: 'running' } : null,
     });
+    await this.studyContext(projectId, spec, paperId, title, document, final, doc.text, stop);
+  }
+
+  // The manager reads the paper again with its final extraction: what each result estimates (its
+  // estimand, by ICH E9(R1)), the model behind it, and how both compare with the plan. Its quotes are
+  // checked against the paper's text. A failure is kept with the paper and never loses the extraction;
+  // in a run, an error that would fail every paper stops the run after this one, as the review does.
+  // The paper's context is already marked as running.
+  async studyContext(projectId, spec, paperId, title, document, extraction, text, stop = null) {
+    if (!extraction.results.length) return;
+    try {
+      const result = await this.activity.track(
+        { agent: 'manager', step: 'context', text: `Reading the estimand and model of “${title}”`, paperId },
+        (step) => this.llm.studyContext(spec, document, extraction, { sink: step.meter(this.sink(projectId)) }),
+        contextFound,
+      );
+      await this.store.updatePaper(paperId, {
+        context: { status: 'done', result, checks: checkContext(result, text), model: this.llm.models?.manager || null },
+      });
+    } catch (error) {
+      await this.store.updatePaper(paperId, { context: { status: 'error', error: describeError(error) } });
+      if (stop && stopsTheRun(error)) stop.error ||= error;
+    }
+  }
+
+  // Read the estimand and model of a paper extracted without them (before the manager read them, or
+  // when its reading failed), in the text its extraction used: the copy kept in this browser (your own
+  // PDF included), or, if there is none, found again as extraction finds it.
+  async readContext(projectId, paperId) {
+    const project = await this.store.project(projectId);
+    const paper = await this.store.paper(paperId);
+    if (paper?.status !== 'extracted' || !paper.extraction?.results.length) return;
+    const title = short(paper.title || paper.ext_id);
+    await this.store.updatePaper(paperId, { context: { status: 'running' } });
+    let doc;
+    try {
+      doc = await this.store.document(paperId);
+      if (!doc && paper.fulltext_kind === 'upload') throw new Error('Your PDF is no longer kept in this browser. Re-extract from your PDF.');
+      if (!doc) {
+        doc = await this.activity.track(
+          { agent: 'code', step: 'fetch', text: `Getting the text of “${title}”`, paperId },
+          () => this.fullText(paper),
+          (d) => (d ? `${TEXT_KIND[d.kind]}, ${Math.max(1, Math.round(d.text.length / 1000))}k characters` : 'no open text found'),
+        );
+        if (!doc) throw new Error('The text the extraction used could not be found again.');
+      }
+    } catch (error) {
+      await this.store.updatePaper(paperId, { context: { status: 'error', error: `Could not get the text: ${describeError(error)}` } });
+      return;
+    }
+    await this.studyContext(projectId, project.spec, paperId, title, this.documentOf(doc, paper.title || paper.ext_id),
+      paper.extraction, doc.text);
+  }
+
+  // A document as the models read it. A PDF carries its text layer too, for a provider that may have to
+  // read that instead (a ChatGPT plan that does not accept files), in extraction and in the manager's reading.
+  documentOf(doc, title) {
+    const document = documentBlock(doc, title);
+    if (doc.pdf && this.llm.pdfTextFallback) document.text = doc.text;
+    return document;
   }
 }
 

@@ -441,7 +441,7 @@
 
 <section class="intro" aria-labelledby="intro-title">
   <h2 id="intro-title">Find the published effect sizes a study plan needs</h2>
-  <p class="lede">Describe the study you are planning. Claude, or an OpenAI model if you prefer, searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. You decide what to include, and <span data-name="manager">Opus 5.5</span> summarizes what the papers you kept report. Use your own Anthropic or OpenAI API key, or connect your ChatGPT subscription through a local helper.</p>
+  <p class="lede">Describe the study you are planning. Claude, or an OpenAI model if you prefer, searches PubMed, Europe PMC and ClinicalTrials.gov, reads the papers it can open, and pulls out the statistics they report, each with the sentence or table row it came from. <span data-name="manager">Opus 5.5</span> reads what each result estimates and with which model, and how that compares with your plan; once you have decided what to include, it summarizes what the papers you kept report. Use your own Anthropic or OpenAI API key, or connect your ChatGPT subscription through a local helper.</p>
   <ul id="points" class="points">
     <li>
       <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Searches the literature</h3>
@@ -465,7 +465,7 @@
     <h2 id="agents-title">Agents</h2>
     <button id="agents-back" type="button" class="secondary small">Back to your searches</button>
   </div>
-  <p class="summary">The agents read your problem, plan and run the search, screen the records and extract what the papers report. Choose how they run: on Anthropic's or OpenAI's API with your own key, or on your ChatGPT subscription through a local helper.</p>
+  <p class="summary">The agents read your problem, plan and run the search, screen the records, extract what the papers report and read what each result estimates and with which model. Choose how they run: on Anthropic's or OpenAI's API with your own key, or on your ChatGPT subscription through a local helper.</p>
   <fieldset class="provider-cards">
     <legend class="sr-only">How the agents run</legend>
     <label class="provider-card" data-provider="anthropic"><input type="radio" name="provider" value="anthropic" checked><span class="pc-title"></span><span class="pc-sub"></span><span class="pc-models"></span></label>
@@ -604,7 +604,7 @@ cd effect-size-dev</code></pre><button type="button" class="secondary small copy
 
     <section id="review" class="card" role="tabpanel" aria-labelledby="tab-review" hidden>
       <h2 id="review-title">Review what was found</h2>
-      <p class="summary">One paper at a time: include or exclude each result, then go on to the next. A result's decision overrides one made for its whole paper.</p>
+      <p class="summary">One paper at a time: include or exclude each result, then go on to the next. Each result says first what it estimates and with which model, as the manager read the paper, and how that compares with your plan. A result's decision overrides one made for its whole paper.</p>
       <div id="source-switch" class="segmented" role="group" aria-label="Source"></div>
       <div id="tabs" class="tabs" role="group" aria-label="Show"></div>
       <div id="review-nav" class="review-nav" hidden>
@@ -631,7 +631,7 @@ cd effect-size-dev</code></pre><button type="button" class="secondary small copy
 
     <section id="summary" class="card" role="tabpanel" aria-labelledby="tab-summary" hidden>
       <h2 id="summary-title">Summary</h2>
-      <p class="summary"><span data-did="summarize">The head agent</span> recommends a planning effect size for each outcome and explains its clinical importance, evidence, assumptions, and alternatives using DELTA². Source values stay linked to the papers; derived effects show their calculation. A provisional choice identifies what still needs to be resolved.</p>
+      <p class="summary"><span data-did="summarize">The head agent</span> recommends a planning effect size for each outcome and explains its clinical importance, evidence, assumptions, and alternatives using DELTA². Each recommendation says how its source result’s estimand compares with the planned one, and each effect size the plan needs, what its values estimate and with which models. Source values stay linked to the papers; derived effects show their calculation. A provisional choice identifies what still needs to be resolved.</p>
       <div class="actions">
         <button id="summarize" type="button" class="primary">Write the summary</button>
         <span id="summarize-status" class="muted small" aria-live="polite"></span>

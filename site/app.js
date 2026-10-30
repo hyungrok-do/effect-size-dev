@@ -13,7 +13,7 @@ import { LEVEL_NAMES, LEVELS } from './lib/generated.js';
 import { Pipeline } from './lib/pipeline.js';
 import { europepmcUrl, Sources } from './lib/sources.js';
 import { decisionsBasis } from './lib/evidence.js';
-import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, summaryView } from './lib/review-view.js';
+import { foldable, overlapNote, paperHeader, resultBox, reviewKeys, reviewNav, studyContext, summaryView } from './lib/review-view.js';
 import { searchMap } from './lib/search-map.js';
 import { SpecPanel } from './lib/spec-panel.js';
 import { RUNNING, Store } from './lib/store.js';
@@ -766,7 +766,8 @@ function tabKeys(event) {
 // -- agent activity --------------------------------------------------------------------
 
 const STEP_AGENT = {
-  spec: 'manager', search: 'manager', adjudicate: 'manager', overlap: 'manager', summarize: 'manager', fetch: 'fetcher', screen: 'worker', extract: 'worker',
+  spec: 'manager', search: 'manager', adjudicate: 'manager', context: 'manager', overlap: 'manager', summarize: 'manager', fetch: 'fetcher',
+  screen: 'worker', extract: 'worker',
 };
 const seconds = (since) => `${Math.max(0, Math.round((Date.now() - since) / 1000))} s`;
 const duration = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
@@ -1104,8 +1105,8 @@ function groupOf(paper) {
 
 // The review shows one paper at a time: a progress line, a chip per paper to jump to, and the paper.
 function renderReview() {
-  const key = JSON.stringify([state.papers.map((p) => [p.id, p.status, p.extracted_by, p.error]), state.decisions, state.tab, state.source,
-    state.reviewAt, state.project?.overlap, jobs.has(state.id)]);
+  const key = JSON.stringify([state.papers.map((p) => [p.id, p.status, p.extracted_by, p.error, p.context?.status]), state.decisions,
+    state.tab, state.source, state.reviewAt, state.project?.overlap, jobs.has(state.id)]);
   if (key === state.papersKey) return;
   state.papersKey = key;
 
@@ -1145,7 +1146,7 @@ function renderReview() {
   // The paper shown stays shown when others join the list, and its card is redrawn only when it
   // changes, so what the reader has open stays open while the search runs.
   state.reviewAt[at] = current.id;
-  const cardKey = JSON.stringify([current.id, current.status, current.extracted_by, current.error, current.fulltext_kind,
+  const cardKey = JSON.stringify([current.id, current.status, current.extracted_by, current.error, current.fulltext_kind, current.context,
     state.decisions[current.id], state.project?.overlap?.report, jobs.has(state.id), jobs.has(`paper-${current.id}`),
     (current.nct_ids || []).map((nct) => trials.get(nct))]);
   if (cardKey !== state.cardKey) {
@@ -1234,6 +1235,8 @@ function paperCard(paper, trials) {
       ],
     }),
     overlap,
+    // What the study is, statistically: its design, its own sample-size calculation, notes.
+    studyContext(paper, { read: busy ? null : () => readContext(paper) }),
   ];
 
   const screen = paper.screen;
@@ -1247,7 +1250,8 @@ function paperCard(paper, trials) {
       roleOf(paper.fetched_by) === 'fetcher' && badge(`Fetched by ${searchNames().fetcher || 'Claude'}`),
       paper.extracted_by === 'manager' && badge(`Reviewed by ${extractor(paper)}`, 'accent'),
       paper.extracted_by === 'worker' && badge(`Extracted by ${extractor(paper)}`),
-      paper.escalation?.audit && badge('Audit sample')),
+      paper.escalation?.audit && badge('Audit sample'),
+      paper.context?.status === 'done' && paper.context.model && badge(`Estimands read by ${modelLabel(paper.context.model)}`, 'accent')),
     paper.fulltext_note && h('p', { class: 'reason' }, paper.fulltext_note),
     extracted && screen && h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`),
     reasons.length > 0 && h('p', { class: 'reason' }, paper.extracted_by === 'manager'
@@ -1301,6 +1305,14 @@ function extractPaper(paper, upload = null, uploadName = '') {
     await store.clearDecisions(paper.id);
     await pipeline(projectId).extractPaper(projectId, spec, paper.id, { upload, uploadName });
   });
+  refresh();
+}
+
+// The manager reads the estimand and model of a paper extracted without them, or whose reading failed.
+function readContext(paper) {
+  if (!haveKey()) return;
+  const projectId = state.id;
+  startJob(`paper-${paper.id}`, () => pipeline(projectId).readContext(projectId, paper.id));
   refresh();
 }
 

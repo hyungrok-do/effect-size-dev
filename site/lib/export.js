@@ -7,12 +7,31 @@ export const PAPER = -1; // result_index of a decision about the whole paper
 // A decision on a result wins over a decision on its whole paper.
 export const effectiveDecision = (decisions, index) => decisions?.[index] || decisions?.[PAPER] || null;
 
+// A result's estimand and model as the manager read them (the paper's context).
+const ESTIMAND_COLUMNS = [
+  'design', 'estimand_population', 'estimand_treatments', 'estimand_variable', 'intercurrent_events', 'summary_measure',
+  'model', 'missing_data', 'numbers_are', 'vs_plan', 'differences',
+];
+
 export const COLUMNS = [
   'paper_id', 'source', 'id', 'doi', 'title', 'year', 'text_used', 'extracted_by', 'result', 'outcome_measure',
-  'timepoint', 'analysis_population', 'adjusted', 'relevance', 'confidence', 'group', 'statistic', 'value',
-  'ci_level', 'describes', 'quote', 'location', 'quote_check', 'number_in_quote', 'concerns', 'flags', 'decision',
+  'timepoint', 'analysis_population', 'adjusted', 'relevance', 'confidence', ...ESTIMAND_COLUMNS, 'group', 'statistic',
+  'value', 'ci_level', 'describes', 'quote', 'location', 'quote_check', 'number_in_quote', 'concerns', 'flags', 'decision',
   'decision_reason',
 ];
+
+// The estimand columns of a paper's result; empty when the manager has not read them.
+function estimandColumns(paper, index) {
+  const context = paper.context?.status === 'done' ? paper.context.result : null;
+  const read = context?.results.find((c) => c.result === index + 1);
+  if (!read) return Object.fromEntries(ESTIMAND_COLUMNS.map((c) => [c, '']));
+  return {
+    design: context.design, estimand_population: read.population, estimand_treatments: read.treatments,
+    estimand_variable: read.variable, intercurrent_events: read.intercurrent_events, summary_measure: read.summary_measure,
+    model: read.model, missing_data: read.missing_data, numbers_are: read.numbers_are, vs_plan: read.vs_plan,
+    differences: read.differences.join('; '),
+  };
+}
 
 export function exportRows(papers, decisions, includedOnly) {
   const rows = [];
@@ -22,6 +41,7 @@ export function exportRows(papers, decisions, includedOnly) {
     paper.extraction.results.forEach((result, index) => {
       const decision = effectiveDecision(decisions[paper.id], index);
       if (includedOnly && decision?.decision !== 'include') return;
+      const estimand = estimandColumns(paper, index);
       result.values.forEach((value, j) => {
         const check = checks[index]?.[j] || {};
         rows.push({
@@ -29,7 +49,7 @@ export function exportRows(papers, decisions, includedOnly) {
           year: paper.year || '', text_used: paper.fulltext_kind || '', extracted_by: paper.extracted_by || '',
           result: index + 1, outcome_measure: result.outcome_measure, timepoint: result.timepoint,
           analysis_population: result.analysis_population, adjusted: result.adjusted, relevance: result.relevance,
-          confidence: result.confidence, group: value.group, statistic: value.statistic, value: value.value,
+          confidence: result.confidence, ...estimand, group: value.group, statistic: value.statistic, value: value.value,
           ci_level: value.ci_level ?? '',
           describes: value.describes, quote: value.quote, location: value.location, quote_check: check.quote ?? '',
           number_in_quote: check.number_in_quote ?? '', concerns: result.concerns.join('; '),
