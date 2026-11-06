@@ -159,6 +159,21 @@ export function checkContext(context, sourceText) {
   return { sample_size: found(context.sample_size), results: context.results.map((r) => found(r.quote)) };
 }
 
+export function verifySpecImportance(spec, paragraph) {
+  spec = structuredClone(spec);
+  const source = new Source(paragraph);
+  for (const outcome of spec.outcomes) {
+    const target = outcome.target;
+    if (!target || target.importance_threshold == null) continue;
+    const quote = target.importance_quote, number = target.importance_threshold;
+    if (source.findQuote(quote) !== 'exact' || !(numberIn(number, quote) || numberIn(Math.abs(number), quote))) {
+      target.importance_threshold = null;
+      spec.open_questions.push(`Confirm the important-difference boundary for ${outcome.name}: its value or supporting quote was not found in your paragraph.`);
+    }
+  }
+  return spec;
+}
+
 // Why a worker extraction should go to the manager; empty if it can stand.
 export function escalationReasons(extraction, report) {
   if (!extraction || !report) return ['the worker could not complete the extraction'];

@@ -22,10 +22,11 @@ def example(binary=False):
                    timepoint='12 weeks', group=g, statistic=st, value=n, describes='Endpoint', quote_found=True,
                    flags=[], decision='include', independent_groups=True, adjusted='unadjusted',
                    outcome_type='binary' if binary else 'continuous', relevance='direct', confidence='high', concerns=[],
-                   estimand='E1')
+                   estimand='E1', unit='original_units', group_role='intervention' if g == 'A' else 'comparator',
+                   contrast_direction='unknown', standardizer='unknown')
               for i, (g, st, n) in enumerate(data)]
     # The manager's reading of the result: the same estimand as planned, its model's quote found in the paper.
-    estimands = [dict(key='E1', record='R1', result='R1:0', vs_plan='same', differences=[], model_quote='exact')]
+    estimands = [dict(key='E1', record='R1', result='R1:0', vs_plan='same', differences=[], model_quote='exact', model_kind='model', comparison_current=True)]
     records = [dict(key='R1', design='parallel RCT', fulltext_kind='pmc_xml', study_type='rct', matches_spec=True,
                     appraisal=[dict(domain=d, quote_found=True) for d in
                                ['randomization', 'deviations', 'missing_outcomes', 'measurement', 'selective_reporting']])]
@@ -40,7 +41,10 @@ def choice(method='mean_difference', target=None):
 
 def spec():
     return {**SPEC.model_dump(), 'outcomes': [dict(name='Depressive symptoms', measure='PHQ-9', role='primary',
-                                                 type='continuous', timepoint='12 weeks')],
+                                                 type='continuous', timepoint='12 weeks', target=dict(
+                                                     metric='mean_difference', unit='original_units', direction='intervention_minus_comparator',
+                                                     standardizer='unknown', importance_threshold=-1.5, importance_rule='at_most',
+                                                     importance_scope='between_groups', importance_quote='The investigator requires a reduction of at least 1.5 points.'))],
             'planning': dict(objective='superiority', effect_measure='A minus B', analysis='ANCOVA',
                              analysis_population='itt', intercurrent_events='treatment policy',
                              clinical_importance='The investigator considers this difference important.',
@@ -115,7 +119,7 @@ def test_reported_effect_and_no_nuisance_substitution():
     evidence = example()
     with pytest.raises(ValueError, match='nuisance'):
         resolve_choice(choice('reported'), evidence)
-    evidence['values'][0].update(statistic='hazard_ratio', value=.75)
+    evidence['values'][0].update(statistic='hazard_ratio', value=.75, unit='ratio')
     expected = resolve_choice(choice('reported'), evidence)
     assert expected['value'] == .75 and expected['origin'] == 'evidence_estimate'
     assert javascript('resolve', choice('reported'), evidence) == expected
@@ -157,7 +161,7 @@ def test_final_recommendation_validation_and_browser_parity(change):
     if change == 'model_quote_missing': evidence['estimands'][0].update(model_quote='missing')
     if change == 'model_quote_approximate': evidence['estimands'][0].update(model_quote='approximate')
     if change == 'no_model_quote': evidence['estimands'][0].update(model_quote=None)
-    if change == 'importance': plan['planning']['clinical_importance'] = ''
+    if change == 'importance': plan['outcomes'][0]['target']['importance_threshold'] = None
     if change == 'unreviewed': evidence['values'][0]['decision'] = None
     if change == 'abstract': evidence['records'][0]['fulltext_kind'] = 'abstract'
     if change == 'outcome': plan['outcomes'][0]['timepoint'] = '24 weeks'
@@ -167,7 +171,7 @@ def test_final_recommendation_validation_and_browser_parity(change):
     actual = finalize_summary(raw, evidence, plan)
     assert javascript('finalize', raw, evidence, plan) == actual
     rec = actual['recommendations'][0]
-    expected = ('recommended' if change in ('none', 'model_quote_approximate', 'no_model_quote')
+    expected = ('recommended' if change in ('none', 'model_quote_approximate')
                 else 'insufficient_evidence' if change in ('invalid', 'noninferiority', 'omitted') else 'provisional')
     assert rec['status'] == expected
     assert (rec['resolved'] is None) == (expected == 'insufficient_evidence')

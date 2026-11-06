@@ -11,7 +11,7 @@
 
 import { NO_ACTIVITY, short } from './activity.js';
 import { describeError, ModelDeclined, ModelTruncated, outOfCredit } from './claude.js';
-import { buildEvidence, decisionsBasis, overlapRecords } from './evidence.js';
+import { buildEvidence, comparisonBasis, decisionsBasis, overlapRecords } from './evidence.js';
 import { LEVEL_NAMES, LEVELS, PROMPTS } from './generated.js';
 import { jatsToText } from './jats.js';
 import { finalizeSummary } from './planning.js';
@@ -19,7 +19,7 @@ import { pdfText } from './pdf.js';
 import {
   bytesToBase64, europepmcPmid, europepmcRecord, europepmcUrl, SourceError, trialRecord, trialResultsText,
 } from './sources.js';
-import { checkContext, escalationReasons, inAuditSample, oneReadingPerResult, verify } from './verify.js';
+import { checkContext, escalationReasons, inAuditSample, oneReadingPerResult, verify, verifySpecImportance } from './verify.js';
 
 export const DEFAULTS = {
   auditFraction: 0.1, perQueryLimit: 100, maxCandidates: 300, maxReviewsFollowed: 10, maxCited: 150,
@@ -135,7 +135,7 @@ export class Pipeline {
         (s) => `${s.design.replaceAll('_', ' ')}; outcomes: ${s.outcomes.map((o) => o.measure || o.name).join(', ')}; `
           + `${plural(s.statistics_needed.length, 'number')} to find; ${plural(s.open_questions.length, 'question')} worth deciding`,
       );
-      await this.store.updateProject(projectId, { status: 'spec_ready', spec });
+      await this.store.updateProject(projectId, { status: 'spec_ready', spec: verifySpecImportance(spec, project.paragraph) });
     } catch (error) {
       await this.store.updateProject(projectId, { status: 'error', error: `Reading the problem failed. ${describeError(error)}` });
     }
@@ -459,7 +459,7 @@ export class Pipeline {
       }
       const project = await this.store.project(projectId);
       const decisions = await this.store.decisions(projectId);
-      const evidence = buildEvidence(papers, decisions, overlap.report);
+      const evidence = buildEvidence(papers, decisions, overlap.report, project.spec);
       if (!evidence.values.length) throw new Error('There is nothing to summarize: no extracted result is kept.');
       const result = await this.activity.track(
         {
@@ -684,6 +684,7 @@ export class Pipeline {
   // one, as the review does. The paper's context is already marked as running.
   async studyContext(projectId, spec, paperId, title, document, extraction, text, stop = null) {
     if (!extraction.results.length) return;
+    const specBasis = comparisonBasis(spec), extractionBasis = structuredClone(extraction);
     try {
       const result = await this.activity.track(
         { agent: 'manager', step: 'context', text: `Reading the estimand and model of “${title}”`, paperId },
@@ -692,7 +693,8 @@ export class Pipeline {
         contextFound,
       );
       await this.store.updatePaper(paperId, {
-        context: { status: 'done', result, checks: checkContext(result, text), model: this.llm.models?.manager || null },
+        context: { status: 'done', result, checks: checkContext(result, text), model: this.llm.models?.manager || null,
+          spec_basis: specBasis, extraction_basis: extractionBasis },
       });
     } catch (error) {
       await this.store.updatePaper(paperId, { context: { status: 'error', error: describeError(error) } });

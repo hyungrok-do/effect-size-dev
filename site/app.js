@@ -1236,7 +1236,7 @@ function paperCard(paper, trials) {
     }),
     overlap,
     // What the study is, statistically: its design, its own sample-size calculation, notes.
-    studyContext(paper, { read: busy ? null : () => readContext(paper) }),
+    studyContext(paper, { read: busy ? null : () => readContext(paper), spec: state.project.spec }),
   ];
 
   const screen = paper.screen;
@@ -1287,7 +1287,7 @@ function paperCard(paper, trials) {
 }
 
 function resultBlock(paper, result, index, decisions) {
-  return resultBox(paper, result, index, decisions, (i, decision, reason) => decide(paper, i, decision, reason));
+  return resultBox(paper, result, index, decisions, (i, decision, reason) => decide(paper, i, decision, reason), state.project.spec);
 }
 
 async function decide(paper, resultIndex, decision, reason) {
@@ -1380,7 +1380,7 @@ async function showSource(paper) {
 }
 
 function exportCsv(includedOnly) {
-  const rows = exportRows(state.papers, state.decisions, includedOnly);
+  const rows = exportRows(state.papers, state.decisions, includedOnly, state.project.spec);
   download(`effect-sizes-${state.id}${includedOnly ? '-included' : ''}.csv`, toCsv(rows), 'text/csv');
 }
 

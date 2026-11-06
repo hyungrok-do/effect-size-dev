@@ -318,7 +318,7 @@ def test_a_recommendation_on_a_result_read_as_a_different_estimand_is_provisiona
     rec, value, evidence = recommendation()
     assert next(e for e in evidence["estimands"] if e["key"] == value["estimand"])["vs_plan"] == "different"
     assert rec["status"] == "provisional" and rec["resolved"]["value"] == .3 and rec["resolved"]["basis_value"] == .35
-    assert rec["validation_notes"][-1] == different and unread not in rec["validation_notes"]
+    assert different in rec["validation_notes"] and unread not in rec["validation_notes"]
 
     # Read as the same estimand, that note goes; the others stand.
     context = review["context"]

@@ -29,6 +29,14 @@ const COMPARATOR_KINDS = {
   active: 'Active comparator', other: 'Other',
 };
 const ROLES = { primary: 'Primary', secondary: 'Secondary' };
+export const EFFECT_UNITS = { unknown: 'Not specified', original_units: 'Original outcome units', standardized_units: 'SD units',
+  proportion: 'Proportion difference', percentage_points: 'Percentage points', ratio: 'Ratio' };
+export const EFFECT_DIRECTIONS = { unknown: 'Not specified', intervention_minus_comparator: 'Intervention minus comparator',
+  comparator_minus_intervention: 'Comparator minus intervention', intervention_over_comparator: 'Intervention over comparator',
+  comparator_over_intervention: 'Comparator over intervention' };
+const STANDARDIZERS = { unknown: 'Not specified / not applicable', endpoint_sd: 'SD at follow-up', change_sd: 'SD of change', other: 'Other SD' };
+const blankTarget = () => ({ metric: 'unknown', unit: 'unknown', direction: 'unknown', standardizer: 'unknown',
+  importance_threshold: null, importance_rule: 'unknown', importance_scope: 'unknown', importance_quote: '' });
 const PER = { each_arm: 'Each arm', between_groups: 'Between groups', one_group: 'One group' };
 const ELEMENTS = {
   population: 'Population', intervention: 'Intervention', comparator: 'Comparator', outcome: 'Outcome', design: 'Design', other: 'Other',
@@ -65,10 +73,10 @@ const splitList = (text) => text.split(/[,;\n]/).map((s) => s.trim()).filter(Boo
 // A specification saved before the structured fields, in the current shape. Mirrors upgrade_spec in
 // python/esf/schemas.py.
 export function upgradeSpec(spec) {
-  if (spec.population && typeof spec.population === 'object') return { planning: null, ...spec };
+  if (spec.population && typeof spec.population === 'object') return { planning: null, ...spec, outcomes: (spec.outcomes || []).map((o) => ({ target: null, ...o })) };
   const timepoint = spec.timepoint || '';
   const outcomes = (spec.outcomes || []).map((name, i) => ({
-    name, measure: '', role: i ? 'secondary' : 'primary', type: spec.outcome_type || 'unclear', timepoint,
+    name, measure: '', role: i ? 'secondary' : 'primary', type: spec.outcome_type || 'unclear', timepoint, target: null,
   }));
   const first = outcomes.length ? outcomes[0].name : '';
   return {
@@ -100,7 +108,7 @@ function fieldInput(field, value, attrs = {}) {
     select.value = value;
     return select;
   }
-  const input = h('input', { type: 'text', ...attrs });
+  const input = h('input', { type: field.kind === 'number' ? 'number' : 'text', step: field.kind === 'number' ? 'any' : null, ...attrs });
   if (field.kind === 'list') input.value = (value || []).join(', ');
   else if (field.kind === 'statistics') {
     input.value = (value || []).map((key) => STATISTICS[key] || key).join(', ');
@@ -118,6 +126,7 @@ function checkStatistics(input) {
 }
 
 function readInput(field, input) {
+  if (field.kind === 'number') return input.value.trim() === '' ? null : Number(input.value);
   if (field.kind === 'list') return splitList(input.value);
   if (field.kind === 'statistics') return splitList(input.value).map((name) => STATISTIC_NAMES.get(name.toLowerCase())).filter(Boolean);
   return field.kind === 'select' ? input.value : input.value.trim();
@@ -141,7 +150,7 @@ const isEmpty = (value) => value == null || value === '' || (Array.isArray(value
 // editable where it is, and `rows(...)`, which makes a table of records with a row per record.
 
 const ROW_PARTS = {
-  outcomes: { blank: () => ({ role: 'secondary', name: '', measure: '', type: 'continuous', timepoint: '' }), empty: (o) => !o.name && !o.measure },
+  outcomes: { blank: () => ({ role: 'secondary', name: '', measure: '', type: 'continuous', timepoint: '', target: null }), empty: (o) => !o.name && !o.measure },
   numbers: {
     blank: () => ({ outcome: '', statistics: [], per: 'each_arm', timepoint: '', purpose: '' }),
     empty: (s) => !s.outcome && !s.statistics.length && !s.purpose,
@@ -211,6 +220,34 @@ const PARTS = {
             spec.planning[key] = value;
           }, 'Not specified'))))));
     },
+  },
+  targets: {
+    title: 'Planning effects by outcome', folded: true,
+    count: (spec) => `${spec.outcomes.length} outcomes`,
+    hint: 'Specify the effect and its units. An importance boundary applies only to this outcome, timepoint and contrast. Leave it blank when unknown; narrative importance evidence remains provisional.',
+    view: (spec, panel) => spec.outcomes.map((outcome, i) => {
+      const fields = [
+        ['metric', choice('Effect measure', Object.fromEntries(['unknown', 'mean_difference', 'standardized_mean_difference', 'risk_difference', 'risk_ratio', 'odds_ratio', 'hazard_ratio'].map((k) => [k, STATISTICS[k] || 'Not specified'])))],
+        ['unit', choice('Units', EFFECT_UNITS)], ['direction', choice('Contrast direction', EFFECT_DIRECTIONS)],
+        ['standardizer', choice('Standardizing SD', STANDARDIZERS)],
+        ['importance_threshold', { label: 'Signed important-difference boundary', kind: 'number' }],
+        ['importance_rule', choice('Important effects are', { unknown: 'Not specified', at_least: 'At least this value', at_most: 'At most this value' })],
+        ['importance_scope', choice('The importance evidence concerns', { unknown: 'Not specified', between_groups: 'A between-group effect', individual_change: 'An individual change' })],
+        ['importance_quote', text('Investigator statement supporting this boundary')],
+      ];
+      return h('div', {}, h('h4', {}, `${outcome.name} · ${outcome.timepoint || 'timepoint unspecified'}`),
+        h('table', { class: 'spec-table kv' }, h('tbody', {}, fields.map(([key, field]) =>
+          h('tr', {}, h('th', { scope: 'row' }, field.label), h('td', {}, panel.edit(`outcomes.${i}.target.${key}`, field,
+            (outcome.target || blankTarget())[key], (value) => {
+              outcome.target ||= blankTarget();
+              if (['metric', 'unit', 'direction', 'standardizer'].includes(key)) {
+                outcome.target.importance_threshold = null;
+                outcome.target.importance_quote = '';
+              }
+              if (['importance_threshold', 'importance_rule', 'importance_scope'].includes(key)) outcome.target.importance_quote = '';
+              outcome.target[key] = value;
+            })))))));
+    }),
   },
   stated: {
     title: 'Values your paragraph states',
@@ -378,6 +415,10 @@ export class SpecPanel {
         input.reportValidity();
         return false;
       }
+      if (field.kind === 'number' && (!input.checkValidity() || (input.value && !Number.isFinite(Number(input.value))))) {
+        input.reportValidity();
+        return false;
+      }
       const updated = readInput(field, input);
       const changed = JSON.stringify(updated) !== JSON.stringify(value);
       if (changed) set(updated);
@@ -434,7 +475,10 @@ export class SpecPanel {
       h('thead', {}, h('tr', {}, columns.map((c) => h('th', { scope: 'col' }, c.label)), h('th', { class: 'row-remove' }, h('span', { class: 'visually-hidden' }, 'Remove')))),
       h('tbody', {}, rows.map((row, i) => h('tr', {},
         columns.map((c) => h('td', { 'data-label': c.label },
-          this.edit(`${part}.${i}.${c.key}`, c, row[c.key], (v) => { row[c.key] = v; writeBack(rows); }, '—'))),
+          this.edit(`${part}.${i}.${c.key}`, c, row[c.key], (v) => {
+            if (part === 'outcomes' && ['name', 'measure', 'type', 'timepoint'].includes(c.key)) row.target = null;
+            row[c.key] = v; writeBack(rows);
+          }, '—'))),
         h('td', { class: 'row-remove' }, action('×', { class: 'remove', key: `${part}.${i}.remove`, 'aria-label': `Remove ${noun} ${i + 1}`, title: `Remove this ${noun}` }, () => {
           rows.splice(i, 1);
           writeBack(rows);

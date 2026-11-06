@@ -446,9 +446,11 @@ def test_browser_ports_match_python(browser, site_url):
     assert {v["record"]: v["estimand"] for v in read["values"]} == {"R1": "E1", "R2": None, "R3": "E2", "R4": None, "R5": None}
     # A summary goes out of date once a paper is read: the reading joins its row of the basis.
     unread = result["basis"]
-    assert result["basisWithContexts"][0] == [*unread[0], CONTEXT_PAPERS[0]["context"]["result"]]
-    assert result["basisWithContexts"][1:] == [unread[1], [*unread[2], CONTEXT_PAPERS[2]["context"]["result"]], *unread[3:5],
-                                                 [*unread[5], CONTEXT_PAPERS[5]["context"]["result"]]]
+    def with_reading(index):
+        context = CONTEXT_PAPERS[index]['context']
+        return [*unread[index], context['result'], {k: context.get(k) for k in ('checks', 'spec_basis', 'extraction_basis')}]
+    assert result["basisWithContexts"][0] == with_reading(0)
+    assert result["basisWithContexts"][1:] == [unread[1], with_reading(2), *unread[3:5], with_reading(5)]
     assert result["europepmc"] == [
         [europepmc_pmid(r), None if europepmc_pmid(r) else asdict(europepmc_record(r)), europepmc_url(str(r["id"]))]
         for r in data["europepmc"]
@@ -885,9 +887,9 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     rows = list(csv.DictReader(io.StringIO(open(download.value.path(), encoding="utf-8").read())))
     assert len(rows) == 6 and {r["id"] for r in rows} == {"11111111"} and rows[0]["quote_check"] == "exact"
     # Each row carries its result's estimand and model, after the result's own columns.
-    assert list(rows[0])[14:27] == ["confidence", "design", "estimand_population", "estimand_treatments", "estimand_variable",
+    assert list(rows[0])[14:28] == ["confidence", "design", "estimand_population", "estimand_treatments", "estimand_variable",
                                     "intercurrent_events", "summary_measure", "model", "missing_data", "numbers_are", "vs_plan",
-                                    "differences", "group"]
+                                    "differences", "comparison_current", "group"]
     assert {(r["design"], r["estimand_population"], r["model"], r["vs_plan"], r["differences"]) for r in rows} == {
         ("two-arm parallel RCT, individually randomized", "all randomized (ITT)", "ANCOVA adjusted for baseline", "same", "")}
     with page.expect_download() as download:
@@ -2215,6 +2217,45 @@ def test_csv_exports_keep_spreadsheets_from_running_formulas(browser, site_url):
     page.close()
 
 
+def test_target_editor_and_stale_comparison(browser, site_url, tmp_path):
+    from test_planning import spec
+    from test_evidence import papers
+    from esf.evidence import comparison_basis
+    import copy
+    plan = spec()
+    paper = papers()[0]
+    paper['context'].update(spec_basis=comparison_basis(plan), extraction_basis=copy.deepcopy(paper['extraction']))
+    page = browser.new_page(viewport={"width": 1100, "height": 1000})
+    page.goto(site_url)
+    page.evaluate("""async ({plan, paper}) => {
+        const {SpecPanel} = await import('/lib/spec-panel.js');
+        const {studyContext, resultBox} = await import('/lib/review-view.js');
+        const root = document.createElement('div'); root.id = 'contract-test'; document.body.replaceChildren(root);
+        window.panel = new SpecPanel(root, {onSave: (s) => {window.savedPlan = s;}});
+        window.panel.show(plan);
+        const changed = structuredClone(plan); changed.planning.intercurrent_events = 'A new hypothetical strategy';
+        const review = document.createElement('div'); review.id = 'stale-test'; document.body.append(review);
+        review.append(studyContext(paper, {spec: changed, read: () => {window.refreshClicked = true;}}));
+        review.append(resultBox(paper, paper.extraction.results[0], 0, {}, () => {}, changed));
+    }""", {'plan': plan, 'paper': paper})
+    page.locator('[data-part="targets"] summary').click()
+    page.locator('[data-edit="outcomes.0.target.unit"]').click()
+    page.locator('#contract-test select').select_option('percentage_points')
+    saved = page.evaluate('window.savedPlan')
+    assert saved['outcomes'][0]['target']['importance_threshold'] is None
+    assert saved['outcomes'][0]['target']['importance_quote'] == ''
+    page.locator('[data-edit="outcomes.0.target.importance_threshold"]').click()
+    field = page.locator('#contract-test input[type="number"]')
+    field.fill('-3'); field.press('Enter')
+    assert page.evaluate('window.savedPlan.outcomes[0].target.importance_threshold') == -3
+    assert page.locator('#stale-test .estimand[data-fit="stale"]').count() == 1
+    assert 'Comparison needs updating' in page.locator('#stale-test').inner_text()
+    page.get_by_role('button', name='Read the estimand and model again', exact=True).click()
+    assert page.evaluate('window.refreshClicked')
+    page.screenshot(path=str(tmp_path / 'target-editor.png'), full_page=True)
+    page.close()
+
+
 def test_planning_recommendation_rendering_and_spec_staleness(browser, site_url):
     from esf.planning import finalize_summary
     from test_planning import example, summary as make_summary, spec as make_spec, choice
@@ -2412,7 +2453,7 @@ def test_both_editions_export_the_same_columns(browser, site_url):
     page.goto(site_url + "vendor/LICENSES.txt")
     columns = page.evaluate("async () => (await import('/lib/export.js')).COLUMNS")
     assert columns == EXPORT_COLUMNS
-    assert columns[columns.index("confidence") + 1:columns.index("group")] == [
+    assert columns[columns.index("confidence") + 1:columns.index("comparison_current")] == [
         "design", "estimand_population", "estimand_treatments", "estimand_variable", "intercurrent_events", "summary_measure",
         "model", "missing_data", "numbers_are", "vs_plan", "differences"]
     page.close()

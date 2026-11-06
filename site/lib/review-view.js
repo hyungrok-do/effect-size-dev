@@ -5,8 +5,8 @@
 // [V3], and is shown here with their numbers. Styles are in review.css.
 
 import { cleanAffiliations } from './affiliations.js';
-import { decisionsBasis } from './evidence.js';
-import { STATISTICS } from './spec-panel.js';
+import { comparisonCurrent, decisionsBasis } from './evidence.js';
+import { EFFECT_DIRECTIONS, EFFECT_UNITS, STATISTICS } from './spec-panel.js';
 import { PLANNING_VERSION } from './planning.js';
 
 const PAPER = -1; // result_index of a decision about the whole paper
@@ -174,7 +174,7 @@ function contextOf(paper, index) {
 // else that bears on using its numbers. Until the manager has read it (paper.context), a line says it
 // is reading it, or a button asks it to: `read()`, null while the page may not start that (a search
 // is running). Nothing for a paper with no results.
-export function studyContext(paper, { read = null } = {}) {
+export function studyContext(paper, { read = null, spec = null } = {}) {
   if (paper.status !== 'extracted' || !paper.extraction?.results.length) return null;
   const context = paper.context;
   const ask = (label) => read && h('button', { type: 'button', class: 'secondary small', onclick: read }, label);
@@ -182,6 +182,9 @@ export function studyContext(paper, { read = null } = {}) {
     const c = context.result;
     const row = (term, ...value) => h('div', {}, h('dt', {}, term), h('dd', {}, ...value));
     return h('dl', { class: 'study-context' },
+      spec && !comparisonCurrent(paper, spec) && row('Comparison needs updating',
+        'This reading has an older or unknown study plan or extraction. Its comparison with your plan needs checking. ',
+        ask('Read the estimand and model again')),
       row('Design', c.design),
       c.sample_size && row('Sample-size calculation', h('q', {}, c.sample_size), ' ',
         c.sample_size_location && h('span', { class: 'where' }, c.sample_size_location), ' ', contextCheck(context.checks?.sample_size)),
@@ -205,20 +208,21 @@ export function studyContext(paper, { read = null } = {}) {
 // handling of missing data (marked when the quote that describes it was not found in the paper), what
 // the printed numbers are in terms of that model, and what they can do for the planned calculation.
 // `check` is the check of the model's quote. A result the manager's reading leaves out says so instead.
-function estimandBlock(read, check) {
+function estimandBlock(read, check, current = null) {
   if (!read) {
     return h('div', { class: 'estimand', 'data-fit': 'unread' }, h('div', { class: 'fit' },
       badge('Estimand not read', 'warn'), h('span', { class: 'muted small' }, 'The manager’s reading does not cover this result.')));
   }
-  const [label, , kind] = FIT[read.vs_plan] || [read.vs_plan, '', ''];
+  const [label, , kind] = current === false ? ['Comparison needs updating', '', 'warn'] : FIT[read.vs_plan] || [read.vs_plan, '', ''];
   const row = (term, ...value) => h('div', {}, h('dt', {}, term), h('dd', {}, ...value));
-  return h('div', { class: 'estimand', 'data-fit': read.vs_plan },
+  return h('div', { class: 'estimand', 'data-fit': current === false ? 'stale' : read.vs_plan },
     h('div', { class: 'fit' }, badge(label, kind),
       read.differences.length > 0 && h('ul', { class: 'differences' }, read.differences.map((d) => h('li', {}, d)))),
     h('dl', {},
       row('Estimand', h('span', { class: 'attributes' }, ATTRIBUTES.map(([key, name]) => h('span', {},
         h('span', { class: 'k' }, name), h('span', {}, read[key] || '—'))))),
       row('Model', read.model, check === 'missing' && [' ', contextCheck(check)],
+        check == null && read.model_kind !== 'descriptive' && [' ', badge('Model not supported by a quote', 'warn')],
         read.missing_data && h('span', { class: 'missing-data' }, h('span', { class: 'k' }, 'Missing data'), ' ', read.missing_data)),
       row('The numbers are', read.numbers_are),
       row('For the planned calculation', read.use)));
@@ -444,7 +448,7 @@ function checkBadge(check) {
 // among them, are folded away, and those not found exactly are counted in the head.
 // `decisions` is the paper's {resultIndex: {decision, reason}}; `decide(index, decision, reason)`
 // records one (a null decision clears it).
-export function resultBox(paper, result, index, decisions, decide) {
+export function resultBox(paper, result, index, decisions, decide, spec = null) {
   const own = decisions[index];
   const decision = (own || decisions[PAPER])?.decision || '';
   const checks = paper.verification?.values?.[index] || [];
@@ -484,12 +488,15 @@ export function resultBox(paper, result, index, decisions, decide) {
     h('td', {}, v.group),
     h('td', {}, STATISTICS[v.statistic] || v.statistic),
     h('td', { class: 'num' }, String(v.value)),
+    h('td', {}, EFFECT_UNITS[v.unit] || 'Not specified',
+      v.group_role && v.group_role !== 'unknown' && h('div', {}, `Arm role: ${v.group_role}`),
+      v.contrast_direction && v.contrast_direction !== 'unknown' && h('div', {}, EFFECT_DIRECTIONS[v.contrast_direction])),
     h('td', { class: 'quote' }, h('q', {}, v.quote), h('span', {}, v.location)),
     h('td', {}, checkBadge(checks[j]))));
 
   return h('section', { class: 'result', 'data-decision': decision || null },
     head,
-    (context || paper.context?.status === 'done') && estimandBlock(context?.read, context?.check),
+    (context || paper.context?.status === 'done') && estimandBlock(context?.read, context?.check, comparisonCurrent(paper, spec)),
     resultLines(result),
     notes.length > 0 && h('p', { class: 'flags' }, notes.join(' · ')),
     foldable(`quotes:${paper.id}:${index}`, { class: 'quotes' }, 'Quotes',
@@ -498,7 +505,7 @@ export function resultBox(paper, result, index, decisions, decide) {
       context?.read.quote && h('p', { class: 'model-quote' }, h('span', { class: 'k' }, 'Model'), ' ', h('q', {}, context.read.quote), ' ',
         context.read.location && h('span', { class: 'where' }, context.read.location), ' ', contextCheck(context.check)),
       h('div', { class: 'table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, ['Group', 'Statistic', 'Value', 'Quote', 'Check'].map((t) => h('th', { scope: 'col' }, t)))),
+        h('thead', {}, h('tr', {}, ['Group', 'Statistic', 'Value', 'Units and direction', 'Quote', 'Check'].map((t) => h('th', { scope: 'col' }, t)))),
         h('tbody', {}, rows)))));
 }
 
@@ -553,6 +560,7 @@ function withValues(text, values, study) {
 function estimandCell(v, estimands) {
   const e = estimands.get(v.estimand);
   if (!e) return h('td', { class: 'muted', title: 'Not read' }, '—');
+  if (e.comparison_current === false) return h('td', {}, badge('Comparison needs updating', 'warn'));
   const [, label, kind] = FIT[e.vs_plan] || ['', e.vs_plan, ''];
   const why = e.differences?.length ? e.differences
     : [e.vs_plan === 'same' ? 'The same quantity as the planned estimand' : 'No difference listed'];
@@ -570,8 +578,8 @@ function sourceEstimand(effect, values, readings) {
     return h('div', { class: 'source-estimand', 'data-fit': 'unread' }, h('div', { class: 'fit' },
       badge('Estimand not read', 'warn'), h('span', { class: 'muted small' }, 'What the source result estimates, and with which model, is unknown.')));
   }
-  const [label, , kind] = FIT[e.vs_plan] || [e.vs_plan, '', ''];
-  return h('div', { class: 'source-estimand', 'data-fit': e.vs_plan },
+  const [label, , kind] = e.comparison_current === false ? ['Comparison needs updating', '', 'warn'] : FIT[e.vs_plan] || [e.vs_plan, '', ''];
+  return h('div', { class: 'source-estimand', 'data-fit': e.comparison_current === false ? 'stale' : e.vs_plan },
     h('div', { class: 'fit' }, badge(label, kind),
       e.differences?.length > 0 && h('ul', { class: 'differences' }, e.differences.map((d) => h('li', {}, d)))),
     e.model && h('p', { class: 'model' }, h('span', { class: 'k' }, 'Model'), ' ', e.model));
@@ -659,7 +667,7 @@ export function summaryView({ summary, spec, overlap, papers, decisions, linksOf
     stale && h('p', { class: 'notice stale' }, 'Your decisions have changed since this was written, or the study specification or evidence '
       + 'has changed, or the manager has since read a paper’s estimands. Write it again before using the recommendation.'),
     result.planning_version !== PLANNING_VERSION && h('p', { class: 'notice' },
-      'This saved summary predates planning recommendations. Write it again to ask the head agent for a final effect size and justification.'),
+      'This saved summary predates the current planning checks. Write it again to validate the effect size and justification.'),
     ...(result.recommendations || []).map((rec) => {
       const effect = rec.resolved;
       const label = { recommended: 'Recommended planning effect', provisional: 'Provisional planning effect',
@@ -690,7 +698,8 @@ export function summaryView({ summary, spec, overlap, papers, decisions, linksOf
           h('p', { class: 'muted small' }, 'Alternative planning assumptions; these are not confidence limits.'),
           ...rec.sensitivity.map((scenario) => h('div', { class: 'summary-block' },
             h('strong', {}, `${scenario.label}: ${number(scenario.resolved.value)}`), calc(scenario.resolved),
-            h('p', {}, text(scenario.choice.rationale))))));
+            h('p', {}, text(scenario.choice.rationale)),
+            scenario.validation_notes?.length > 0 && h('ul', {}, scenario.validation_notes.map((note) => h('li', {}, note)))))));
     }),
     h('div', { class: 'summary-overview' }, text(result.overview)),
     ...result.needs.map((need) => {

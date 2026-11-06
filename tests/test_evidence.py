@@ -14,7 +14,7 @@ LINE = "PHQ-9 at 12 weeks: app 8.1 (SD 4.2, n = 50); waitlist 10.3 (SD 4.5, n = 
 # What build_evidence gave each value and each record before the manager read contexts; the reading
 # adds one field to each, at the end.
 VALUE_FIELDS = [
-    "key", "record", "result", "outcome", "timepoint", "group", "statistic", "value", "ci_level", "describes", "n",
+    "key", "record", "result", "outcome", "timepoint", "group", "statistic", "value", "ci_level", "unit", "group_role", "contrast_direction", "standardizer", "describes", "n",
     "relevance", "confidence", "decision", "analysis_population", "adjusted", "outcome_type", "independent_groups",
     "concerns", "flags", "quote", "location", "quote_found", "same_participants_as",
 ]
@@ -81,7 +81,7 @@ def test_the_kept_results_carry_their_estimands_and_the_values_name_them():
     # Each estimand names its result as the values do (record:index from 0).
     assert [(e["key"], e["record"], e["result"]) for e in evidence["estimands"]] == [("E1", "R1", "R1:0"), ("E2", "R2", "R2:1")]
     first = evidence["estimands"][0]
-    assert list(first) == ["key", "record", "result", "outcome", "timepoint", *ESTIMAND_FIELDS, "model_quote"]
+    assert list(first) == ["key", "record", "result", "outcome", "timepoint", *ESTIMAND_FIELDS, "model_quote", "comparison_current"]
     assert (first["outcome"], first["timepoint"], first["model"], first["variable"]) == (
         "PHQ-9", "12 weeks", "ANCOVA adjusted for baseline PHQ-9", "PHQ-9 at 12 weeks (result 1)")
     second = evidence["estimands"][1]
@@ -120,7 +120,7 @@ def test_a_summary_stays_current_until_a_papers_context_is_read():
     before = papers()
     basis = decisions_basis(before, DECISIONS)
     # The context is part of the basis only once it is done.
-    assert [len(row) for row in basis] == [9, 9, 8, 8, 9, 8]
+    assert [len(row) for row in basis] == [10, 10, 8, 8, 10, 8]
     assert basis[0][8] == before[0]["context"]["result"]
     after = papers()
     after[2]["context"] = _done(_reading(1))
@@ -142,13 +142,13 @@ def test_the_export_carries_the_managers_reading_of_each_result():
     rows = export_rows(SimpleNamespace(decisions=lambda _: {}, papers=lambda *args, **kwargs: papers()), "project", False)
     assert all(list(row) == EXPORT_COLUMNS for row in rows)
     at = EXPORT_COLUMNS.index
-    assert at("confidence") + 1 == at("design") and at("differences") + 1 == at("group")
-    assert EXPORT_COLUMNS[at("design"):at("group")] == [
+    assert at("confidence") + 1 == at("design") and at("differences") + 1 == at("comparison_current")
+    assert EXPORT_COLUMNS[at("design"):at("comparison_current")] == [
         "design", "estimand_population", "estimand_treatments", "estimand_variable", "intercurrent_events", "summary_measure",
         "model", "missing_data", "numbers_are", "vs_plan", "differences",
     ]
     read = next(r for r in rows if r["paper_id"] == 1 and r["result"] == 1)
-    assert {column: read[column] for column in EXPORT_COLUMNS[at("design"):at("group")]} == {
+    assert {column: read[column] for column in EXPORT_COLUMNS[at("design"):at("comparison_current")]} == {
         "design": "two-arm parallel RCT", "estimand_population": "all randomized", "estimand_treatments": "app vs waitlist",
         "estimand_variable": "PHQ-9 at 12 weeks (result 1)", "intercurrent_events": "stopping the app: treatment policy",
         "summary_measure": "difference in mean PHQ-9", "model": "ANCOVA adjusted for baseline PHQ-9",

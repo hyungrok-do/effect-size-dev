@@ -9,10 +9,11 @@ import copy
 import json
 import math
 import re
+from .targets import effect_details, importance_notes, target_notes, validate_domain
 
 EFFECTS = {"mean_difference", "standardized_mean_difference", "risk_difference", "risk_ratio", "odds_ratio", "hazard_ratio"}
 RATIOS = {"risk_ratio", "odds_ratio", "hazard_ratio"}
-VERSION = 1
+VERSION = 2
 
 
 def resolve_choice(choice: dict, evidence: dict) -> dict:
@@ -97,6 +98,8 @@ def resolve_choice(choice: dict, evidence: dict) -> dict:
             raise ValueError("Two distinct arms are required.")
     if not math.isfinite(value):
         raise ValueError("The derived effect is not finite.")
+    details = effect_details(vs, method)
+    validate_domain(metric, details["unit"], value)
     basis_value = value
     target = choice.get("target_value")
     if target is not None:
@@ -105,12 +108,11 @@ def resolve_choice(choice: dict, evidence: dict) -> dict:
         null = 1 if metric in RATIOS else 0
         if (target - null) * (basis_value - null) <= 0 or (metric in RATIOS and target <= 0):
             raise ValueError("A proposed target must retain the evidence estimate's direction and valid scale.")
-        if method == "risk_difference" and abs(target) > 1:
-            raise ValueError("A proposed risk difference must be between minus one and one.")
+        validate_domain(metric, details["unit"], target)
         value = target
     return {"value": value, "basis_value": basis_value,
             "origin": "planning_assumption" if target is not None else "evidence_estimate",
-            "metric": metric, "scale": scale, "contrast": contrast,
+            "metric": metric, "scale": scale, "contrast": contrast, **details,
             "outcome": first["outcome"], "timepoint": first["timepoint"], "record": first["record"],
             "formula": formula, "inputs": keys, "input_values": nums}
 
@@ -122,11 +124,13 @@ def _estimand_notes(key: str | None, evidence: dict) -> list[str]:
     if reading is None:
         return ["The manager has not read the selected result's estimand and model."]
     notes = []
+    if reading.get("comparison_current") is not True:
+        notes.append("The estimand comparison has no current study-plan and extraction basis; read it again before using it.")
     how = "; ".join(reading.get("differences") or [])
     fit = {"different": "different from", "close": "close to, not the same as,"}.get(reading.get("vs_plan"))
     if fit:
         notes.append(f"The manager read the selected result's estimand as {fit} the planned one" + (f": {how}." if how else "."))
-    if reading.get("model_quote") == "missing":
+    if reading.get("model_quote") == "missing" or (reading.get("model_quote") is None and reading.get("model_kind") != "descriptive"):
         notes.append("The model the manager described for the selected result is not supported by a quote found in the paper.")
     return notes
 
@@ -174,14 +178,11 @@ def finalize_summary(result: dict, evidence: dict, spec: dict) -> dict:
             vs = [known[k] for k in resolved["inputs"]]
             source = records[resolved["record"]]
             notes = rec["validation_notes"]
-            # Unclear importance cannot be promoted merely because the model claims it is supported.
-            supplied = bool(context.get("clinical_importance", "").strip() and context.get("clinical_importance_source", "").strip())
-            cited_records = {resolved["record"], *re.findall(r"\bR\d+\b", rec.get("importance_basis", ""))}
-            extracted = any(a.get("domain") == "clinical_importance" and a.get("quote_found")
-                            for key in cited_records for a in records.get(key, {}).get("appraisal", []))
-            if rec["clinical_importance"] != "supported" or not (supplied or extracted):
+            notes += target_notes(resolved, outcome)
+            importance = importance_notes(resolved, outcome)
+            if rec["clinical_importance"] != "supported" or importance:
                 rec["clinical_importance"] = "unknown"
-                notes.append("Clinical importance has not been established from the supplied evidence.")
+                notes += importance or ["Clinical importance has not been established from the supplied evidence."]
             if any(not context.get(k, "").strip() for k in ("objective", "effect_measure", "analysis", "analysis_population", "intercurrent_events")):
                 notes.append("The planned estimand or analysis still has unspecified components.")
             if any(v.get("decision") != "include" for v in vs):
@@ -197,18 +198,22 @@ def finalize_summary(result: dict, evidence: dict, spec: dict) -> dict:
             if source.get("study_type") != "rct" or not source.get("matches_spec"):
                 notes.append("The selected report is not a confirmed matching randomized trial; assess applicability.")
             notes += _estimand_notes(vs[0].get("estimand"), evidence)
-            if notes:
-                rec["status"] = "provisional"
             scenarios = []
             for scenario in rec.get("sensitivity") or []:
                 try:
                     alt = resolve_choice(scenario["choice"], evidence)
-                    if any(alt[k] != resolved[k] for k in ("metric", "scale", "contrast", "outcome", "timepoint")):
+                    if any(alt[k] != resolved[k] for k in ("metric", "scale", "contrast", "outcome", "timepoint", "unit", "direction", "standardizer")):
                         raise ValueError("Sensitivity scenarios must match the effect metric, scale, contrast, outcome and timepoint.")
-                    scenarios.append({**scenario, "resolved": alt})
+                    null = 1 if resolved["metric"] in RATIOS else 0
+                    if (alt["value"] - null) * (resolved["value"] - null) <= 0:
+                        raise ValueError("Sensitivity scenarios must retain the main effect's non-null direction.")
+                    scenario_notes = target_notes(alt, outcome) + _estimand_notes(known[alt["inputs"][0]].get("estimand"), evidence)
+                    scenarios.append({**scenario, "resolved": alt, "validation_notes": scenario_notes})
                 except ValueError as exc:
                     notes.append(f"Sensitivity scenario omitted: {exc}")
             rec["sensitivity"] = scenarios
+            if notes:
+                rec["status"] = "provisional"
         except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
             rec["status"], rec["choice"], rec["resolved"], rec["sensitivity"] = "insufficient_evidence", None, None, []
             rec["validation_notes"].append(str(exc))

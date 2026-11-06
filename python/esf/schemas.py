@@ -84,12 +84,35 @@ class Comparator(BaseModel):
     kind: ComparatorKind
 
 
+EffectMetric = Literal["mean_difference", "standardized_mean_difference", "risk_difference", "risk_ratio", "odds_ratio", "hazard_ratio", "unknown"]
+EffectUnit = Literal["original_units", "standardized_units", "proportion", "percentage_points", "ratio", "unknown"]
+EffectDirection = Literal["intervention_minus_comparator", "comparator_minus_intervention", "intervention_over_comparator", "comparator_over_intervention", "unknown"]
+Standardizer = Literal["endpoint_sd", "change_sd", "other", "unknown"]
+
+
+class PlanningTarget(BaseModel):
+    metric: EffectMetric
+    unit: EffectUnit
+    direction: EffectDirection
+    standardizer: Standardizer = Field(description="For a standardized effect only: which SD defines it; unknown if unspecified.")
+    importance_threshold: float | None = Field(strict=True, allow_inf_nan=False, description="Explicit investigator-supplied signed boundary on THIS metric, unit and direction; null if absent. Never invent or convert a threshold.")
+    importance_rule: Literal["at_least", "at_most", "unknown"] = Field(description="Which side of the signed boundary is clinically important, e.g. at_most for a negative difference or a beneficial HR below one.")
+    importance_scope: Literal["between_groups", "individual_change", "unknown"]
+    importance_quote: str = Field(description="Exact investigator text supporting this outcome's threshold and applicability, or empty. An individual change threshold does not establish a between-group difference.")
+
+
 class Outcome(BaseModel):
     name: str = Field(description="What is measured, e.g. depressive symptoms.")
     measure: str = Field(description="The instrument or definition, e.g. PHQ-9 total score (0-27); empty if not stated.")
     role: Literal["primary", "secondary"]
     type: OutcomeType
     timepoint: str = Field(description="When it is measured, e.g. 12 weeks after randomization; empty if not stated.")
+    target: PlanningTarget | None = Field(description="The structured planning effect for THIS outcome. Null for an older or unspecified target.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_target(cls, data):
+        return {"target": None, **data} if isinstance(data, dict) else data
 
 
 class NeededStatistic(BaseModel):
@@ -155,10 +178,10 @@ def upgrade_spec(spec: dict) -> dict:
     """A specification saved before the structured fields, in the current shape. Mirrors upgradeSpec
     in site/lib/spec-panel.js."""
     if isinstance(spec.get("population"), dict):
-        return {"planning": None, **spec}
+        return {"planning": None, **spec, "outcomes": [{"target": None, **o} for o in spec.get("outcomes", [])]}
     timepoint = spec.get("timepoint") or ""
     outcomes = [
-        {"name": name, "measure": "", "role": "secondary" if i else "primary",
+        {"name": name, "measure": "", "role": "secondary" if i else "primary", "target": None,
          "type": spec.get("outcome_type") or "unclear", "timepoint": timepoint}
         for i, name in enumerate(spec.get("outcomes") or [])
     ]
@@ -252,14 +275,19 @@ class ReportedValue(BaseModel):
     )
     quote: str = Field(description="Verbatim text from the document that contains this number.")
     location: str = Field(description="Where it is: 'Table 2', 'Abstract', 'Results, paragraph 3'.")
+    unit: EffectUnit = Field(description="Unit of this printed value. For risk differences explicitly distinguish proportion from percentage_points; never infer from magnitude. original_units for raw continuous means and SDs; unknown if unclear or inapplicable.")
+    group_role: Literal["intervention", "comparator", "other", "unknown"] = Field(description="For arm-level values: which trial arm this is. unknown when the role cannot be established; other for a contrast or pooled value.")
+    contrast_direction: EffectDirection = Field(description="For a reported contrast: its subtraction order or numerator/reference. unknown for arm-level values or when unclear.")
+    standardizer: Standardizer = Field(description="For a reported standardized effect, the SD defining it. unknown if unclear or inapplicable.")
 
     @model_validator(mode="before")
     @classmethod
     def legacy_confidence_level(cls, data):
         # Existing saved extractions have no structured confidence level. Keep that unknown while
         # requiring new model outputs to explicitly supply the nullable field in their JSON schema.
-        if isinstance(data, dict) and "ci_level" not in data:
-            return {**data, "ci_level": None}
+        if isinstance(data, dict):
+            return {"ci_level": None, "unit": "unknown", "group_role": "unknown",
+                    "contrast_direction": "unknown", "standardizer": "unknown", **data}
         return data
 
 
@@ -343,6 +371,7 @@ class ResultContext(BaseModel):
         "structure, e.g. 'MMRM: arm, week, arm by week, baseline PHQ-9; unstructured covariance'; 'descriptive "
         "summaries' when the numbers come from no model."
     )
+    model_kind: Literal["descriptive", "model", "unknown"] = Field(description="descriptive only when these numbers require no fitted model or test; model for a named model/test; unknown when not established. Missing quotations for model/unknown readings leave them unconfirmed.")
     missing_data: str = Field(
         description="How missing outcomes were handled, e.g. 'multiple imputation under MAR', 'complete cases', "
         "'not stated'."
@@ -372,6 +401,11 @@ class ResultContext(BaseModel):
         description="What these numbers can and cannot supply for the planned sample-size calculation, and what to "
         "check or adjust first. Never a number of your own."
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_model_kind(cls, data):
+        return {"model_kind": "unknown", **data} if isinstance(data, dict) else data
 
 
 class StudyContext(BaseModel):

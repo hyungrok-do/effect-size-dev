@@ -22,7 +22,7 @@ import anthropic
 from . import prompts
 from .chatgpt import ChatGPTError
 from .config import Settings
-from .evidence import build_evidence, decisions_basis, overlap_records
+from .evidence import build_evidence, comparison_basis, decisions_basis, overlap_records
 from .fulltext import FullText, get_fulltext
 from .planning import finalize_summary
 from .llm import LLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
@@ -30,7 +30,7 @@ from .openai_llm import OpenAIError
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
 from .sources import Record, SourceError, Sources, europepmc_pmid, europepmc_record, trial_record
 from .store import Store, now
-from .verify import Verification, check_context, escalation_reasons, in_audit_sample, one_reading_per_result, verify
+from .verify import Verification, check_context, escalation_reasons, in_audit_sample, one_reading_per_result, verify, verify_spec_importance
 
 log = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ class Pipeline:
         assert project is not None
         self.store.update_project(project_id, status="reading", error=None)
         try:
-            spec = self.llm.read_spec(project["paragraph"], self._sink(project_id))
+            spec = verify_spec_importance(self.llm.read_spec(project["paragraph"], self._sink(project_id)), project["paragraph"])
         except Exception as exc:  # surfaced in the UI
             log.exception("reading the problem failed")
             self.store.update_project(project_id, status="error", error=f"Reading the problem failed. {describe_error(exc)}")
@@ -471,7 +471,7 @@ class Pipeline:
                 self.check_overlap(project_id)
                 overlap = (self.store.project(project_id) or {})["overlap"]
             decisions = self.store.decisions(project_id)
-            evidence = build_evidence(papers, decisions, overlap["report"])
+            evidence = build_evidence(papers, decisions, overlap["report"], spec.model_dump())
             if not evidence["values"]:
                 raise ValueError("There is nothing to summarize: no extracted result is kept.")
             result = self.llm.summarize(spec, overlap["report"], evidence, self._sink(project_id))
@@ -635,6 +635,8 @@ class Pipeline:
         """The manager reads each result's estimand and model, one reading kept per result; its quotes are
         checked against the paper's text. A failure is kept with the paper, whose extraction stands; in a
         run, one that would fail every paper stops the run."""
+        spec_basis = comparison_basis(spec.model_dump())
+        extraction_basis = self.store.paper(paper_id)["extraction"]
         try:
             context = one_reading_per_result(self.llm.study_context(spec, document, extraction, sink), len(extraction.results))
         except Exception as exc:
@@ -649,6 +651,8 @@ class Pipeline:
             "status": "done",
             "result": context.model_dump(),
             "checks": check_context(context, text),
+            "spec_basis": spec_basis,
+            "extraction_basis": extraction_basis,
             "model": getattr(self.llm, "manager_model", None),
         })
 

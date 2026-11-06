@@ -933,7 +933,7 @@ function paperCard(paper, trials) {
     }),
     overlap,
     // What the study is, statistically: its design, its own sample-size calculation, notes.
-    studyContext(paper, { read: running ? null : () => readContext(paper) }),
+    studyContext(paper, { read: running ? null : () => readContext(paper), spec: state.project.spec }),
   ];
 
   const screen = paper.screen;
@@ -965,7 +965,7 @@ function paperCard(paper, trials) {
   if (extracted) {
     if (!paper.extraction.results.length) body.push(h('p', { class: 'reason muted' }, 'No relevant results were reported.'));
     paper.extraction.results.forEach((result, i) => body.push(
-      resultBox(paper, result, i, decisions, (index, decision, reason) => decide(paper, index, decision, reason))));
+      resultBox(paper, result, i, decisions, (index, decision, reason) => decide(paper, index, decision, reason), state.project.spec)));
   } else {
     // Not extracted: why, which is what matters here.
     if (screen) body.push(h('p', { class: 'reason' }, `Screening (${screen.decision}): ${screen.reason}`));

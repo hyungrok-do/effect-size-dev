@@ -69,7 +69,7 @@ function readings(paper) {
 // What the summary is told about a result's estimand, from the manager's reading (ResultContext).
 const ESTIMAND_FIELDS = [
   'population', 'treatments', 'variable', 'intercurrent_events', 'summary_measure', 'model', 'missing_data',
-  'numbers_are', 'vs_plan', 'differences', 'use',
+  'numbers_are', 'vs_plan', 'differences', 'use', 'model_kind',
 ];
 
 // The manager's statement of a record's design and its own sample-size calculation, if it read them.
@@ -82,7 +82,24 @@ function recordContext(paper) {
   };
 }
 
-export function buildEvidence(papers, decisions, overlap) {
+export function comparisonBasis(spec) {
+  return structuredClone({ ...Object.fromEntries(['design', 'population', 'intervention', 'comparator'].map((k) => [k, spec[k] ?? null])),
+    planning: spec.planning ? Object.fromEntries(['objective', 'effect_measure', 'analysis', 'analysis_population', 'intercurrent_events'].map((k) => [k, spec.planning[k] ?? ''])) : null,
+    outcomes: (spec.outcomes || []).map((o) => ({ ...o, target: o.target
+      ? Object.fromEntries(['metric', 'unit', 'direction', 'standardizer'].map((k) => [k, o.target[k] ?? 'unknown'])) : null })) });
+}
+
+const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, canonical(value[k])])) : value;
+const equal = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+
+export function comparisonCurrent(paper, spec) {
+  if (!spec) return null;
+  return paper.context?.status === 'done' && equal(paper.context.spec_basis, comparisonBasis(spec))
+    && equal(paper.context.extraction_basis, paper.extraction);
+}
+
+export function buildEvidence(papers, decisions, overlap, spec = null) {
   const useInstead = new Map(); // record -> the record of the same participants to use instead
   for (const group of overlap?.groups || []) {
     if (!group.use || group.relation !== 'same_study') continue;
@@ -106,6 +123,7 @@ export function buildEvidence(papers, decisions, overlap) {
           key: estimand, record: recordKey(p), result: `${recordKey(p)}:${i}`, outcome: r.outcome_measure, timepoint: r.timepoint,
           ...Object.fromEntries(ESTIMAND_FIELDS.map((name) => [name, c[name] ?? null])),
           model_quote: modelQuote, // 'exact', 'approximate', 'missing', or null with no quote
+          comparison_current: comparisonCurrent(p, spec),
         });
       }
       r.values.forEach((v, j) => {
@@ -120,6 +138,7 @@ export function buildEvidence(papers, decisions, overlap) {
           statistic: v.statistic,
           value: v.value,
           ci_level: v.ci_level ?? null,
+          ...Object.fromEntries(['unit', 'group_role', 'contrast_direction', 'standardizer'].map((k) => [k, v[k] ?? 'unknown'])),
           describes: v.describes,
           n: v.statistic === 'n' || !sizes.has(v.group) ? null : sizes.get(v.group),
           relevance: r.relevance,
@@ -169,7 +188,10 @@ export function decisionsBasis(papers, decisions) {
       Object.entries(decisions[p.id] || {}).map(([k, d]) => [Number(k), d.decision]).sort((a, b) => a[0] - b[0]),
       p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value, v.ci_level ?? null])]),
       p.extraction, p.verification ?? null, p.fulltext_kind ?? null, p.screen ?? null];
-    if (contextOf(p)) row.push(contextOf(p)); // a summary written before then goes out of date when it is read
+    if (contextOf(p)) {
+      row.push(contextOf(p)); // a summary written before then goes out of date when it is read
+      row.push(Object.fromEntries(['checks', 'spec_basis', 'extraction_basis'].map((k) => [k, p.context[k] ?? null])));
+    }
     return row;
   }));
 }
