@@ -89,11 +89,31 @@ def _readings(paper: dict) -> dict[int, tuple[dict, str | None]]:
 # What the summary is told about a result's estimand, from the manager's reading (ResultContext).
 ESTIMAND_FIELDS = (
     "population", "treatments", "variable", "intercurrent_events", "summary_measure", "model", "missing_data",
-    "numbers_are", "vs_plan", "differences", "use",
+    "numbers_are", "vs_plan", "differences", "use", "model_kind",
 )
 
 
-def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) -> dict:
+def comparison_basis(spec: dict) -> dict:
+    """Scientific plan fields used to interpret applicability; search wording is not a dependency."""
+    outcomes = [{"target": None, **deepcopy(o)} for o in spec.get("outcomes") or []]
+    for o in outcomes:
+        if o["target"]:
+            o["target"] = {k: o["target"].get(k, "unknown") for k in ("metric", "unit", "direction", "standardizer")}
+    planning = spec.get("planning")
+    return {**{k: deepcopy(spec.get(k)) for k in ("design", "population", "intervention", "comparator")},
+            "planning": {k: planning.get(k, "") for k in ("objective", "effect_measure", "analysis", "analysis_population", "intercurrent_events")} if planning else None,
+            "outcomes": outcomes}
+
+
+def comparison_current(paper: dict, spec: dict | None) -> bool | None:
+    if spec is None:
+        return None
+    context = paper.get("context") or {}
+    return (context.get("status") == "done" and context.get("spec_basis") == comparison_basis(spec)
+            and context.get("extraction_basis") == paper.get("extraction"))
+
+
+def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None, spec: dict | None = None) -> dict:
     use_instead: dict[str, str] = {}  # record -> the record of the same participants to use instead
     for group in (overlap or {}).get("groups") or []:
         if group.get("use") and group.get("relation") == "same_study":
@@ -120,6 +140,7 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                     "outcome": r["outcome_measure"], "timepoint": r["timepoint"],
                     **{name: reading.get(name) for name in ESTIMAND_FIELDS},
                     "model_quote": model_quote,  # 'exact', 'approximate', 'missing', or None with no quote
+                    "comparison_current": comparison_current(p, spec),
                 })
             for j, v in enumerate(r["values"]):
                 check = row[j] if j < len(row) else None
@@ -133,6 +154,7 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                     "statistic": v["statistic"],
                     "value": v["value"],
                     "ci_level": v.get("ci_level"),
+                    **{key: v.get(key, "unknown") for key in ("unit", "group_role", "contrast_direction", "standardizer")},
                     "describes": v["describes"],
                     "n": None if v["statistic"] == "n" else sizes.get(v["group"]),
                     "relevance": r["relevance"],
@@ -198,6 +220,7 @@ def decisions_basis(papers: list[dict], decisions: dict) -> list:
                p.get("verification"), p.get("fulltext_kind"), p.get("screen")]
         if _context(p) is not None:  # a summary written before then goes out of date when it is read
             row.append(_context(p))
+            row.append({k: (p.get("context") or {}).get(k) for k in ("checks", "spec_basis", "extraction_basis")})
         rows.append(row)
     return deepcopy(rows)
 

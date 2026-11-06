@@ -16,6 +16,41 @@ meta-analysis or calculate sample size.
 
 This project was largely generated with Claude Code and is under validation.
 
+### Checks on planning recommendations
+
+Each outcome has an editable **Planning effects by outcome** section: its metric, units, contrast
+direction and, for standardized effects, the SD defining it. Source values carry their units and
+arm roles too. The final calculation must match this target. Incompatible metrics, units or contrast
+directions are rejected; unspecified information keeps a numerical proposal provisional. Reported
+risk differences require explicit proportion or percentage-point units, checked against [-1, 1] or
+[-100, 100] respectively. Values are never silently rescaled or reversed.
+
+An investigator's explicit important-difference boundary belongs to one outcome, timepoint, metric,
+unit and direction. Enter it as a signed boundary with **At least** or **At most**: for example, a
+reduction of at least 3 points is a boundary of -3 with **At most**, for intervention minus comparator.
+The boundary extracted from the initial paragraph must have a matching quote and number in that
+paragraph; subsequent edits are investigator input. An individual-change threshold cannot establish
+between-group importance. A target that fails the stated boundary may remain a provisional planning
+assumption with explicit justification, but its clinical importance is marked unknown. Narrative and
+literature-based importance evidence remains visible; in this edition it cannot by itself certify
+the proposed magnitude, so the recommendation remains provisional without an explicit criterion.
+
+The manager's estimand comparison records the study plan and extraction it used. A relevant plan edit
+or changed extraction makes the comparison out of date, with a button to read it again. Search-term
+and importance-boundary edits alone do not invalidate the paper's statistical reading. A named or
+unknown model without a supporting quotation also keeps a recommendation provisional; descriptive
+summaries can explicitly state that no model is required. The underlying source facts are retained.
+
+Older projects still open, with unknown metadata left unknown. Rewrite old summaries to apply these
+checks; reread a paper when its comparison has no current basis, and re-extract it to obtain missing
+source units or arm roles. CSV and JSON exports retain the source metadata and comparison status.
+These checks establish internal consistency and provenance, not automatic scientific validity.
+
+`tests/test_target_contract.py` runs the validation cases against both editions. Three curated
+published-result excerpts in `tests/reference_effects.json` cover percentage-point risk differences,
+hazard ratios and adjusted odds ratios, with source links and interpretation notes. These are tests
+of the deterministic validation path, not a benchmark of live-model extraction from full papers.
+
 ## Two editions
 
 | | Browser edition (`site/`) | Local server (`python/`, `web/`) |

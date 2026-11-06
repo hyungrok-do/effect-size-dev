@@ -10,7 +10,7 @@ import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
-from .schemas import OutcomeResult, PaperExtraction, StudyContext
+from .schemas import OutcomeResult, PaperExtraction, SearchSpec, StudyContext
 
 _DASHES = dict.fromkeys(map(ord, "−‒–—‐‑﹣－"), "-")
 _NUMBER = re.compile(r"(?<![\d.])-?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)(?!\d)")
@@ -39,6 +39,24 @@ def _same(a: float, b: float) -> bool:
 def number_in(value: float, text: str) -> bool:
     """Is the value printed in the text, including its sign? Never infer a sign from prose."""
     return any(_same(n, value) for n in numbers_in(text))
+
+
+def verify_spec_importance(spec: SearchSpec, paragraph: str) -> SearchSpec:
+    """An extracted planning boundary must occur in the investigator's quoted paragraph.
+    Later edits in the specification are direct investigator input.
+    """
+    spec = spec.model_copy(deep=True)
+    source = Source(paragraph)
+    for outcome in spec.outcomes:
+        target = outcome.target
+        if target is None or target.importance_threshold is None:
+            continue
+        quote = target.importance_quote
+        number = target.importance_threshold
+        if source.find_quote(quote) != "exact" or not (number_in(number, quote) or number_in(abs(number), quote)):
+            target.importance_threshold = None
+            spec.open_questions.append(f"Confirm the important-difference boundary for {outcome.name}: its value or supporting quote was not found in your paragraph.")
+    return spec
 
 
 class Source:

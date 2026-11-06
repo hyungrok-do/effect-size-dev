@@ -1,7 +1,8 @@
 // Fixed, auditable within-study calculations. Keep in step with python/esf/planning.py.
+import { effectDetails, importanceNotes, targetNotes, validateDomain } from './targets.js';
 const EFFECTS = new Set(['mean_difference', 'standardized_mean_difference', 'risk_difference', 'risk_ratio', 'odds_ratio', 'hazard_ratio']);
 const RATIOS = new Set(['risk_ratio', 'odds_ratio', 'hazard_ratio']);
-export const PLANNING_VERSION = 1;
+export const PLANNING_VERSION = 2;
 const fail = (message) => { throw new Error(message); };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -66,16 +67,18 @@ export function resolveChoice(choice, evidence) {
     if (a === b) fail('Two distinct arms are required.');
   }
   if (!Number.isFinite(value)) fail('The derived effect is not finite.');
+  const details = effectDetails(vs, method);
+  validateDomain(metric, details.unit, value);
   const basis_value = value, target = choice.target_value;
   if (target != null) {
     if (typeof target !== 'number' || !Number.isFinite(target) || !choice.rationale?.trim()) fail('A proposed target needs a finite value and explicit justification.');
     const nullValue = RATIOS.has(metric) ? 1 : 0;
     if ((target - nullValue) * (basis_value - nullValue) <= 0 || (RATIOS.has(metric) && target <= 0)) fail("A proposed target must retain the evidence estimate's direction and valid scale.");
-    if (method === 'risk_difference' && Math.abs(target) > 1) fail('A proposed risk difference must be between minus one and one.');
+    validateDomain(metric, details.unit, target);
     value = target;
   }
   return { value, basis_value, origin: target != null ? 'planning_assumption' : 'evidence_estimate',
-    metric, scale, contrast, outcome: first.outcome, timepoint: first.timepoint, record: first.record,
+    metric, scale, contrast, ...details, outcome: first.outcome, timepoint: first.timepoint, record: first.record,
     formula, inputs: keys, input_values: nums };
 }
 
@@ -85,10 +88,11 @@ function estimandNotes(key, evidence) {
   const reading = (evidence.estimands || []).find((e) => e.key === key);
   if (!reading) return ["The manager has not read the selected result's estimand and model."];
   const notes = [];
+  if (reading.comparison_current !== true) notes.push('The estimand comparison has no current study-plan and extraction basis; read it again before using it.');
   const how = (reading.differences || []).join('; ');
   const fit = reading.vs_plan === 'different' ? 'different from' : reading.vs_plan === 'close' ? 'close to, not the same as,' : null;
   if (fit) notes.push(`The manager read the selected result's estimand as ${fit} the planned one${how ? `: ${how}.` : '.'}`);
-  if (reading.model_quote === 'missing') {
+  if (reading.model_quote === 'missing' || (reading.model_quote == null && reading.model_kind !== 'descriptive')) {
     notes.push('The model the manager described for the selected result is not supported by a quote found in the paper.');
   }
   return notes;
@@ -121,11 +125,10 @@ export function finalizeSummary(raw, evidence, spec) {
       rec.resolved = resolved;
       const vs = resolved.inputs.map((k) => known.get(k)), source = records.get(resolved.record);
       const notes = rec.validation_notes;
-      const supplied = Boolean(context.clinical_importance?.trim() && context.clinical_importance_source?.trim());
-      const cited = new Set([resolved.record, ...(rec.importance_basis.match(/\bR\d+\b/g) || [])]);
-      const extracted = [...cited].some((key) => (records.get(key)?.appraisal || []).some((a) => a.domain === 'clinical_importance' && a.quote_found));
-      if (rec.clinical_importance !== 'supported' || !(supplied || extracted)) {
-        rec.clinical_importance = 'unknown'; notes.push('Clinical importance has not been established from the supplied evidence.');
+      notes.push(...targetNotes(resolved, outcome));
+      const importance = importanceNotes(resolved, outcome);
+      if (rec.clinical_importance !== 'supported' || importance.length) {
+        rec.clinical_importance = 'unknown'; notes.push(...(importance.length ? importance : ['Clinical importance has not been established from the supplied evidence.']));
       }
       if (['objective', 'effect_measure', 'analysis', 'analysis_population', 'intercurrent_events'].some((k) => !context[k]?.trim())) notes.push('The planned estimand or analysis still has unspecified components.');
       if (vs.some((v) => v.decision !== 'include')) notes.push('Some selected results have not yet been included by the investigator.');
@@ -136,14 +139,17 @@ export function finalizeSummary(raw, evidence, spec) {
       if (![outcome.name, outcome.measure || ''].map(normalize).includes(normalize(resolved.outcome)) || normalize(resolved.timepoint) !== normalize(outcome.timepoint || '')) notes.push('The source outcome label or timepoint differs from the planned outcome; confirm equivalence.');
       if (source.study_type !== 'rct' || !source.matches_spec) notes.push('The selected report is not a confirmed matching randomized trial; assess applicability.');
       notes.push(...estimandNotes(vs[0].estimand, evidence));
-      if (notes.length) rec.status = 'provisional';
       rec.sensitivity = (rec.sensitivity || []).flatMap((scenario) => {
         try {
           const alt = resolveChoice(scenario.choice, evidence);
-          if (['metric', 'scale', 'contrast', 'outcome', 'timepoint'].some((k) => alt[k] !== resolved[k])) fail('Sensitivity scenarios must match the effect metric, scale, contrast, outcome and timepoint.');
-          return [{ ...scenario, resolved: alt }];
+          if (['metric', 'scale', 'contrast', 'outcome', 'timepoint', 'unit', 'direction', 'standardizer'].some((k) => alt[k] !== resolved[k])) fail('Sensitivity scenarios must match the effect metric, scale, contrast, outcome and timepoint.');
+          const nullValue = RATIOS.has(resolved.metric) ? 1 : 0;
+          if ((alt.value - nullValue) * (resolved.value - nullValue) <= 0) fail("Sensitivity scenarios must retain the main effect's non-null direction.");
+          const scenarioNotes = [...targetNotes(alt, outcome), ...estimandNotes(known.get(alt.inputs[0]).estimand, evidence)];
+          return [{ ...scenario, resolved: alt, validation_notes: scenarioNotes }];
         } catch (error) { notes.push(`Sensitivity scenario omitted: ${error.message}`); return []; }
       });
+      if (notes.length) rec.status = 'provisional';
     } catch (error) {
       rec.status = 'insufficient_evidence'; rec.choice = null; rec.resolved = null; rec.sensitivity = [];
       rec.validation_notes.push(error.message);

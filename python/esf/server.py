@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .chatgpt import CALLBACK_PATH, JOB_REFRESH_WAIT, ChatGPTError, ChatGPTSession
 from .config import MODEL_CHOICES, Settings
+from .evidence import comparison_current
 from .llm import LLM, NO_KEY, ClaudeLLM, server_credentials
 from .openai_llm import OpenAIError, OpenAILLM
 from .pipeline import Pipeline, previous_summary
@@ -246,7 +247,7 @@ EXPORT_COLUMNS = [
     "paper_id", "source", "id", "doi", "title", "year", "text_used", "extracted_by", "result", "outcome_measure",
     "timepoint", "analysis_population", "adjusted", "relevance", "confidence", "design", "estimand_population",
     "estimand_treatments", "estimand_variable", "intercurrent_events", "summary_measure", "model", "missing_data",
-    "numbers_are", "vs_plan", "differences", "group", "statistic", "value", "ci_level", "describes", "quote", "location",
+    "numbers_are", "vs_plan", "differences", "comparison_current", "group", "statistic", "value", "ci_level", "unit", "group_role", "contrast_direction", "standardizer", "describes", "quote", "location",
     "quote_check", "number_in_quote", "concerns", "flags", "decision", "decision_reason",
 ]
 # The export's columns from the manager's reading of a result (ResultContext), by the field they come from.
@@ -270,7 +271,7 @@ def csv_cell(value: object) -> object:
     return value
 
 
-def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict]:
+def export_rows(store: Store, project_id: str, included_only: bool, spec: dict | None = None) -> list[dict]:
     decisions = store.decisions(project_id)
     rows = []
     for paper in store.papers(project_id, status="extracted"):
@@ -294,6 +295,7 @@ def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict
                 "design": study["design"] if reading else "",
                 **{column: reading[field] if reading else "" for column, field in CONTEXT_COLUMNS.items()},
                 "differences": "; ".join(reading["differences"]) if reading else "",
+                "comparison_current": comparison_current(paper, spec) if spec is not None else "",
             }
             for value_index, value in enumerate(result["values"]):
                 check = checks[index][value_index] if index < len(checks) and value_index < len(checks[index]) else {}
@@ -319,6 +321,7 @@ def export_rows(store: Store, project_id: str, included_only: bool) -> list[dict
                         "statistic": value["statistic"],
                         "value": value["value"],
                         "ci_level": value.get("ci_level") if value.get("ci_level") is not None else "",
+                        **{key: value.get(key, "unknown") for key in ("unit", "group_role", "contrast_direction", "standardizer")},
                         "describes": value["describes"],
                         "quote": value["quote"],
                         "location": value["location"],
@@ -752,11 +755,11 @@ def create_app(
 
     @app.get("/api/projects/{project_id}/export.csv")
     def export_csv(project_id: str, included_only: bool = False) -> Response:
-        get_project(project_id)
+        project = get_project(project_id)
         buffer = io.StringIO()
         writer = csv.DictWriter(buffer, fieldnames=EXPORT_COLUMNS)
         writer.writeheader()
-        for row in export_rows(store, project_id, included_only):
+        for row in export_rows(store, project_id, included_only, project.get("spec")):
             writer.writerow({column: csv_cell(value) for column, value in row.items()})
         name = f"effect-sizes-{project_id}{'-included' if included_only else ''}.csv"
         return Response(

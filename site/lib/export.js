@@ -1,6 +1,7 @@
 // CSV and JSON exports, built in the page. Same columns as the Python server's export.
 
 import { roleOf } from './providers.js';
+import { comparisonCurrent } from './evidence.js';
 
 export const PAPER = -1; // result_index of a decision about the whole paper
 
@@ -15,8 +16,8 @@ const ESTIMAND_COLUMNS = [
 
 export const COLUMNS = [
   'paper_id', 'source', 'id', 'doi', 'title', 'year', 'text_used', 'extracted_by', 'result', 'outcome_measure',
-  'timepoint', 'analysis_population', 'adjusted', 'relevance', 'confidence', ...ESTIMAND_COLUMNS, 'group', 'statistic',
-  'value', 'ci_level', 'describes', 'quote', 'location', 'quote_check', 'number_in_quote', 'concerns', 'flags', 'decision',
+  'timepoint', 'analysis_population', 'adjusted', 'relevance', 'confidence', ...ESTIMAND_COLUMNS, 'comparison_current', 'group', 'statistic',
+  'value', 'ci_level', 'unit', 'group_role', 'contrast_direction', 'standardizer', 'describes', 'quote', 'location', 'quote_check', 'number_in_quote', 'concerns', 'flags', 'decision',
   'decision_reason',
 ];
 
@@ -34,7 +35,7 @@ function estimandColumns(paper, index) {
   };
 }
 
-export function exportRows(papers, decisions, includedOnly) {
+export function exportRows(papers, decisions, includedOnly, spec = null) {
   const rows = [];
   for (const paper of papers.filter((p) => p.status === 'extracted' && p.extraction)) {
     const checks = paper.verification?.values || [];
@@ -52,6 +53,8 @@ export function exportRows(papers, decisions, includedOnly) {
           analysis_population: result.analysis_population, adjusted: result.adjusted, relevance: result.relevance,
           confidence: result.confidence, ...estimand, group: value.group, statistic: value.statistic, value: value.value,
           ci_level: value.ci_level ?? '',
+          comparison_current: spec ? comparisonCurrent(paper, spec) : '',
+          ...Object.fromEntries(['unit', 'group_role', 'contrast_direction', 'standardizer'].map((k) => [k, value[k] ?? 'unknown'])),
           describes: value.describes, quote: value.quote, location: value.location, quote_check: check.quote ?? '',
           number_in_quote: check.number_in_quote ?? '', concerns: result.concerns.join('; '),
           flags: flags.filter((f) => f.startsWith(`result ${index + 1} `)).join('; '),
