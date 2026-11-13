@@ -722,6 +722,11 @@ class FakeOpenAI:
             document = {"title": files[0]["filename"].removesuffix(".pdf") if files else first}
             extraction = PaperExtraction.model_validate(json.loads(text.split(CONTEXT_INPUT, 1)[1]))
             return self.llm.study_context(SPEC, document, extraction)
+        if name == "ContextAudit":
+            from esf.schemas import ContextAudit
+            context = json.loads(text.split("Proposed reading:\n", 1)[1])
+            return ContextAudit(results=[{"result": r["result"], "verdict": "insufficient_information",
+                                         "issues": ["Legacy fixture has no structured profile"]} for r in context["results"]])
         if name == "OverlapReport":
             return self.llm.check_overlap(SPEC, json.loads(text.split("Records:\n", 1)[1]))
         if name == "EvidenceSummary":

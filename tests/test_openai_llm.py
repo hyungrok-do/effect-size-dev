@@ -146,7 +146,7 @@ def test_the_summary_is_given_the_estimands_of_the_results():
     [part] = body["input"][0]["content"]
     header, data = part["text"].split("\n", 1)
     assert header == "Records, the estimands of their results, the overlap check and the values:"
-    assert list(json.loads(data)) == ["records", "estimands", "overlap", "values"]
+    assert list(json.loads(data)) == ["records", "estimands", "overlap", "values", "analyses"]
     assert json.loads(data)["estimands"] == evidence["estimands"] and json.loads(data)["records"] == evidence["records"]
 
 
@@ -397,7 +397,8 @@ def test_a_whole_search_runs_on_openai_models(tmp_path):
     pipeline.summarize(project_id)
     summary = store.project(project_id)["summary"]
     assert summary["status"] == "done" and summary["evidence"]["estimands"]
-    assert summary["result"]["needs"][0]["estimands"].startswith("[V")
+    assert summary["result"]["tables"]["analyses"]
+    assert "recommendations" not in summary["result"]
 
 
 def test_a_used_up_plan_stops_the_run(tmp_path):

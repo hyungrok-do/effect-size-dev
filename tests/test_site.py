@@ -254,6 +254,10 @@ class Network:
     def structured(self, body):
         system = body["system"][0]["text"]
         content = body["messages"][0]["content"]
+        if system.startswith(prompts.CONTEXT_AUDIT):
+            context = json.loads(content[-1]["text"].split("Proposed reading:\n", 1)[1])
+            return {"results": [{"result": r["result"], "verdict": "insufficient_information",
+                                 "issues": ["Legacy fixture has no structured profile"]} for r in context["results"]]}
         if system.startswith(prompts.SPEC):
             return SPEC.model_dump()
         if system.startswith(prompts.OVERLAP):
@@ -420,7 +424,7 @@ def test_browser_ports_match_python(browser, site_url):
     # What the evidence holds: the excluded result and paper are gone, the overlapping record is kept
     # and marked as the same participants as the record to use, and nothing is combined.
     evidence = result["evidence"]
-    assert list(evidence) == ["records", "estimands", "values"] and evidence["estimands"] == []
+    assert list(evidence) == ["records", "estimands", "values", "analyses"] and evidence["estimands"] == []
     assert all(r["context"] is None for r in evidence["records"]) and all(v["estimand"] is None for v in evidence["values"])
     assert not any(v["outcome"] == "GAD-7" for v in evidence["values"]) and not any(v["record"] == "R6" for v in evidence["values"])
     assert [r["key"] for r in evidence["records"]] == sorted({v["record"] for v in evidence["values"]}, key=lambda k: int(k[1:]))
@@ -431,7 +435,7 @@ def test_browser_ports_match_python(browser, site_url):
     # values carry, and each record it read carries its design and its own sample-size calculation. A
     # reading that failed or is running counts as none; an excluded result or paper keeps none.
     read = result["withContexts"]
-    assert list(read) == ["records", "estimands", "values"]
+    assert list(read) == ["records", "estimands", "values", "analyses"]
     assert [(e["key"], e["record"], e["result"], e["vs_plan"], e["differences"]) for e in read["estimands"]] == [
         ("E1", "R1", "R1:0", "same", []), ("E2", "R3", "R3:0", "different", ["completers rather than all randomized"])]
     # Each with whether its model's quote was found, from the check of that reading (R3's first of two).
@@ -932,73 +936,27 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     page.wait_for_selector("#source-text mark")
     page.click("#source-close")
 
-    # The summary: for each effect size to find, the values side by side, described by Opus by key and
-    # shown as printed, with a separate provisional planning target.
+    # New reports are source-linked tables, with no numerical planning recommendation.
     page.click("#tab-summary")
     page.click("#summarize")
-    page.wait_for_selector("#summary-body .summary-overview", timeout=15000)
-    body = page.inner_text("#summary-body")
-    assert "Provisional planning effect" in body
-    recommendation = page.locator('.planning-recommendation').first
-    assert '0.3' in recommendation.locator('.planning-effect').inner_text()
-    assert 'Evidence estimate: 0.35' in recommendation.inner_text()
-    assert 'head-agent judgment' in recommendation.inner_text()
-    # Beside the calculation, what its source result estimates as Opus read the review: a pooled
-    # standardized effect, another quantity than the planned one, which keeps the choice provisional.
-    source = recommendation.locator(".source-estimand")
-    assert recommendation.evaluate("(r) => r.querySelector('.effect-calculation').nextElementSibling.className") == "source-estimand"
-    assert source.get_attribute("data-fit") == "different" and source.locator(".badge").inner_text() == "Different estimand"
-    assert source.locator(".differences li").all_inner_texts() == ["standardized scale, not PHQ-9 points"]
-    assert " ".join(source.locator(".model").inner_text().split()) == "Model random-effects meta-analysis"
-    assert ("The manager read the selected result's estimand as different from the planned one: standardized scale, not PHQ-9 points."
-            in recommendation.inner_text())
-    need = page.locator("#summary-body .summary-block.need").first
-    assert need.locator("h3").inner_text() == "The difference and its SD"
-    # What the values estimate and with which model comes first, then how they compare.
-    assert need.locator("h4.label").all_text_contents() == ["Estimands", "How they compare"]
-    estimands = need.locator("p.estimands")
-    assert "estimates the planned difference in mean PHQ-9 with an ANCOVA." in estimands.inner_text() and estimands.locator(".cand").count() == 1
-    # The SDs as printed, smallest and largest, each with the record it came from.
-    chips = need.locator("p.comparison .cand").all_inner_texts()
-    assert [c.split()[0] for c in chips] == ["3.8", "4.5"] and all(c.split()[1].startswith("R") for c in chips)
-    # One row per arm of each result, a column per statistic.
-    arms = page.evaluate("""async () => {
-        const { Store } = await import('/lib/store.js');
-        const { summary } = await new Store().project(location.hash.slice(1));
-        const values = new Map(summary.evidence.values.map((v) => [v.key, v]));
-        return new Set(summary.result.needs[0].values.map((k) => values.get(k)).map((v) => JSON.stringify([v.result, v.group]))).size;
-    }""")
-    assert need.locator("tbody tr").count() == arms
-    assert need.locator("thead th").all_inner_texts() == ["Study", "Outcome", "Group", "Estimand", "n", "Mean", "SD", "Check"]
-    # Each row's estimand against the plan, how it differs and the model on hover.
-    fits = need.locator("tbody tr td:nth-child(4) .badge")
-    assert fits.count() == arms and set(fits.all_inner_texts()) == {"Same as planned"}
-    assert fits.first.get_attribute("title") == "The same quantity as the planned estimand\nModel: ANCOVA adjusted for baseline"
-    # The registry record's values are listed, marked as the same participants as its paper.
-    registry_rows = need.locator("tbody tr", has_text="same participants as")
-    assert registry_rows.count() > 0 and all("Mindfulness App" in t for t in registry_rows.all_inner_texts())
-    # Each study links to its page: a paper to PubMed or Europe PMC, a registry record to ClinicalTrials.gov.
-    studies = need.locator("tbody tr td:first-child a")
-    assert studies.count() == arms
-    hrefs = studies.evaluate_all("links => links.map((a) => [a.textContent, a.href, a.target])")
-    assert all(target == "_blank" for _, _, target in hrefs)
-    assert all(href.startswith(("https://pmc.ncbi.nlm.nih.gov/articles/PMC", "https://pubmed.ncbi.nlm.nih.gov/", "https://europepmc.org/",
-                                "https://clinicaltrials.gov/study/NCT"))
-               for _, href, _ in hrefs), hrefs
-    assert registry_rows.first.locator("a").get_attribute("href") == "https://clinicaltrials.gov/study/NCT01234567"
-    # Records the text names by key are linked too, and so are those in the overlap list.
-    named = page.locator("#summary-body .summary-overview a")
-    assert named.count() == 1 and named.inner_text().startswith("R") and named.get_attribute("href").startswith("https://")
-    assert page.locator("#summary-body .summary-block li a").count() >= 5
-    assert "one study reported more than once" in body and "No dropout rates." in body
-    assert page.locator("#summary-body details summary").first.inner_text().startswith("Every value kept (")
-    page.locator("#summary-body details summary").first.click()
-    every = page.locator("#summary-body details").first.locator(".value-table")
-    assert every.locator("thead th").all_inner_texts() == ["Key", "Study", "Outcome", "Group", "Estimand", "Statistic", "Value", "n", "Check"]
-    pooled = every.locator("tbody tr", has_text="SMD").locator("td:nth-child(5) .badge")
-    assert pooled.inner_text() == "Different" and pooled.get_attribute("title").startswith("standardized scale, not PHQ-9 points")
-    # The agent panel shows the number with its key, not the bare key.
-    assert "the largest SD is 4.5 [V" in page.inner_text("#activity")
+    page.wait_for_selector('[data-table="population-findings"]', timeout=15000)
+    assert page.locator('.planning-recommendation').count() == 0
+    findings = page.locator('[data-table="population-findings"]')
+    assert findings.locator('thead th').all_inner_texts() == ["Population", "Comparison", "Outcome / time", "Target parameter",
+        "Reports / analyses", "Reported effects and uncertainty", "Combination status", "Combined effect / uncertainty"]
+    assert findings.locator('tbody tr').count() == 8
+    assert "INSUFFICIENT INFORMATION" in findings.inner_text()
+    assert "Not calculated" in findings.inner_text()
+    every = page.locator('[data-table="reported-values"]')
+    assert "standardized_mean_difference" in every.inner_text() and "0.35" in every.inner_text()
+    assert "Same participants as" in every.inner_text()
+    assert page.locator('[data-table="analysis-extraction"] tbody tr').count() == 8
+    assert page.locator('[data-table="analysis-extraction"] tbody a[target="_blank"]').count() == 8
+    with page.expect_download() as downloaded:
+        findings.get_by_role('button', name='Export table CSV').click()
+    rows = list(csv.DictReader(io.StringIO(open(downloaded.value.path(), encoding="utf-8").read())))
+    assert len(rows) == 8 and all(r['Combined effect / uncertainty'] == 'Not calculated' for r in rows)
+    assert "no combined effects calculated" in page.inner_text("#activity")
 
     # The whole agent activity log exports, oldest first: a row per step with when it ran, the models
     # that served it, its tokens and its whole outcome; the JSON says which steps were part of which.
@@ -1050,11 +1008,11 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     steps = {}
     for headers, body in calls:
         system = (body.get("system") or [{"text": ""}])[0]["text"]
-        step = next((s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "OVERLAP", "SUMMARIZE")
+        step = next((s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "CONTEXT_AUDIT", "OVERLAP", "SUMMARIZE")
                      if system.startswith(getattr(prompts, s))), "FETCH")
         steps.setdefault(step, (headers, body))
-    assert set(steps) == {"SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "OVERLAP", "SUMMARIZE", "FETCH"}
-    expected = {"SPEC": (OPUS, "high"), "SEARCH": (OPUS, "high"), "ADJUDICATE": (OPUS, "xhigh"), "CONTEXT": (OPUS, "high"),
+    assert set(steps) == {"SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "CONTEXT_AUDIT", "OVERLAP", "SUMMARIZE", "FETCH"}
+    expected = {"SPEC": (OPUS, "high"), "SEARCH": (OPUS, "high"), "ADJUDICATE": (OPUS, "xhigh"), "CONTEXT": (OPUS, "high"), "CONTEXT_AUDIT": (OPUS, "high"),
                 "OVERLAP": (OPUS, "high"), "SUMMARIZE": (OPUS, "high"), "FETCH": (SONNET, "low"), "SCREEN": (HAIKU, "low"),
                 "EXTRACT": (HAIKU, "medium")}
     for step, (model, effort) in expected.items():
@@ -1076,7 +1034,7 @@ def test_search_and_review_in_the_browser(browser, site_url, tmp_path):
     summarized = steps["SUMMARIZE"][1]["messages"][0]["content"][0]["text"]
     assert summarized.startswith("Records, the estimands of their results, the overlap check and the values:\n")
     sent = json.loads(summarized.split("\n", 1)[1])
-    assert list(sent) == ["records", "estimands", "overlap", "values"] and len(sent["estimands"]) == 8
+    assert list(sent) == ["records", "estimands", "overlap", "values", "analyses"] and len(sent["estimands"]) == 8
     assert all(v["estimand"] for v in sent["values"]) and all(r["context"]["design"] for r in sent["records"])
     fetch = steps["FETCH"][1]
     assert fetch["tools"] == [{"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 1}]
@@ -1276,9 +1234,9 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     assert "Reading the estimand and model of “" in page.inner_text("#timeline")
 
     page.click("#tab-summary")
-    assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol recommends a planning effect size")
+    assert page.inner_text("#summary .summary").startswith("Population-specific findings")
     page.click("#summarize")
-    page.wait_for_selector("#summary-body .summary-overview", timeout=15000)
+    page.wait_for_selector('[data-table="population-findings"]', timeout=15000)
 
     calls = network.openai_calls
     assert calls and all(h["authorization"] == f"Bearer {OPENAI_KEY}" for h, _ in calls)
@@ -1288,11 +1246,11 @@ def test_the_page_runs_on_openai_models(browser, site_url):
     for _, body in calls:
         assert body["store"] is False and body["stream"] is True and "max_output_tokens" not in body and "temperature" not in body
         assert all(item.get("role") != "system" for item in body["input"])
-        step = next(s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "OVERLAP", "SUMMARIZE")
+        step = next(s for s in ("SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "CONTEXT_AUDIT", "OVERLAP", "SUMMARIZE")
                     if body["instructions"].startswith(getattr(prompts, s)))
         steps.setdefault(step, body)
     expected = {"SPEC": ("gpt-6.1-sol", "high"), "SEARCH": ("gpt-6.1-sol", "high"), "ADJUDICATE": ("gpt-6.1-sol", "xhigh"),
-                "CONTEXT": ("gpt-6.1-sol", "high"), "OVERLAP": ("gpt-6.1-sol", "high"), "SUMMARIZE": ("gpt-6.1-sol", "high"),
+                "CONTEXT": ("gpt-6.1-sol", "high"), "CONTEXT_AUDIT": ("gpt-6.1-sol", "high"), "OVERLAP": ("gpt-6.1-sol", "high"), "SUMMARIZE": ("gpt-6.1-sol", "high"),
                 "SCREEN": ("gpt-6-luna", "low"), "EXTRACT": ("gpt-6-luna", "medium")}
     assert set(steps) == set(expected)
     for step, (model, effort) in expected.items():

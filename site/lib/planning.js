@@ -1,3 +1,4 @@
+import { finalizeTables } from './reporting.js';
 // Fixed, auditable within-study calculations. Keep in step with python/esf/planning.py.
 const EFFECTS = new Set(['mean_difference', 'standardized_mean_difference', 'risk_difference', 'risk_ratio', 'odds_ratio', 'hazard_ratio']);
 const RATIOS = new Set(['risk_ratio', 'odds_ratio', 'hazard_ratio']);
@@ -101,6 +102,8 @@ const empty = (outcome) => ({ outcome, status: 'insufficient_evidence', estimand
 
 export function finalizeSummary(raw, evidence, spec) {
   const result = structuredClone(raw);
+  if (raw.table_plan) return { table_plan: raw.table_plan, tables: finalizeTables(raw.table_plan, evidence),
+    overview: '', needs: [], overlap: '', caveats: [], gaps: [], recommendations: [] };
   const known = new Map(evidence.values.map((v) => [v.key, v]));
   const records = new Map(evidence.records.map((r) => [r.key, r]));
   const context = spec.planning || {};

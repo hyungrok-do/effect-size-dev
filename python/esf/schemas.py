@@ -46,6 +46,7 @@ Statistic = Literal[
     "mean_change",
     "sd_change",
     "mean_difference",
+    "coefficient",
     "standardized_mean_difference",
     "odds_ratio",
     "risk_ratio",
@@ -313,10 +314,80 @@ class PaperExtraction(BaseModel):
         return data
 
 
+class SourceFact(BaseModel):
+    """A field's interpretation and its own source, never an unsupported default."""
+
+    value: str
+    status: Literal["reported", "reconstructed", "unclear", "not_reported", "conflicting"]
+    quote: str = Field(description="Verbatim support, empty only when not available.")
+    location: str
+    rationale: str = Field(description="Derivation for reconstructed fields or explanation of ambiguity; otherwise empty.")
+
+
+class PopulationDetails(BaseModel):
+    intended: SourceFact
+    eligibility: SourceFact
+    recruited: SourceFact
+    analysis_set: SourceFact
+    subgroup: SourceFact
+    setting: SourceFact
+    sample_sizes: SourceFact
+    covariate_distribution: SourceFact
+
+
+class FormulationDetails(BaseModel):
+    design: SourceFact
+    equation: SourceFact
+    treatment: SourceFact
+    comparator: SourceFact
+    outcome: SourceFact
+    time_horizon: SourceFact
+    adjustment: SourceFact = Field(description="Covariates, coding, reference levels, transformations and interactions.")
+    dependence: SourceFact = Field(description="Random effects, repeated measures, clustering and covariance structure.")
+    estimation: SourceFact = Field(description="Estimator, weighting, fitting method and stated assumptions.")
+    missingness_censoring: SourceFact
+    intercurrent_events: SourceFact
+
+
+class TargetParameter(BaseModel):
+    scientific_estimand: SourceFact
+    reported_parameter: SourceFact
+    coefficient_mapping: SourceFact
+    conditioning: SourceFact = Field(description="Conditional, marginal, or unclear; determined by the reported contrast.")
+    interpretation: SourceFact = Field(description="Causal or associational interpretation and its stated justification.")
+    scale: SourceFact
+    units: SourceFact
+    direction: SourceFact
+
+
+class AnalysisProfile(BaseModel):
+    population: PopulationDetails
+    formulation: FormulationDetails
+    target: TargetParameter
+
+
+class AnalysisAudit(BaseModel):
+    result: int
+    verdict: Literal["supported", "needs_revision", "insufficient_information"]
+    issues: list[str] = Field(description="Specific field paths, source contradictions, incorrect result association or missing information.")
+
+
+class ContextAudit(BaseModel):
+    results: list[AnalysisAudit] = Field(description="Exactly one independent audit per extracted result, numbered from 1.")
+
+
 class ResultContext(BaseModel):
     """What one extracted result estimates and how, as the manager reads it from the paper."""
 
     result: int = Field(description="Which result of the extraction this is about, by its number (1 for the first).")
+    profile: AnalysisProfile | None = Field(description="Required for new readings. Null only in legacy records.")
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_profile(cls, data):
+        if isinstance(data, dict) and "profile" not in data:
+            return {**data, "profile": None}
+        return data
+
     population: str = Field(
         description="The patients the result is about by the trial's eligibility (and any baseline subgroup it is "
         "limited to), then the analysis set its numbers come from, e.g. 'adults with moderate depression in primary "
@@ -354,15 +425,10 @@ class ResultContext(BaseModel):
         "those assessed; the difference and its CI are model-adjusted', 'least-squares means with model-based SEs, "
         "not SDs'."
     )
-    vs_plan: Literal["same", "close", "different"] = Field(
-        description="How its estimand compares with the planned study's. same: the paper states each attribute and "
-        "each matches the plan (attributes the plan leaves open aside); close: an attribute differs, or the paper "
-        "does not state it, in a way that should change the numbers little, each listed under differences; "
-        "different: it estimates another quantity (another variable, timepoint, summary measure, population or "
-        "intercurrent-event strategy). Grade the estimand only. A different model for the same quantity (for a "
-        "difference in means, an unadjusted comparison where an ANCOVA is planned) goes under differences and use, "
-        "not vs_plan. For an odds ratio or hazard ratio, adjusting for different covariates changes the quantity "
-        "estimated (conditional vs marginal), so it is an estimand difference."
+    vs_plan: Literal["same", "close", "different", "unknown"] = Field(
+        description="Legacy comparison with the requested target. Use unknown when an essential attribute is unspecified. "
+        "same requires explicit alignment. different means different targets. close is retained only for old records, "
+        "not a claim of a mathematically valid approximation. Covariate-adjusted models may report marginal contrasts."
     )
     differences: list[str] = Field(
         description="Each attribute of the estimand or the model that differs from the plan, and how, e.g. "
@@ -473,17 +539,45 @@ class PlanningRecommendation(BaseModel):
     gaps: list[str]
 
 
+CombinationStatus = Literal[
+    "direct_synthesis", "transform_then_synthesize", "assumption_dependent", "insufficient_information", "keep_separate"
+]
+
+
+class SynthesisGroup(BaseModel):
+    analyses: list[str] = Field(description="Existing analysis IDs, e.g. R3:0. Each analysis appears in exactly one group.")
+    population: str
+    comparison: str
+    outcome: str
+    timepoint: str
+    parameter: str
+    status: CombinationStatus
+    reason: str
+    differences: list[str]
+    mapping: str = Field(description="Explicit symbolic mapping, or 'identity' for the same parameter. No invented numbers.")
+    required_inputs: list[str]
+    assumptions: list[str]
+    methodological_sources: list[str] = Field(description="Identifiable papers/DOIs supporting any proposed mapping; never fabricate references.")
+    inputs_available: Literal["yes", "partial", "no", "unknown"]
+    dependence: str = Field(description="Duplicate reports, shared controls, repeated analyses and review/primary-study overlap; proposed handling.")
+
+
+class EvidenceTablePlan(BaseModel):
+    groups: list[SynthesisGroup]
+
+
 class EvidenceSummary(BaseModel):
-    overview: str = Field(description="Two to four sentences on what was found and how close it is to the planned study.")
-    needs: list[NeedSummary] = Field(description="One per effect size to find, in the specification's order.")
-    overlap: str = Field(description="Which values come from the same participants, and why; empty if none.")
-    caveats: list[str] = Field(description="What to check before using the values.")
-    gaps: list[str] = Field(description="Effect sizes the plan needs that the sources don't give, and where to look next.")
-    recommendations: list[PlanningRecommendation] = Field(description="Head agent's final planning effects and justifications, primary outcomes first.")
+    table_plan: EvidenceTablePlan | None = Field(description="Primary output for new reports: population findings and mathematical feasibility rows.")
+    overview: str = Field(description="Legacy saved-report field; return empty for new table reports.")
+    needs: list[NeedSummary] = Field(description="Legacy saved-report field; return empty for new table reports.")
+    overlap: str = Field(description="Legacy saved-report field; return empty for new table reports.")
+    caveats: list[str] = Field(description="Legacy saved-report field; return empty for new table reports.")
+    gaps: list[str] = Field(description="Legacy saved-report field; return empty for new table reports.")
+    recommendations: list[PlanningRecommendation] = Field(description="Legacy saved-report field; return empty for new table reports.")
 
     @model_validator(mode="before")
     @classmethod
     def legacy_recommendations(cls, data):
-        if isinstance(data, dict) and "recommendations" not in data:
-            return {**data, "recommendations": []}
+        if isinstance(data, dict):
+            return {"recommendations": [], "table_plan": None, **data}
         return data

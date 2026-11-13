@@ -142,6 +142,10 @@ def _empty(outcome: str) -> dict:
 def finalize_summary(result: dict, evidence: dict, spec: dict) -> dict:
     """Fail closed for invalid numerical recommendations while keeping the descriptive evidence."""
     result = copy.deepcopy(result)
+    if result.get("table_plan") is not None:
+        from .reporting import finalize_tables
+        return {"table_plan": result["table_plan"], "tables": finalize_tables(result["table_plan"], evidence),
+                "overview": "", "needs": [], "overlap": "", "caveats": [], "gaps": [], "recommendations": []}
     known = {v["key"]: v for v in evidence["values"]}
     records = {r["key"]: r for r in evidence["records"]}
     context = spec.get("planning") or {}

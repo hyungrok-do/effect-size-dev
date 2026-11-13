@@ -17,7 +17,7 @@ from esf import prompts
 from esf.llm import MAX_COUNTED, SEARCH_PLAN_RECORDED, output_schema, search_tools
 from esf.openai_llm import TOOL_NAMESPACE, function_tools
 from esf.schemas import (
-    LEVEL_NAMES, LEVELS, EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchSpec, StudyContext,
+    LEVEL_NAMES, LEVELS, ContextAudit, EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchSpec, StudyContext,
 )
 
 TARGET = Path(__file__).resolve().parents[1] / "site" / "lib" / "generated.js"
@@ -32,7 +32,7 @@ def render() -> str:
         "PROMPTS": {
             name: getattr(prompts, name)
             for name in (
-                "SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "CONTEXT_INPUT", "OVERLAP", "SUMMARIZE",
+                "SPEC", "SEARCH", "SCREEN", "EXTRACT", "ADJUDICATE", "CONTEXT", "CONTEXT_INPUT", "CONTEXT_AUDIT", "OVERLAP", "SUMMARIZE",
                 "FOUND_BY_FULL_TEXT",
             )
         },
@@ -41,6 +41,7 @@ def render() -> str:
             "ScreenDecision": output_schema(ScreenDecision),
             "PaperExtraction": output_schema(PaperExtraction),
             "StudyContext": output_schema(StudyContext),
+            "ContextAudit": output_schema(ContextAudit),
             "OverlapReport": output_schema(OverlapReport),
             "EvidenceSummary": output_schema(EvidenceSummary),
         },

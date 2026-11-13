@@ -20,7 +20,7 @@ export const OUTCOME_TYPES = {
 export const STATISTICS = {
   n: 'n', mean: 'Mean', sd: 'SD', se: 'SE', ci_lower: 'CI lower', ci_upper: 'CI upper', median: 'Median',
   q1: 'Q1', q3: 'Q3', min: 'Min', max: 'Max', events: 'Events', percent: '%', mean_change: 'Mean change',
-  sd_change: 'SD of change', mean_difference: 'Mean difference', standardized_mean_difference: 'SMD',
+  sd_change: 'SD of change', mean_difference: 'Mean difference', coefficient: 'Regression coefficient', standardized_mean_difference: 'SMD',
   odds_ratio: 'Odds ratio', risk_ratio: 'Risk ratio', hazard_ratio: 'Hazard ratio', risk_difference: 'Risk difference',
   p_value: 'p', t_statistic: 't', icc: 'ICC', correlation: 'Correlation', other: 'Other',
 };

@@ -1,3 +1,4 @@
+import { evidenceTablesView } from './report-view.js';
 // The review, one paper at a time, what the overlap check found, and the summary, drawn for both
 // pages (site/app.js and web/app.js), which share the markup they fill. Each result shows what it
 // estimates and with which model, as the manager read them, before its numbers. Every number in a
@@ -145,6 +146,7 @@ export function overlapNote(paper, report, papers) {
 // in the summary, beside a recommendation's calculation and in its tables.
 const FIT = {
   same: ['Same estimand as planned', 'Same as planned', 'ok'],
+  unknown: ['Target comparison unresolved', 'Unknown', 'warn'],
   close: ['Close to the planned estimand', 'Close to planned', 'warn'],
   different: ['Different estimand', 'Different', 'err'],
 };
@@ -653,13 +655,14 @@ export function summaryView({ summary, spec, overlap, papers, decisions, linksOf
   const study = studies(papers, linksOf);
   const stale = JSON.stringify(decisionsBasis(papers, decisions)) !== JSON.stringify(summary.basis)
     || (spec && summary.spec_basis && JSON.stringify(spec) !== JSON.stringify(summary.spec_basis));
+  if (result.tables) return evidenceTablesView(result.tables, evidence, { stale, sourceLink: study.link });
   const text = (t) => withValues(t, values, study);
   const groups = overlap?.groups || [];
   return [
     stale && h('p', { class: 'notice stale' }, 'Your decisions have changed since this was written, or the study specification or evidence '
       + 'has changed, or the manager has since read a paper’s estimands. Write it again before using the recommendation.'),
     result.planning_version !== PLANNING_VERSION && h('p', { class: 'notice' },
-      'This saved summary predates planning recommendations. Write it again to ask the head agent for a final effect size and justification.'),
+      'This saved report uses the previous summary format. Build evidence tables to extract populations, formulations and target parameters.'),
     ...(result.recommendations || []).map((rec) => {
       const effect = rec.resolved;
       const label = { recommended: 'Recommended planning effect', provisional: 'Provisional planning effect',

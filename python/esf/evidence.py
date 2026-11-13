@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 from copy import deepcopy
+from .reporting import analysis_rows
 
 PAPER = -1  # result_index of a decision about the whole paper
 
@@ -175,7 +176,8 @@ def build_evidence(papers: list[dict], decisions: dict, overlap: dict | None) ->
                           for i, a in enumerate(extraction.get("appraisal") or [])],
             "context": _record_context(paper),
         })
-    return {"records": records, "estimands": [e for e in estimands if e["record"] in kept], "values": values}
+    return {"records": records, "estimands": [e for e in estimands if e["record"] in kept], "values": values,
+            "analyses": analysis_rows(papers, decisions)}
 
 
 def _record_context(paper: dict) -> dict | None:
@@ -198,6 +200,8 @@ def decisions_basis(papers: list[dict], decisions: dict) -> list:
                p.get("verification"), p.get("fulltext_kind"), p.get("screen")]
         if _context(p) is not None:  # a summary written before then goes out of date when it is read
             row.append(_context(p))
+        if "profile_checks" in (p.get("context") or {}):
+            row.append(p["context"]["profile_checks"])
         rows.append(row)
     return deepcopy(rows)
 

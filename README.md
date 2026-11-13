@@ -1,20 +1,22 @@
 # Effect Size Finder
 
-Describe a study you are planning in a short paragraph. Effect Size Finder searches PubMed, Europe
-PMC and ClinicalTrials.gov, reads the papers it can open, and extracts the statistics they report (group
-sizes, means, SDs, event counts, CIs, hazard ratios, and so on), each with the sentence or table
-row it came from. You review the papers one at a time, including or excluding each result; the lead
-model checks overlap, summarizes the evidence, and recommends a final planning effect for each
-outcome with its justification, assumptions and sensitivity scenarios. The agents run three ways, chosen on the **Agents** page: the **Claude
-API** (an Anthropic key), the **OpenAI API** (an OpenAI key), or an **OpenAI subscription** (your
-ChatGPT Plus or Pro plan, no key; the browser edition connects through a local helper).
+Describe a study you are planning. Effect Size Finder searches PubMed, Europe PMC and
+ClinicalTrials.gov, retrieves available papers and extracts **population, statistical formulation,
+and target parameters for every reported analysis**, together with original estimates and uncertainty.
 
-It **searches for relevant papers**, **extracts reported numbers**, and asks the **head agent to
-recommend a planning effect size with justification**. It applies selected DELTA², Cochrane and
-ICH E9(R1) principles. Numerical transformations are performed by fixed code. It does not run a
-meta-analysis or calculate sample size.
+The primary output is **tables**: population-specific findings, analysis-level extraction, mathematical
+feasibility of combining studies, and source evidence. Every numerical entry comes from the source
+extraction. Missing information stays visible. Combined effects are not calculated in this release.
 
-This project was largely generated with Claude Code and is under validation.
+| Current scope | Documentation |
+|---|---|
+| Structured extraction, independent semantic audit, one bounded repair, population tables and CSV/JSON exports | [Evidence tables and orchestration](docs/evidence-tables.md) |
+| Derivation, approximation, transport, uncertainty propagation and synthesis | [Stage-two mathematical blueprint](docs/synthesis-blueprint.md) — design only |
+
+Agents run on Claude API, OpenAI API, or an OpenAI subscription through the local helper. The
+configured manager performs interpretation, a separate semantic audit call, and table planning;
+the worker screens and extracts. Deterministic checks validate sources, associations and report
+coverage. Model judgments still need evaluation against annotated real papers.
 
 ## Two editions
 
@@ -33,33 +35,20 @@ reader and registry formatting are ports of the Python ones, and the tests requi
 
 ## How it works
 
-```
-paragraph
-  ▼
-OPUS    Read the problem → structured specification (PICO parts, outcomes, effect sizes to find, rules, terms)
-YOU     Check and edit the specification
-OPUS    Plan the search from the top down: concept blocks, hit counts, then one query per level
-CODE    Run the levels in order (reviews → target population → full text → wider), then ClinicalTrials.gov
-HAIKU   Screen every title and abstract: include / exclude / unsure
-CODE    Add the studies cited by the reviews that passed screening; Haiku screens those too
-CODE    Get text: posted registry results → PMC full text (Europe PMC) → open-access PDF (Unpaywall) → abstract
-SONNET  (browser edition) Download what the browser may not: PDFs, and any site that refuses web pages
-HAIKU   Extract every reported number with its verbatim quote and location
-CODE    Check each quote is in the source and each number is in its quote; plausibility checks
-OPUS    Re-extract anything that failed a check, was flagged, or fell in the random audit sample
-OPUS    Read each paper as a statistician: for each result, its estimand and the model behind its
-        numbers, and how they compare with the plan; the paper's own sample-size calculation, quoted
-OPUS    Check the extracted records for overlap: one study reported twice, reviews pooling studies in the set
-YOU     Review one paper at a time: include or exclude each result; export CSV or JSON
-OPUS    Recommend: a planning effect for each outcome, its justification and sensitivity scenarios
-CODE    Validate the chosen inputs and calculate supported within-study contrasts
-```
+| Step | Responsible role | Result |
+|---|---|---|
+| Read the problem and plan search | Manager | Search specification and search levels |
+| Search and retrieve | Fixed code; provider-supported fetcher where available | Papers, registry records and retained source text |
+| Screen and extract | Worker | Separate analyses; original values, quotations and locations |
+| Verify and re-extract flagged/sampled papers | Code; manager on escalation | Checked numerical extraction |
+| Interpret each analysis | Manager | Structured population, formulation and target parameter with field-level evidence |
+| Audit interpretation | Separate manager call | Semantic/source checks and unresolved information |
+| Repair fixable errors once, then re-audit | Manager | Revised profile or retained unresolved flags |
+| Detect overlapping reports | Manager | Duplicate study and dependence information |
+| Build evidence tables | Manager proposes; code validates and renders | Native-population findings and mathematical feasibility, without calculated pooled effects |
 
-The steps above name Claude's models; with OpenAI, GPT-6.1 Sol is the manager and GPT-6 Luna the
-worker (see [Claude or OpenAI](#claude-or-openai)). Extraction models read and quote without changing numbers. The head agent selects evidence and
-may propose a distinct planning assumption, explicitly labeled as its judgment. Fixed code checks
-source values and computes supported transformations; every numerical choice retains its inputs.
-Narrative references to empirical values use keys rather than model-retyped numbers.
+Both editions share prompts, schemas and table rendering. Python/JavaScript parity tests check the
+deterministic report builder. Each table exports directly as CSV; JSON retains profiles and audits.
 
 ### The search, from the top down
 
@@ -495,70 +484,25 @@ the paper shows the note. When a study is reported more than once, the summary m
 reports' values as the same participants as the record to use; a review and the studies it pools
 are separate studies and are not marked.
 
-### The summary and final planning effect
+### Evidence tables
 
-**Write the summary** asks the head agent for a recommendation for every outcome, primary first.
-The result starts with the final effect, its metric, direction, timepoint, source inputs and calculation.
-It separately explains clinical importance, realism, evidence quality, assumptions, alternatives, and
-other inputs such as SD, control risk, ICC or attrition. The descriptive evidence tables remain below.
+**Build evidence tables** produces the tables specified in [the report contract](docs/evidence-tables.md).
+Each retained or undecided analysis appears, even when its profile is incomplete or no numerical
+result was reported. Excluded results do not appear. Native findings are partitioned using extracted
+population and target definitions; a table-planning label cannot silently merge populations.
 
-The head agent can select a reported estimate or request a mean difference, Cohen's d, risk difference,
-risk ratio or odds ratio from compatible arm-level data. Code performs those calculations. Derived
-contrasts require unadjusted independent-group data from one outcome/visit/analysis result, with
-verified source quotations and no unresolved verification flags. Paired, clustered and crossover
-data need a reported design-appropriate estimate. Binary conversions require participants with an
-event and their denominators, not recurrent-event counts or censored survival data. No continuity
-correction, sign inversion, across-study pooling or confidence interval is silently introduced.
+Combination statuses are **DIRECT SYNTHESIS**, **TRANSFORM THEN SYNTHESIZE**, **ASSUMPTION-DEPENDENT**,
+**INSUFFICIENT INFORMATION**, or **KEEP SEPARATE**. They describe feasibility. The combined-effect and
+uncertainty cells remain uncalculated. The mathematical feasibility table exposes mappings, required
+inputs, assumptions, dependence and validation failures. [Stage two](docs/synthesis-blueprint.md)
+specifies the later calculations and their validation.
 
-A proposed target can differ from its evidence estimate. Both numbers are displayed: the former is
-an explicitly justified planning assumption, the latter is reported or calculated evidence. The agent
-must explain that choice; generic effect-size conventions, an automatic discount or a convenient
-sample size do not establish clinical importance. Sensitivity scenarios are labeled as assumptions,
-not confidence limits. They must use the same metric, outcome and timepoint.
-
-The head agent also gets the manager's reading of every kept result: its estimand and model, what
-its numbers are and how it compares with the plan, and each record's design and own sample-size
-calculation. Each recommendation shows the selected result's reading beside its calculation (same
-estimand as planned, close, or different), and each effect size to find has a note on what its
-values estimate and with which model before the note on how they compare. Its table has a row per
-arm of each result, so two analyses of one arm (all randomized and completers) are two rows, each
-with its own estimand.
-
-Recommendations are **recommended**, **provisional**, or **insufficient evidence**. A supported
-numerical choice with unresolved importance, an incomplete estimand, indirect evidence, limited
-appraisal, undecided review decisions, or a source result whose estimand the manager read as close
-to or different from the plan (or has not read, or described with a model quote not found in the
-paper) is provisional. Missing or invalid numerical inputs yield
-no final number, with an explanation. A published effect is not used as an unsubstantiated
-noninferiority/equivalence margin. No automated status substitutes for scientific review.
-
-**Validate → Planning the primary effect** records the objective, contrast, primary analysis,
-analysis population, handling of intercurrent events, and investigator-supplied importance rationale.
-Unknowns stay visible. Extraction includes source-quoted methodological and importance notes;
-quote checking verifies transcription, not the scientific validity of a study. These notes are not a
-formal RoB 2 assessment. The head agent sees analysis populations, adjustment, concerns, source
-availability and overlap alongside each value. Duplicate reports and overlapping reviews are not
-independent corroboration.
-
-Saved extractions still open. Re-extract older papers to obtain the new methodological fields, then
-write the summary again. A summary becomes stale when the specification, decisions, extraction,
-verification, source metadata or the manager's reading of a paper changes. A failed rewrite preserves the earlier result with an error.
-The JSON export includes recommendations, resolved numbers, justifications, provenance and the
-specification they were based on. CSV exports remain the reported evidence values.
-
-Methodological references and scope:
-
-- [DELTA², Cook et al. (2018)](https://doi.org/10.1186/s13063-018-2884-0): target-difference selection,
-  clinical importance versus realism, assumptions and sensitivity analysis.
-- [Cochrane Handbook, chapter 5](https://www.cochrane.org/authors/handbooks-and-manuals/handbook/current/chapter-05)
-  and [chapter 6](https://www.cochrane.org/authors/handbooks-and-manuals/handbook/current/chapter-06):
-  data provenance, multiple reports, appraisal and compatible effect measures.
-- [ICH E9(R1)](https://database.ich.org/sites/default/files/E9-R1_Step4_Guideline_2019_1203.pdf):
-  alignment of the clinical question, estimand and planned analysis.
-
-This implements selected principles, not certification or a complete systematic-review workflow.
-Search caps, inaccessible reports and remaining appraisal gaps are still limitations. Arithmetic and
-provenance rules have deterministic tests in both editions; model judgments need real-study evaluation.
+Old projects and previously saved narrative/planning summaries remain readable. Re-read their
+statistical context from the original source to populate the new fields, then rebuild the tables.
+Legacy prose is never treated as a verified structured extraction. The old within-study planning
+engine remains for saved data/integrations; the new table-planning prompt does not request a planning
+effect. Changes to decisions, extraction, specification or audit checks mark tables stale. A failed
+rebuild preserves the prior report and its error status.
 
 ## Privacy and security
 
@@ -605,8 +549,8 @@ server you share; use API keys there.
 ## Not yet
 
 - Across-study meta-analysis, advanced paired/clustered conversions, and automatic transfer to
-  [Sample Size Calculator](https://github.com/hyungrok-do/sample-size-calc). Supported within-study
-  conversions and head-agent recommendations are available in the summary.
+  [Sample Size Calculator](https://github.com/hyungrok-do/sample-size-calc). The old within-study
+  planning engine is retained for legacy saved records; new reports focus on source evidence tables.
 - Paywalled full text: only open-access text, abstracts, and registry results are read.
 - Numbers shown only in figures: figure captions are kept, figure images are not read.
 - The Message Batches API (half price, slower) for screening large searches; screening uses direct

@@ -140,8 +140,8 @@ def test_the_summary_is_given_the_estimands_of_the_results():
     header, data = body["messages"][0]["content"][0]["text"].split("\n", 1)
     assert header == "Records, the estimands of their results, the overlap check and the values:"
     assert json.loads(data) == {"records": evidence["records"], "estimands": evidence["estimands"],
-                                "overlap": {"groups": [], "notes": ""}, "values": evidence["values"]}
-    assert list(json.loads(data)) == ["records", "estimands", "overlap", "values"]
+                                "overlap": {"groups": [], "notes": ""}, "values": evidence["values"], "analyses": []}
+    assert list(json.loads(data)) == ["records", "estimands", "overlap", "values", "analyses"]
 
 
 def test_the_chosen_models_run_with_the_fallback_their_own_model_takes():

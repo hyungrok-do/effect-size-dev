@@ -350,16 +350,14 @@ def test_the_review_shows_what_each_result_estimates_and_with_which_model(browse
     assert exported[0].split(",")[15:26] == ["design", "estimand_population", "estimand_treatments", "estimand_variable",
                                             "intercurrent_events", "summary_measure", "model", "missing_data", "numbers_are",
                                             "vs_plan", "differences"]
-    # The summary's recommendation says, beside its calculation, what its source result estimates: the
-    # review's pooled standardized effect, another quantity than the plan's, so it stays provisional.
+    # New reports show tables in the local edition too; old contexts remain unverified.
     page.click("#summarize")
-    source = page.locator("#summary-body .planning-recommendation .source-estimand")
-    source.wait_for(timeout=15000)
-    assert source.get_attribute("data-fit") == "different" and source.locator(".badge").inner_text() == "Different estimand"
-    assert source.locator(".differences li").all_inner_texts() == ["standardized scale, not PHQ-9 points"]
-    assert " ".join(source.locator(".model").inner_text().split()) == "Model random-effects meta-analysis"
-    assert page.locator("#summary-body .planning-recommendation").get_attribute("data-status") == "provisional"
-    assert page.locator("#summary-body .summary-block.need h4.label").first.inner_text().lower() == "estimands"
+    table = page.locator('[data-table="population-findings"]')
+    table.wait_for(timeout=15000)
+    assert "INSUFFICIENT INFORMATION" in table.inner_text()
+    assert "Not calculated" in table.inner_text()
+    assert page.locator('.planning-recommendation').count() == 0
+    assert page.locator('[data-table="analysis-extraction"] tbody tr').count() == 8
 
     # A paper extracted before the manager read estimands: the card asks the server for a reading.
     papers = httpx.get(f"{served['url']}api/projects/{project_id}/papers").json()

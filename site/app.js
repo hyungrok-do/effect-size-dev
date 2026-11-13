@@ -766,7 +766,7 @@ function tabKeys(event) {
 // -- agent activity --------------------------------------------------------------------
 
 const STEP_AGENT = {
-  spec: 'manager', search: 'manager', adjudicate: 'manager', context: 'manager', overlap: 'manager', summarize: 'manager', fetch: 'fetcher',
+  spec: 'manager', search: 'manager', adjudicate: 'manager', context: 'manager', context_audit: 'manager', context_repair: 'manager', overlap: 'manager', summarize: 'manager', fetch: 'fetcher',
   screen: 'worker', extract: 'worker',
 };
 const seconds = (since) => `${Math.max(0, Math.round((Date.now() - since) / 1000))} s`;
@@ -1167,8 +1167,8 @@ function renderSummary(project) {
   const summary = project.summary;
   const running = summary?.status === 'running' || jobs.has(`summary-${project.id}`);
   $('#summarize').disabled = running || jobs.has(project.id);
-  $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
-  $('#summarize-status').textContent = running ? `${jobNames(`summary-${project.id}`).manager} is checking for overlap and writing the summary…`
+  $('#summarize').textContent = summary?.status === 'done' ? 'Build the tables again' : 'Build evidence tables';
+  $('#summarize-status').textContent = running ? `${jobNames(`summary-${project.id}`).manager} is checking overlap and organizing the evidence tables…`
     : jobs.has(project.id) ? 'Wait until the search finishes.' : '';
   showError($('#summary-error'), summary?.status === 'error' ? summary.error
     : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
@@ -1179,7 +1179,7 @@ function renderSummary(project) {
   $('#summary-body').replaceChildren(...(summary?.status === 'done'
     ? summaryView({ summary, spec: project.spec, overlap: project.overlap?.report, papers: state.papers, decisions: state.decisions, linksOf: links })
     : running ? [] : [h('p', { class: 'muted' },
-      'Review the papers first: the summary uses every result you included or left undecided, and none you excluded.')]));
+      'The tables use every included or undecided analysis. Excluded results are omitted; missing information stays visible.')]));
 }
 
 function writeSummary() {

@@ -1,3 +1,4 @@
+import { analysisRows } from './reporting.js';
 // What the overlap check and the summary are given. A port of python/esf/evidence.py; the tests
 // require identical output.
 //
@@ -157,7 +158,7 @@ export function buildEvidence(papers, decisions, overlap) {
       context: recordContext(paper),
     });
   }
-  return { records, estimands: estimands.filter((e) => kept.has(e.record)), values };
+  return { records, estimands: estimands.filter((e) => kept.has(e.record)), values, analyses: analysisRows(papers, decisions) };
 }
 
 // What a summary was based on, to tell when it is out of date: each extracted record, its decisions,
@@ -170,6 +171,7 @@ export function decisionsBasis(papers, decisions) {
       p.extraction.results.map((r) => [r.outcome_measure, r.timepoint, r.values.map((v) => [v.group, v.statistic, v.value, v.ci_level ?? null])]),
       p.extraction, p.verification ?? null, p.fulltext_kind ?? null, p.screen ?? null];
     if (contextOf(p)) row.push(contextOf(p)); // a summary written before then goes out of date when it is read
+    if (p.context?.profile_checks) row.push(p.context.profile_checks);
     return row;
   }));
 }

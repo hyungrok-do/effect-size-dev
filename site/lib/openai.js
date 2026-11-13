@@ -273,7 +273,7 @@ export class OpenAI {
   }
 
   summarize(spec, overlap, evidence, { sink } = {}) {
-    const data = { records: evidence.records, estimands: evidence.estimands, overlap, values: evidence.values };
+    const data = { records: evidence.records, estimands: evidence.estimands, overlap, values: evidence.values, analyses: evidence.analyses || [] };
     return this.parse({
       step: 'summarize', manager: true, system: withSpec(PROMPTS.SUMMARIZE, spec),
       content: [{ type: 'text', text: `Records, the estimands of their results, the overlap check and the values:\n${JSON.stringify(data, null, 1)}` }],
@@ -290,10 +290,18 @@ export class OpenAI {
     });
   }
 
-  studyContext(spec, document, extraction, { sink } = {}) {
+  studyContext(spec, document, extraction, { sink, feedback } = {}) {
     return this.parse({
       step: 'context', manager: true, system: withSpec(PROMPTS.CONTEXT, spec),
-      content: [document, { type: 'text', text: contextInput(extraction) }], schema: SCHEMAS.StudyContext, name: 'StudyContext', effort: 'high', sink,
+      content: [document, { type: 'text', text: contextInput(extraction) + (feedback ? `\nRepair feedback:\n${JSON.stringify(feedback)}` : '') }], schema: SCHEMAS.StudyContext, name: 'StudyContext', effort: 'high', sink,
+    });
+  }
+
+  auditContext(spec, document, extraction, context, { sink } = {}) {
+    return this.parse({
+      step: 'context_audit', manager: true, system: PROMPTS.CONTEXT_AUDIT,
+      content: [document, { type: 'text', text: contextInput(extraction) + `\nProposed reading:\n${JSON.stringify(context)}` }],
+      schema: SCHEMAS.ContextAudit, name: 'ContextAudit', effort: 'high', sink,
     });
   }
 

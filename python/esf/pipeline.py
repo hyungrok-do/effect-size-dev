@@ -24,7 +24,7 @@ from .chatgpt import ChatGPTError
 from .config import Settings
 from .evidence import build_evidence, decisions_basis, overlap_records
 from .fulltext import FullText, get_fulltext
-from .planning import finalize_summary
+from .reporting import finalize_tables, profile_checks
 from .llm import LLM, ModelDeclined, ModelTruncated, describe_error, usage_dict
 from .openai_llm import OpenAIError
 from .schemas import LEVEL_NAMES, LEVELS, PaperExtraction, SearchPlan, SearchSpec, upgrade_spec
@@ -457,8 +457,8 @@ class Pipeline:
         self.store.update_project(project_id, overlap={"report": report, "records": [r["key"] for r in records], "input": records})
 
     def summarize(self, project_id: str) -> None:
-        """The head agent recommends planning effects; code verifies inputs and resolves arithmetic.
-        If writing again fails, the previous summary stays, with the error."""
+        """The planner organizes population findings; fixed code validates table membership and status.
+        No effect calculations run. A failed rebuild preserves the previous report with its error."""
         previous = previous_summary((self.store.project(project_id) or {}).get("summary"))
         self.store.update_project(project_id, summary={"status": "running", "previous": previous})
         try:
@@ -472,11 +472,13 @@ class Pipeline:
                 overlap = (self.store.project(project_id) or {})["overlap"]
             decisions = self.store.decisions(project_id)
             evidence = build_evidence(papers, decisions, overlap["report"])
-            if not evidence["values"]:
+            if not evidence["analyses"]:
                 raise ValueError("There is nothing to summarize: no extracted result is kept.")
             result = self.llm.summarize(spec, overlap["report"], evidence, self._sink(project_id))
+            plan = result.model_dump().get("table_plan")
+            finalized = {"table_plan": plan, "tables": finalize_tables(plan, evidence, overlap["report"])}
             self.store.update_project(project_id, summary={
-                "status": "done", "result": finalize_summary(result.model_dump(), evidence, spec.model_dump()), "evidence": evidence,
+                "status": "done", "result": finalized, "evidence": evidence,
                 "spec_basis": spec.model_dump(),
                 "basis": decisions_basis(papers, decisions),
             })
@@ -645,11 +647,34 @@ class Pipeline:
             if stop is not None and stopping:
                 stop.set(exc)  # after the extraction and this error are stored, as when the adjudication is refused
             return
+        audit, audit_error, repaired = None, None, False
+        history = []
+        if hasattr(self.llm, "audit_context"):
+            try:
+                for attempt in range(2):
+                    audit = self.llm.audit_context(spec, document, extraction, context, sink).model_dump()
+                    checked = profile_checks(context.model_dump(), text, len(extraction.results), audit)
+                    history.append({"attempt": attempt + 1, "audit": audit, "checks": checked})
+                    revision = any(r["verdict"] == "needs_revision" for r in audit["results"]) or any(
+                        "unsupported field" in flag or "audit unavailable" in flag
+                        for row in checked for flag in row["flags"])
+                    if not revision or attempt == 1:
+                        break
+                    repaired = True
+                    context = one_reading_per_result(self.llm.study_context(
+                        spec, document, extraction, sink, feedback={"audit": audit, "checks": checked}
+                    ), len(extraction.results))
+                    audit = None  # an old audit never verifies the repaired reading
+            except Exception as exc:
+                audit = None
+                audit_error = describe_error(exc)
+                if stop is not None and stops_the_run(exc):
+                    stop.set(exc)
         self.store.update_paper(paper_id, context={
-            "status": "done",
-            "result": context.model_dump(),
-            "checks": check_context(context, text),
+            "status": "done", "result": context.model_dump(), "checks": check_context(context, text),
             "model": getattr(self.llm, "manager_model", None),
+            "audit": audit, "audit_error": audit_error, "audit_history": history, "repair_attempted": repaired,
+            "profile_checks": profile_checks(context.model_dump(), text, len(extraction.results), audit),
         })
 
     def _worker_pass(

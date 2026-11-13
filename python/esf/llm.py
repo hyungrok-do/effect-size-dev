@@ -22,7 +22,7 @@ from . import prompts
 from .config import Settings
 from .fulltext import FullText
 from .schemas import (
-    EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec, StudyContext,
+    ContextAudit, EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchLevel, SearchPlan, SearchSpec, StudyContext,
 )
 
 # Opus and Sonnet only: when a safety classifier declines a benign request, the API retries it on
@@ -97,6 +97,9 @@ class LLM(Protocol):
     def study_context(
         self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None
     ) -> StudyContext: ...
+
+    def audit_context(self, spec: SearchSpec, document: dict, extraction: PaperExtraction,
+                      context: StudyContext, sink: UsageSink | None = None) -> ContextAudit: ...
 
     def screen(self, spec: SearchSpec, record_text: str, sink: UsageSink | None = None) -> ScreenDecision: ...
 
@@ -200,7 +203,7 @@ def context_input(extraction: PaperExtraction) -> str:
 
 def summary_input(overlap: dict, evidence: dict) -> str:
     """What the summary is given (see evidence.build_evidence), with the overlap check."""
-    data = {"records": evidence["records"], "estimands": evidence["estimands"], "overlap": overlap, "values": evidence["values"]}
+    data = {"records": evidence["records"], "estimands": evidence["estimands"], "overlap": overlap, "values": evidence["values"], "analyses": evidence.get("analyses", [])}
     return "Records, the estimands of their results, the overlap check and the values:\n" + json.dumps(data, indent=1, ensure_ascii=False)
 
 
@@ -361,16 +364,25 @@ class ClaudeLLM:
         )
 
     def study_context(
-        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None
+        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None, feedback: dict | None = None
     ) -> StudyContext:
         return self._parse(
             step="context",
             manager=True,
             system=prompts.CONTEXT + "\n\nSpecification:\n" + spec.model_dump_json(indent=2),
-            content=[document, {"type": "text", "text": context_input(extraction)}],
+            content=[document, {"type": "text", "text": context_input(extraction) + ("\nRepair feedback:\n" + json.dumps(feedback, ensure_ascii=False) if feedback else "")}],
             output_format=StudyContext,
             effort="high",
             sink=sink,
+        )
+
+    def audit_context(self, spec: SearchSpec, document: dict, extraction: PaperExtraction,
+                      context: StudyContext, sink: UsageSink | None = None) -> ContextAudit:
+        return self._parse(
+            step="context_audit", manager=True, system=prompts.CONTEXT_AUDIT,
+            content=[document, {"type": "text", "text": context_input(extraction)
+                     + "\nProposed reading:\n" + context.model_dump_json(indent=1)}],
+            output_format=ContextAudit, effort="high", sink=sink,
         )
 
     # -- workers (Haiku by default) -----------------------------------------------

@@ -462,7 +462,8 @@ def test_the_summary_over_http(tmp_path):
             break
         time.sleep(0.05)
     assert summary["status"] == "done", summary
-    assert summary["result"]["needs"][0]["values"] and summary["evidence"]["records"]
+    assert summary["result"]["tables"]["groups"][0]["values"] and summary["evidence"]["records"]
+    assert all(g["combined_effect"] is None for g in summary["result"]["tables"]["groups"])
     assert keys == ["sk-ant-test", "sk-ant-test"] and llm.calls[-1] == "summarize"
     assert llm.calls.count("overlap") == 1  # the check from the run is still current
     assert client.get(f"/api/projects/{project_id}/export.json").json()["project"]["summary"]["status"] == "done"

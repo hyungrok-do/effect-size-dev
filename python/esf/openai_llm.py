@@ -24,7 +24,7 @@ from . import prompts
 from .config import Settings
 from .fulltext import FullText
 from .llm import ModelDeclined, ModelTruncated, SearchToolbox, UsageSink, context_input, output_schema, search_tools, summary_input
-from .schemas import EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchPlan, SearchSpec, StudyContext
+from .schemas import ContextAudit, EvidenceSummary, OverlapReport, PaperExtraction, ScreenDecision, SearchPlan, SearchSpec, StudyContext
 
 API = "https://api.openai.com/v1"
 TOOL_NAMESPACE = "literature"
@@ -503,16 +503,25 @@ class OpenAILLM:
         )
 
     def study_context(
-        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None
+        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None, feedback: dict | None = None
     ) -> StudyContext:
         return self._parse(
             step="context",
             manager=True,
             system=prompts.CONTEXT + "\n\nSpecification:\n" + spec.model_dump_json(indent=2),
-            content=[document, {"type": "text", "text": context_input(extraction)}],
+            content=[document, {"type": "text", "text": context_input(extraction) + ("\nRepair feedback:\n" + json.dumps(feedback, ensure_ascii=False) if feedback else "")}],
             output_format=StudyContext,
             effort="high",
             sink=sink,
+        )
+
+    def audit_context(self, spec: SearchSpec, document: dict, extraction: PaperExtraction,
+                      context: StudyContext, sink: UsageSink | None = None) -> ContextAudit:
+        return self._parse(
+            step="context_audit", manager=True, system=prompts.CONTEXT_AUDIT,
+            content=[document, {"type": "text", "text": context_input(extraction)
+                     + "\nProposed reading:\n" + context.model_dump_json(indent=1)}],
+            output_format=ContextAudit, effort="high", sink=sink,
         )
 
     # -- workers ----------------------------------------------------------------------------

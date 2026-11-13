@@ -533,7 +533,7 @@ cd effect-size-dev</code></pre><button type="button" class="secondary small copy
       <button id="tab-spec" role="tab" type="button" aria-controls="spec" data-step="spec"><span class="num">3</span>Validate</button>
       <button id="tab-progress" role="tab" type="button" aria-controls="progress-card" data-step="progress"><span class="num">4</span>Search<span class="live-dot" aria-hidden="true" hidden></span></button>
       <button id="tab-review" role="tab" type="button" aria-controls="review" data-step="review"><span class="num">5</span>Review<span id="review-count" class="count"></span></button>
-      <button id="tab-summary" role="tab" type="button" aria-controls="summary" data-step="summary"><span class="num">6</span>Summary</button>
+      <button id="tab-summary" role="tab" type="button" aria-controls="summary" data-step="summary"><span class="num">6</span>Evidence tables</button>
     </nav>
 
     <section id="setup" class="card" role="tabpanel" aria-labelledby="tab-setup" hidden>
@@ -630,10 +630,10 @@ cd effect-size-dev</code></pre><button type="button" class="secondary small copy
     </section>
 
     <section id="summary" class="card" role="tabpanel" aria-labelledby="tab-summary" hidden>
-      <h2 id="summary-title">Summary</h2>
-      <p class="summary"><span data-did="summarize">The head agent</span> recommends a planning effect size for each outcome and explains its clinical importance, evidence, assumptions, and alternatives using DELTA². Each recommendation says how its source result’s estimand compares with the planned one, and, for each effect size the plan needs, the summary says what its values estimate and with which models. Source values stay linked to the papers; derived effects show their calculation. A provisional choice identifies what still needs to be resolved.</p>
+      <h2 id="summary-title">Evidence tables</h2>
+      <p class="summary">Population-specific findings, statistical formulations, target parameters and source-linked estimates in tables. Combination decisions show the required mathematics, inputs and assumptions. Combined effects are not calculated.</p>
       <div class="actions">
-        <button id="summarize" type="button" class="primary">Write the summary</button>
+        <button id="summarize" type="button" class="primary">Build evidence tables</button>
         <span id="summarize-status" class="muted small" aria-live="polite"></span>
       </div>
       <div id="summary-error" class="error" role="alert" hidden></div>

@@ -14,7 +14,7 @@ from esf.sources import Sources
 from esf.store import Store
 from esf import prompts
 from fixtures import (
-    CITED_TRIAL, NOT_A_STUDY, PLAN, PMC_ONLY, PREPRINT, REVIEW, FakeLLM, FakeOpenAI, LiteratureAPIs, mock_client,
+    CITED_TRIAL, NOT_A_STUDY, PLAN, PMC_ONLY, PREPRINT, REVIEW, SPEC, FakeLLM, FakeOpenAI, LiteratureAPIs, mock_client,
 )
 from test_chatgpt import HOST, PORT, new_session
 
@@ -262,9 +262,9 @@ def test_overlap_is_checked_and_the_summary_describes_what_was_kept(tmp_path):
     pipeline.summarize(project_id)
     summary = store.project(project_id)["summary"]
     assert summary["status"] == "done", summary
-    rec = summary["result"]["recommendations"][0]
-    assert rec["status"] == "provisional" and rec["resolved"]["value"] == .3
-    assert rec["resolved"]["basis_value"] == .35
+    assert "recommendations" not in summary["result"]
+    tables = summary["result"]["tables"]
+    assert all(g["combined_effect"] is None for g in tables["groups"])
     assert summary["spec_basis"] == store.project(project_id)["spec"]
     evidence = summary["evidence"]
     # The pilot's only result was excluded, so neither it nor its values are described.
@@ -273,7 +273,7 @@ def test_overlap_is_checked_and_the_summary_describes_what_was_kept(tmp_path):
     registry = [v for v in evidence["values"] if v["record"] == keys["NCT01234567"]]
     assert registry and all(v["same_participants_as"] == keys["11111111"] for v in registry)
     assert all(v["same_participants_as"] is None for v in evidence["values"] if v["record"] != keys["NCT01234567"])
-    assert list(evidence) == ["records", "estimands", "values"]
+    assert list(evidence) == ["records", "estimands", "values", "analyses"]
     assert [v["key"] for v in evidence["values"]][:2] == ["V1", "V2"]
     # The manager's reading of each kept result is its estimand, named by the result's values.
     assert [e["key"] for e in evidence["estimands"]] == [f"E{i}" for i in range(1, len(evidence["records"]) + 1)]
@@ -287,10 +287,8 @@ def test_overlap_is_checked_and_the_summary_describes_what_was_kept(tmp_path):
     assert records[keys[REVIEW]]["context"] == {
         "design": "meta-analysis of randomized trials", "sample_size": "", "sample_size_found": False, "notes": ""}
     assert all(r["context"]["design"] for r in records.values())
-    need = summary["result"]["needs"][0]
-    assert need["need"] == "The difference and its SD" and need["values"]
-    assert {evidence["values"][int(k[1:]) - 1]["statistic"] for k in need["values"]} <= {"mean", "sd", "n"}
-    assert need["estimands"].startswith("[V") and "estimates the planned difference" in need["estimands"]
+    assert {a["id"] for a in tables["analyses"]} == {v["result"] for v in evidence["values"]}
+    assert all(g["status"] == "insufficient_information" for g in tables["groups"])
     assert summary["basis"][0][0] == min(p["id"] for p in store.papers(project_id) if p["status"] == "extracted")
     assert summary["basis"][0][8]["design"]  # the context it was written with
 
@@ -306,7 +304,9 @@ def test_a_recommendation_on_a_result_read_as_a_different_estimand_is_provisiona
         pipeline.summarize(project_id)
         summary = store.project(project_id)["summary"]
         assert summary["status"] == "done", summary
-        [rec] = summary["result"]["recommendations"]
+        from esf.planning import finalize_summary
+        raw = llm.summarize(SPEC, store.project(project_id)["overlap"]["report"], summary["evidence"]).model_dump()
+        [rec] = finalize_summary(raw, summary["evidence"], SPEC.model_dump())["recommendations"]
         # The head agent chose the review's pooled effect, whose result the manager read.
         [key] = rec["choice"]["inputs"]
         value = next(v for v in summary["evidence"]["values"] if v["key"] == key)

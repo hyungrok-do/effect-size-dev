@@ -224,7 +224,7 @@ function names() {
 // started, and reading the problem), so past work is credited to the models that did it; the chosen
 // ones for roles it has not used yet.
 const STEP_ROLE = {
-  spec: 'manager', search: 'manager', adjudicate: 'manager', context: 'manager', overlap: 'manager', summarize: 'manager',
+  spec: 'manager', search: 'manager', adjudicate: 'manager', context: 'manager', context_audit: 'manager', context_repair: 'manager', overlap: 'manager', summarize: 'manager',
   screen: 'worker', extract: 'worker',
 };
 const runUsage = (project) => project?.run_usage || project?.usage || [];
@@ -1072,8 +1072,8 @@ function renderSummary(project) {
   const searching = RUNNING.has(project.status);
   $('#summary').hidden = !state.papers.some((p) => p.status === 'extracted') && !summary;
   $('#summarize').disabled = running || searching;
-  $('#summarize').textContent = summary?.status === 'done' ? 'Write the summary again' : 'Write the summary';
-  $('#summarize-status').textContent = running ? `${jobNames(`summary-${project.id}`).manager} is checking for overlap and writing the summary…`
+  $('#summarize').textContent = summary?.status === 'done' ? 'Build the tables again' : 'Build evidence tables';
+  $('#summarize-status').textContent = running ? `${jobNames(`summary-${project.id}`).manager} is checking overlap and organizing the evidence tables…`
     : searching ? 'Wait until the search finishes.' : '';
   showError($('#summary-error'), summary?.status === 'error' ? summary.error
     : summary?.last_error ? `Writing the summary again failed: ${summary.last_error} This is the previous summary.` : '');
@@ -1085,7 +1085,7 @@ function renderSummary(project) {
   $('#summary-body').replaceChildren(...(summary?.status === 'done'
     ? summaryView({ summary, spec: project.spec, overlap: project.overlap?.report, papers: state.papers, decisions, linksOf: (p) => p.links })
     : running ? [] : [h('p', { class: 'muted' },
-      'Review the papers first: the summary uses every result you included or left undecided, and none you excluded.')]));
+      'The tables use every included or undecided analysis. Excluded results are omitted; missing information stays visible.')]));
 }
 
 async function writeSummary() {

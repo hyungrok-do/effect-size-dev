@@ -76,7 +76,7 @@ DECISIONS = {1: {1: {"decision": "exclude"}}, "5": {"-1": {"decision": "exclude"
 
 def test_the_kept_results_carry_their_estimands_and_the_values_name_them():
     evidence = build_evidence(papers(), DECISIONS, None)
-    assert list(evidence) == ["records", "estimands", "values"]
+    assert list(evidence) == ["records", "estimands", "values", "analyses"]
     assert [r["key"] for r in evidence["records"]] == ["R1", "R2", "R3", "R4", "R6"]
     # Each estimand names its result as the values do (record:index from 0).
     assert [(e["key"], e["record"], e["result"]) for e in evidence["estimands"]] == [("E1", "R1", "R1:0"), ("E2", "R2", "R2:1")]

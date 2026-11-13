@@ -1,3 +1,4 @@
+import { finalizeTables, profileChecks } from './reporting.js';
 // The search-and-extract pipeline, running in the page:
 //
 //   spec (manager) -> search plan (manager + tools) -> run the levels from the top down -> screen (workers)
@@ -14,7 +15,6 @@ import { describeError, ModelDeclined, ModelTruncated, outOfCredit } from './cla
 import { buildEvidence, decisionsBasis, overlapRecords } from './evidence.js';
 import { LEVEL_NAMES, LEVELS, PROMPTS } from './generated.js';
 import { jatsToText } from './jats.js';
-import { finalizeSummary } from './planning.js';
 import { pdfText } from './pdf.js';
 import {
   bytesToBase64, europepmcPmid, europepmcRecord, europepmcUrl, SourceError, trialRecord, trialResultsText,
@@ -446,7 +446,7 @@ export class Pipeline {
     await this.store.updateProject(projectId, { overlap: { report, records: records.map((r) => r.key), input: records } });
   }
 
-  // The head agent selects planning effects; fixed code verifies and calculates the chosen contrasts.
+  // The planner organizes tables; code validates membership and feasibility without calculating effects.
   async summarize(projectId) {
     const previous = previousSummary((await this.store.project(projectId)).summary);
     await this.store.updateProject(projectId, { summary: { status: 'running', previous } });
@@ -460,22 +460,17 @@ export class Pipeline {
       const project = await this.store.project(projectId);
       const decisions = await this.store.decisions(projectId);
       const evidence = buildEvidence(papers, decisions, overlap.report);
-      if (!evidence.values.length) throw new Error('There is nothing to summarize: no extracted result is kept.');
+      if (!evidence.analyses.length) throw new Error('There is nothing to summarize: no extracted result is kept.');
       const result = await this.activity.track(
         {
           agent: 'manager', step: 'summarize',
           text: `Summarizing ${plural(evidence.values.length, 'value')} from ${plural(evidence.records.length, 'record')}`,
         },
         (step) => this.llm.summarize(project.spec, overlap.report, evidence, { sink: step.meter(this.sink(projectId)) }),
-        (r) => {
-          // Keys shown with their values, as on the page: "SDs of 4.2 [V4] to 4.5 [V8]".
-          const values = new Map(evidence.values.map((v) => [v.key, v.value]));
-          const shown = (text) => text.replace(/\[(V\d+)\]/g, (key, k) => (values.has(k) ? `${values.get(k)} ${key}` : key));
-          return [shown(r.overview), ...r.needs.map((n) => `${n.need}: ${plural(n.values.length, 'value')}`)].join('\n');
-        },
+        (r) => `${plural(evidence.analyses.length, 'analysis')} retained; ${plural(r.table_plan?.groups?.length || 0, 'proposed group')}; no combined effects calculated`,
       );
       await this.store.updateProject(projectId, {
-        summary: { status: 'done', result: finalizeSummary(result, evidence, project.spec), evidence,
+        summary: { status: 'done', result: { table_plan: result.table_plan || null, tables: finalizeTables(result.table_plan, evidence, overlap.report) }, evidence,
           spec_basis: project.spec, basis: decisionsBasis(papers, decisions) },
       });
     } catch (error) {
@@ -685,14 +680,43 @@ export class Pipeline {
   async studyContext(projectId, spec, paperId, title, document, extraction, text, stop = null) {
     if (!extraction.results.length) return;
     try {
-      const result = await this.activity.track(
+      let result = await this.activity.track(
         { agent: 'manager', step: 'context', text: `Reading the estimand and model of “${title}”`, paperId },
         async (step) => oneReadingPerResult(await this.llm.studyContext(spec, document, extraction, { sink: step.meter(this.sink(projectId)) }),
           extraction.results.length),
         contextFound,
       );
+      let audit = null, auditError = null, repaired = false;
+      const history = [];
+      if (this.llm.auditContext) {
+        try {
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            audit = await this.activity.track(
+              { agent: 'manager', step: 'context_audit', text: `Verifying population, formulation and parameters of “${title}”`, paperId },
+              (step) => this.llm.auditContext(spec, document, extraction, result, { sink: step.meter(this.sink(projectId)) }),
+              (r) => r.results.map((a) => `Analysis ${a.result}: ${a.verdict}`).join('\n'),
+            );
+            const checked = profileChecks(result, text, extraction.results.length, audit);
+            history.push({ attempt: attempt + 1, audit, checks: checked });
+            const revision = audit.results.some((r) => r.verdict === 'needs_revision') || checked.some((r) =>
+              r.flags.some((f) => /unsupported field|audit unavailable/.test(f)));
+            if (!revision || attempt === 1) break;
+            repaired = true;
+            result = oneReadingPerResult(await this.activity.track(
+              { agent: 'manager', step: 'context_repair', text: `Correcting flagged analysis fields in “${title}”`, paperId },
+              (step) => this.llm.studyContext(spec, document, extraction, { sink: step.meter(this.sink(projectId)), feedback: { audit, checks: checked } }),
+            ), extraction.results.length);
+            audit = null;
+          }
+        } catch (error) {
+          audit = null; auditError = describeError(error);
+          if (stop && stopsTheRun(error)) stop.error ||= error;
+        }
+      }
       await this.store.updatePaper(paperId, {
-        context: { status: 'done', result, checks: checkContext(result, text), model: this.llm.models?.manager || null },
+        context: { status: 'done', result, checks: checkContext(result, text), model: this.llm.models?.manager || null,
+          audit, audit_error: auditError, audit_history: history, repair_attempted: repaired,
+          profile_checks: profileChecks(result, text, extraction.results.length, audit) },
       });
     } catch (error) {
       await this.store.updatePaper(paperId, { context: { status: 'error', error: describeError(error) } });
