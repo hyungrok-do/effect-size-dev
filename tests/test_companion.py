@@ -151,7 +151,7 @@ def test_https_website_runs_on_the_subscription_through_an_approved_companion(br
         page.wait_for_selector("#review:not([hidden]) .paper")
         page.click("#tab-summary")
         page.click("#summarize")
-        page.wait_for_selector("#summary-body .summary-overview", timeout=15000)
+        page.wait_for_selector("#summary-body [data-table='population-findings'] tbody tr", timeout=15000)
         requests = helper["responses"].requests
         assert requests and all(request.headers["authorization"] == "Bearer at-1" for request, _ in requests)
         assert {body["model"] for _, body in requests} == {"gpt-6.1-sol", "gpt-6-mini"}
@@ -237,16 +237,22 @@ def test_the_manager_reads_a_pdf_in_its_text_layer_on_the_subscription(browser, 
         const connection = { request: async (method, body) => {
           calls.push(body);
           if (calls.length === 1) throw new OpenAIError('subscription_sharing_unsupported_capability', 'files unsupported');
-          return { output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(reading) }] }] };
+          const answer = body.text.format.name === 'ContextAudit'
+            ? { results: [{ result: 1, verdict: 'insufficient_information', issues: ['Legacy reading has no structured profile'] }] }
+            : reading;
+          return { output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(answer) }] }] };
         } };
         const llm = new ChatGPT({ connection, models: { manager: 'gpt-test', worker: 'gpt-test' } });
         await new Pipeline({ store, llm, sources: null }).readContext(id, paper.id);
         return { calls, context: (await store.paper(paper.id)).context };
     }""", [project_id, reading])
-    first, second = (call["input"][0]["content"] for call in result["calls"])
+    assert [call["text"]["format"]["name"] for call in result["calls"]] == ["StudyContext", "StudyContext", "ContextAudit"]
+    first, second = (call["input"][0]["content"] for call in result["calls"][:2])
     assert first[0]["type"] == "input_file" and result["calls"][0]["text"]["format"]["name"] == "StudyContext"
     assert second[0] == {"type": "input_text", "text": "Document: Trial 1\n\nTrial 1. Analyses followed the intention-to-treat principle."}
     context = result["context"]
     assert context["status"] == "done" and context["result"] == reading and context["model"] == "gpt-test"
     assert context["checks"] == {"sample_size": None, "results": ["exact"]}
+    assert context["audit"]["results"][0]["verdict"] == "insufficient_information"
+    assert context["profile_checks"][0]["status"] == "needs_attention"
     page.close()

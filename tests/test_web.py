@@ -322,7 +322,7 @@ def test_the_review_shows_what_each_result_estimates_and_with_which_model(browse
     page.wait_for_selector("#agents-page:not([hidden])")
     page.fill("#api-key", ANTHROPIC_KEY)
     page.click("#agents-done")
-    assert "reads what each result estimates and with which model" in page.inner_text("#intro .lede")
+    assert "extracts population, statistical formulation and target parameters" in page.inner_text("#intro .lede")
     page.fill("#paragraph", PARAGRAPH)
     page.click("#read")
     page.wait_for_selector("#spec:not([hidden])")

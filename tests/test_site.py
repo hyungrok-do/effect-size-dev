@@ -1331,7 +1331,7 @@ def test_a_search_saved_before_openai_keeps_its_credits(browser, site_url):
     page.click("#tab-spec")
     assert page.inner_text("#spec .summary").startswith("How Opus 5.5 read your paragraph")
     page.click("#tab-summary")
-    assert page.inner_text("#summary .summary").startswith("GPT-6.1 Sol recommends")  # not written yet: the chosen manager will
+    assert page.inner_text("#summary .summary").startswith("Population-specific findings")
 
     # After Search again (here, one started after every call above), the earlier search's models are not
     # credited; reading the problem still is.
@@ -1703,13 +1703,13 @@ def test_the_subscription_requires_a_companion_before_starting_work(browser, sit
     # Until the companion supplies the plan's catalog, the page names roles without guessing models.
     assert page.inner_text("#models") == "Connect ChatGPT to run the agents"
     # Nor do the lines about what a role will do name a model: they name the role.
-    assert "The manager reads what each result estimates and with which model" in page.inner_text(".lede")
-    assert page.inner_text("#summary .summary").startswith("The manager recommends a planning effect size")
+    assert "The manager extracts population, statistical formulation and target parameters" in page.inner_text(".lede")
+    assert page.inner_text("#summary .summary").startswith("Population-specific findings")
     assert page.locator("#roles li strong").all_inner_texts() == ["Manager", "Workers", "Code"]
     roles = page.locator("#roles li").all_inner_texts()
     assert [role.split("\n", 1)[1] for role in roles] == [
-        "Reads the problem, plans the search, reviews flagged extractions, reads each paper’s estimands and models, checks overlap, "
-        "writes the summary",
+        "Plans the search, reviews flagged extractions, interprets and audits population, formulation and target parameters, "
+        "checks overlap, and organizes evidence tables",
         "Screen every record and extract every paper", "Runs the searches, gets the text, checks every quote"]
     assert page.locator("#roles select").count() == 0 and "plan's own list" in page.inner_text("#roles-note")
     assert page.is_hidden("#agents-notice") and page.is_visible("#chatgpt-privacy")

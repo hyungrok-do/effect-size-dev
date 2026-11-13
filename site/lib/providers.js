@@ -103,8 +103,8 @@ export const MODEL_CHOICES = {
 
 // What each role does, for the Agents page and the cards.
 export const ROLE_INFO = {
-  manager: ['Manager', 'Reads the problem, plans the search, reviews flagged extractions, reads each paper’s estimands and models, '
-    + 'checks overlap, writes the summary'],
+  manager: ['Manager', 'Plans the search, reviews flagged extractions, interprets and audits population, formulation and target parameters, '
+    + 'checks overlap, and organizes evidence tables'],
   fetcher: ['Fetcher', 'Downloads what the browser may not read (Claude only)'],
   worker: ['Workers', 'Screen every record and extract every paper'],
   code: ['Code', 'Runs the searches, gets the text, checks every quote'],
