@@ -4,8 +4,8 @@ import { finalizeTables, profileChecks } from './reporting.js';
 //   spec (manager) -> search plan (manager + tools) -> run the levels from the top down -> screen (workers)
 //   -> add what the included reviews cite -> screen those (workers)
 //   -> full text (browser, or Claude's fetcher when the browser may not) -> extract (workers)
-//   -> verify (code) -> adjudicate escalations (manager) -> each result's estimand and model (manager)
-//   -> review (you)
+//   -> verify (code) -> adjudicate escalations (manager) -> structured interpretation -> separate audit
+//   -> at most one repair -> overlap -> table plan -> validated evidence tables (optional human review)
 //
 // A port of python/esf/pipeline.py. Everything is stored in IndexedDB as it happens, so a run that
 // is cut short (the tab closed) can be continued.

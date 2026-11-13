@@ -70,6 +70,8 @@ export function finalizeTables(plan, evidence, overlap = null) {
     if (!Object.hasOwn(STATUSES, status)) { status = 'insufficient_information'; flags.push('Unknown combination status'); }
     if (!group.reason?.trim() || !group.dependence?.trim()) flags.push('Compatibility reasoning or dependence assessment missing');
     if (status === 'direct_synthesis') {
+      const contrasts = members.map((a) => `${factValue(a.profile, 'formulation.treatment')} vs ${factValue(a.profile, 'formulation.comparator')}`);
+      if (contrasts.some((c) => (group.comparison || '').trim().toLowerCase() !== c.trim().toLowerCase())) flags.push('Requested comparison differs from the source contrast; a mapping is required');
       const declared = { population: 'population.intended', outcome: 'formulation.outcome', timepoint: 'formulation.time_horizon', parameter: 'target.reported_parameter' };
       for (const [label, path] of Object.entries(declared)) if (members.some((a) => (group[label] || '').trim().toLowerCase() !== factValue(a.profile, path).trim().toLowerCase())) flags.push(`Requested ${label} differs from the source definition; a mapping is required`);
       for (const path of CRITICAL) {

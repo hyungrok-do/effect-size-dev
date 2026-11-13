@@ -132,6 +132,10 @@ def finalize_tables(plan: dict | None, evidence: dict, overlap: dict | None = No
         if not group.get("reason", "").strip() or not group.get("dependence", "").strip():
             flags.append("Compatibility reasoning or dependence assessment missing")
         if status == "direct_synthesis":
+            contrasts = [fact_value(a.get("profile"), "formulation.treatment") + " vs " +
+                         fact_value(a.get("profile"), "formulation.comparator") for a in members]
+            if any(group.get("comparison", "").strip().lower() != c.strip().lower() for c in contrasts):
+                flags.append("Requested comparison differs from the source contrast; a mapping is required")
             declared = {"population": "population.intended", "outcome": "formulation.outcome",
                         "timepoint": "formulation.time_horizon", "parameter": "target.reported_parameter"}
             for label, path in declared.items():

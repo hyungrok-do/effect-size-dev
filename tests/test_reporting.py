@@ -74,6 +74,14 @@ def test_different_populations_are_separate_even_when_effects_identical():
     assert report['groups'][0]['status'] == 'insufficient_information'
 
 
+def test_planner_cannot_reverse_a_contrast_without_a_mapping():
+    plan, evidence = example()
+    plan['groups'][0]['comparison'] = 'Control vs treatment'
+    report = finalize_tables(plan, evidence)
+    assert report['groups'][0]['status'] == 'insufficient_information'
+    assert report['findings'][0]['comparison'] == 'Treatment vs Control'
+
+
 @pytest.mark.parametrize('kind', ['same_study', 'possible_overlap', 'review_includes_study', 'reviews_share_studies'])
 def test_overlapping_reports_cannot_be_counted_as_independent(kind):
     plan, evidence = example()

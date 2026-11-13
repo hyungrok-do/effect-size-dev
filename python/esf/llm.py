@@ -4,8 +4,8 @@ Claude Opus 5.5 is the manager by default: it reads the problem, plans the searc
 escalated extractions and reads the statistical context of each paper's numbers. Claude Haiku 5.5
 is the worker by default: it screens every record and makes the first-pass extraction of every
 paper. The page may pick other Claude models for either role. openai_llm.py gives OpenAI models the
-same steps. Arithmetic never happens here; the models only read, quote and select justified planning
-assumptions.
+same steps. Separate manager calls interpret and audit analysis profiles, then organize evidence
+tables. Arithmetic never happens here; mathematical synthesis remains a blueprint.
 """
 
 from __future__ import annotations
@@ -95,7 +95,8 @@ class LLM(Protocol):
     ) -> PaperExtraction: ...
 
     def study_context(
-        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None
+        self, spec: SearchSpec, document: dict, extraction: PaperExtraction, sink: UsageSink | None = None,
+        feedback: dict | None = None,
     ) -> StudyContext: ...
 
     def audit_context(self, spec: SearchSpec, document: dict, extraction: PaperExtraction,

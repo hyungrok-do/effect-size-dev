@@ -3,7 +3,8 @@
     spec (Opus) -> search plan (Opus + tools) -> run the levels from the top down (code) -> screen (Haiku)
     -> add what the included reviews cite (code) -> screen those (Haiku)
     -> full text (code) -> extract (Haiku) -> verify (code) -> adjudicate escalations (Opus)
-    -> read each paper's estimands and models (Opus) -> check its quotes (code) -> review (human)
+    -> interpret population/formulation/target (manager) -> source checks and separate semantic audit
+    -> at most one repair -> overlap -> table plan -> validated evidence tables (optional human review)
 """
 
 from __future__ import annotations
